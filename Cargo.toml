@@ -31,5 +31,8 @@ tokio = { version = "1", features = ["full"] }
 # Error handling
 eyre = "0.6"
 
+# CLI argument parsing
+clap = { version = "4", features = ["derive"] }
+
 [dev-dependencies]
 tempfile = "3"
