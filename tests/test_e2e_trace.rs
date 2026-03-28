@@ -1,8 +1,7 @@
 //! End-to-end integration test: compile, deploy, trace, and verify.
 //!
 //! Requires `solc` and `anvil` to be available on PATH.
-//! Marked `#[ignore]` so they only run when explicitly requested:
-//!   cargo test -- --ignored
+//! Requires `solc` and `anvil` on PATH (provided by the Nix dev shell).
 
 use std::process::Command;
 
@@ -43,7 +42,6 @@ fn compile_contract() -> serde_json::Value {
 }
 
 #[tokio::test]
-#[ignore = "requires solc and anvil on PATH"]
 async fn test_e2e_trace() {
     assert!(has_solc(), "solc must be available on PATH to run this test (use `nix develop` or install solc)");
     assert!(has_anvil(), "anvil must be available on PATH to run this test (use `nix develop` or install foundry)");
@@ -88,7 +86,11 @@ async fn test_e2e_trace() {
         .expect("failed to read FlowTest.sol");
 
     // 2. Spawn anvil
-    let anvil = alloy::node_bindings::Anvil::new().spawn();
+    // `--steps-tracing` is required for debug_traceTransaction to return non-empty
+    // structLogs in foundry/anvil >= 1.5.0. Without it, structLogs is always empty.
+    let anvil = alloy::node_bindings::Anvil::new()
+        .arg("--steps-tracing")
+        .spawn();
     let rpc_url = anvil.endpoint();
 
     // 3. Deploy the contract
