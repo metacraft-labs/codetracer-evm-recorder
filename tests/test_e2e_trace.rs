@@ -158,6 +158,7 @@ async fn test_e2e_trace() {
             &[source_path_ref],
             &[source_contents_ref],
             Some(&storage_layout),
+            None, // no AST for this e2e test
         )
         .unwrap();
 
