@@ -3,6 +3,10 @@ use codetracer_trace_writer::trace_writer::TraceWriter;
 use codetracer_trace_writer::{TraceEventsFileFormat, create_trace_writer};
 use std::path::{Path, PathBuf};
 
+use alloy::primitives::Address;
+
+use crate::call_tree::{CallTree, CallType};
+use crate::contract_registry::ContractRegistry;
 use crate::solidity_ast::SolidityAst;
 use crate::source_map::{self, JumpType, SourceMap};
 use crate::stack_tracker::StackTracker;
@@ -94,6 +98,7 @@ impl EvmRecorder {
     /// * `storage_layout` - Optional storage layout for decoding SSTORE operations.
     /// * `solidity_ast` - Optional Solidity AST for local variable reconstruction
     ///   (only effective for unoptimized Solidity code).
+    #[allow(clippy::too_many_arguments)]
     pub fn record_from_structlog(
         &mut self,
         struct_logs: &[StructLog],
@@ -322,49 +327,46 @@ impl EvmRecorder {
             }
 
             // --- SSTORE: decode storage writes ---
-            if log.op.as_ref() == "SSTORE" {
-                if let Some(ref stack) = log.stack {
-                    // SSTORE pops [slot, value] from the stack.
-                    // The top of the stack (last element) is the slot.
-                    if stack.len() >= 2 {
-                        let slot = stack[stack.len() - 1];
-                        let value = stack[stack.len() - 2];
+            if log.op.as_ref() == "SSTORE"
+                && let Some(ref stack) = log.stack
+                && stack.len() >= 2
+            {
+                let slot = stack[stack.len() - 1];
+                let value = stack[stack.len() - 2];
 
-                        let slot_decimal = slot.to_string();
-                        let value_hex = format!("0x{:x}", value);
+                let slot_decimal = slot.to_string();
+                let value_hex = format!("0x{:x}", value);
 
-                        // Try to resolve the variable name via storage layout
-                        let var_name = storage_layout
-                            .and_then(|sl| sl.resolve_slot(&slot_decimal))
-                            .map(|entry| entry.label.clone())
-                            .unwrap_or_else(|| format!("storage[{}]", slot_decimal));
+                // Try to resolve the variable name via storage layout
+                let var_name = storage_layout
+                    .and_then(|sl| sl.resolve_slot(&slot_decimal))
+                    .map(|entry| entry.label.clone())
+                    .unwrap_or_else(|| format!("storage[{}]", slot_decimal));
 
-                        let type_name = storage_layout
-                            .and_then(|sl| sl.resolve_slot(&slot_decimal))
-                            .and_then(|entry| {
-                                storage_layout
-                                    .and_then(|sl| sl.type_info(entry))
-                                    .map(|ti| ti.label.clone())
-                            })
-                            .unwrap_or_else(|| "uint256".to_string());
+                let type_name = storage_layout
+                    .and_then(|sl| sl.resolve_slot(&slot_decimal))
+                    .and_then(|entry| {
+                        storage_layout
+                            .and_then(|sl| sl.type_info(entry))
+                            .map(|ti| ti.label.clone())
+                    })
+                    .unwrap_or_else(|| "uint256".to_string());
 
-                        let type_id = TraceWriter::ensure_type_id(
-                            &mut *self.writer,
-                            TypeKind::Int,
-                            &type_name,
-                        );
+                let type_id = TraceWriter::ensure_type_id(
+                    &mut *self.writer,
+                    TypeKind::Int,
+                    &type_name,
+                );
 
-                        let val = ValueRecord::Raw {
-                            r: value_hex,
-                            type_id,
-                        };
-                        TraceWriter::register_variable_with_full_value(
-                            &mut *self.writer,
-                            &var_name,
-                            val,
-                        );
-                    }
-                }
+                let val = ValueRecord::Raw {
+                    r: value_hex,
+                    type_id,
+                };
+                TraceWriter::register_variable_with_full_value(
+                    &mut *self.writer,
+                    &var_name,
+                    val,
+                );
             }
 
             // --- LOG0..LOG4: emit Solidity events ---
@@ -400,6 +402,482 @@ impl EvmRecorder {
         }
 
         Ok(())
+    }
+
+    /// Process structLog entries with multi-contract support.
+    ///
+    /// Uses the [`ContractRegistry`] to switch source maps, storage layouts
+    /// and Solidity ASTs when execution crosses contract boundaries via
+    /// CALL / DELEGATECALL / STATICCALL / CREATE / CREATE2.
+    ///
+    /// # Arguments
+    ///
+    /// * `struct_logs` — structLog entries from `debug_traceTransaction`.
+    /// * `registry` — registry mapping addresses to their artifacts.
+    /// * `contract_address` — the address of the entry-point contract
+    ///   (the `to` field of the transaction).
+    ///
+    /// # Returns
+    ///
+    /// A [`CallTree`] capturing the complete call structure of the transaction.
+    #[allow(clippy::type_complexity)]
+    pub fn record_from_structlog_multi_contract(
+        &mut self,
+        struct_logs: &[StructLog],
+        registry: &ContractRegistry,
+        contract_address: Address,
+    ) -> eyre::Result<CallTree> {
+        if struct_logs.is_empty() {
+            return Ok(CallTree::new(contract_address));
+        }
+
+        // ---------- initial artifacts for the entry-point contract ----------
+        let initial_artifacts = registry.get(&contract_address);
+        let (init_source_map, init_bytecode, init_source_paths, init_source_contents,
+             init_storage_layout, init_solidity_ast) = match initial_artifacts {
+            Some(a) => (
+                Some(&a.source_map),
+                a.runtime_bytecode.as_slice(),
+                a.source_paths.as_slice(),
+                a.source_contents.as_slice(),
+                a.storage_layout.as_ref(),
+                a.solidity_ast.as_ref(),
+            ),
+            None => (None, &[][..], &[][..], &[][..], None, None),
+        };
+
+        // Build pc_to_idx for the initial contract.
+        let init_pc_to_idx_owned;
+        let init_pc_to_idx: &[usize] = if !init_bytecode.is_empty() {
+            init_pc_to_idx_owned = source_map::build_pc_to_instruction_index(init_bytecode);
+            &init_pc_to_idx_owned
+        } else if let Some(a) = initial_artifacts {
+            &a.pc_to_idx
+        } else {
+            &[]
+        };
+
+        // Determine the main source path for TraceWriter::start.
+        let main_path = if !init_source_paths.is_empty() {
+            &*init_source_paths[0]
+        } else {
+            Path::new("<unknown>")
+        };
+        TraceWriter::start(&mut *self.writer, main_path, Line(1));
+
+        let uint256_type_id = TypeId(
+            TraceWriter::ensure_type_id(&mut *self.writer, TypeKind::Int, "uint256").0,
+        );
+
+        // ---------- mutable "current context" pointers ----------
+        // We track the current source-map context as owned data on a stack
+        // indexed by EVM call depth.  Depth 1 = the entry-point frame.
+        //
+        // Each entry holds:
+        //   (address, source_map_ref, pc_to_idx_ref, source_paths_ref,
+        //    source_contents_ref, storage_layout_ref, solidity_ast_ref)
+        //
+        // Because lifetimes across the registry lookups are tricky we store
+        // the address and re-look up at every depth change.
+
+        struct FrameContext {
+            address: Address,
+            /// Whether this frame was entered via DELEGATECALL.
+            is_delegate: bool,
+            /// Proxy address for DELEGATECALL frames (for storage lookup).
+            delegate_proxy: Option<Address>,
+        }
+
+        let mut frame_stack: Vec<FrameContext> = vec![FrameContext {
+            address: contract_address,
+            is_delegate: false,
+            delegate_proxy: None,
+        }];
+
+        // Helper closure: resolve current source info from registry given the
+        // top-of-frame-stack entry.
+        // Returns (source_map, pc_to_idx, source_paths_strings, source_contents_strings,
+        //          storage_layout, solidity_ast)
+        // We borrow from the registry for each step.
+
+        let mut call_tree = CallTree::new(contract_address);
+        let mut prev_depth: u64 = 1;
+        let mut prev_line: Option<(i32, u32)> = None;
+        let mut stack_trackers: Vec<StackTracker> = Vec::new();
+
+        for (i, log) in struct_logs.iter().enumerate() {
+            let pc = log.pc as usize;
+
+            // ------------------------------------------------------------------
+            // Depth changes: enter / exit call frames
+            // ------------------------------------------------------------------
+            if log.depth > prev_depth {
+                // Entering a new call frame.
+                // Determine the target address from the *previous* step's stack.
+                // Guard: i == 0 means there is no previous log; treat as unknown.
+                let prev_log = if i > 0 { struct_logs.get(i - 1) } else { None };
+                let prev_op = prev_log.map(|l| l.op.as_ref()).unwrap_or("");
+                let prev_stack = prev_log.and_then(|l| l.stack.as_ref());
+
+                let (target_addr, call_ty, is_delegate, delegate_proxy) = match prev_op {
+                    "CALL" | "CALLCODE" => {
+                        // Stack (top-to-bottom): gas, addr, value, argsOffset, argsLen, retOffset, retLen
+                        // addr is at index stack.len()-2 (second from top)
+                        let addr = prev_stack
+                            .and_then(|s| s.get(s.len().wrapping_sub(2)))
+                            .map(|v| {
+                                let bytes = v.to_be_bytes::<32>();
+                                Address::from_slice(&bytes[12..])
+                            })
+                            .unwrap_or(Address::ZERO);
+                        (addr, CallType::Call, false, None)
+                    }
+                    "DELEGATECALL" => {
+                        // Stack: gas, addr, argsOffset, argsLen, retOffset, retLen
+                        let addr = prev_stack
+                            .and_then(|s| s.get(s.len().wrapping_sub(2)))
+                            .map(|v| {
+                                let bytes = v.to_be_bytes::<32>();
+                                Address::from_slice(&bytes[12..])
+                            })
+                            .unwrap_or(Address::ZERO);
+                        let proxy = frame_stack.last().map(|f| f.address).unwrap_or(Address::ZERO);
+                        (addr, CallType::DelegateCall, true, Some(proxy))
+                    }
+                    "STATICCALL" => {
+                        // Stack: gas, addr, argsOffset, argsLen, retOffset, retLen
+                        let addr = prev_stack
+                            .and_then(|s| s.get(s.len().wrapping_sub(2)))
+                            .map(|v| {
+                                let bytes = v.to_be_bytes::<32>();
+                                Address::from_slice(&bytes[12..])
+                            })
+                            .unwrap_or(Address::ZERO);
+                        (addr, CallType::StaticCall, false, None)
+                    }
+                    "CREATE" => (Address::ZERO, CallType::Create, false, None),
+                    "CREATE2" => (Address::ZERO, CallType::Create2, false, None),
+                    _ => (Address::ZERO, CallType::Call, false, None),
+                };
+
+                call_tree.enter_call(target_addr, call_ty, i);
+                frame_stack.push(FrameContext {
+                    address: target_addr,
+                    is_delegate,
+                    delegate_proxy,
+                });
+
+                // Reset prev_line so the first step in the new frame is always
+                // emitted (source paths/indices are relative to a different
+                // contract's artifact array after a cross-contract call).
+                prev_line = None;
+
+                // Emit a trace call event for the new frame.
+                let fn_name = format!("external_call_depth_{}", log.depth);
+                let call_path = prev_line
+                    .and_then(|(fi, _)| {
+                        // Use the source paths from the *caller* frame (still at prev_depth).
+                        let caller_addr = frame_stack
+                            .get(frame_stack.len().saturating_sub(2))
+                            .map(|f| f.address)
+                            .unwrap_or(contract_address);
+                        registry.get(&caller_addr)
+                            .and_then(|a| a.source_paths.get(fi as usize))
+                            .map(|p| p.as_path())
+                    })
+                    .unwrap_or(main_path);
+                let call_line = prev_line.map(|(_, l)| Line(l as i64)).unwrap_or(Line(0));
+                let fn_id = TraceWriter::ensure_function_id(
+                    &mut *self.writer,
+                    &fn_name,
+                    call_path,
+                    call_line,
+                );
+                TraceWriter::register_call(&mut *self.writer, fn_id, vec![]);
+
+                while stack_trackers.len() < log.depth as usize {
+                    stack_trackers.push(StackTracker::new());
+                }
+            } else if log.depth < prev_depth {
+                let depth_diff = prev_depth - log.depth;
+                for _ in 0..depth_diff {
+                    let ret_val = ValueRecord::Raw {
+                        r: "0x".to_string(),
+                        type_id: uint256_type_id,
+                    };
+                    TraceWriter::register_return(&mut *self.writer, ret_val);
+                    stack_trackers.pop();
+                    call_tree.exit_call(i);
+                    // Never pop the root frame (the entry-point contract).  An
+                    // unexpected depth-0 or multi-level drop must not leave the
+                    // frame_stack empty, which would otherwise cause a fallback
+                    // to the entry-point address for all subsequent lookups and
+                    // confuse the source-map selection.
+                    if frame_stack.len() > 1 {
+                        frame_stack.pop();
+                    }
+                }
+                // Reset prev_line after returning to the caller frame: the
+                // caller's source paths are relative to a different artifact
+                // array, so we must re-emit a step for the current location.
+                prev_line = None;
+            }
+
+            // Ensure trackers are sized for current depth.
+            while stack_trackers.len() < log.depth as usize {
+                stack_trackers.push(StackTracker::new());
+            }
+            let tracker_idx = (log.depth as usize).saturating_sub(1);
+            let tracker = &mut stack_trackers[tracker_idx];
+
+            // ------------------------------------------------------------------
+            // Resolve source artifacts for the current call frame
+            // ------------------------------------------------------------------
+            let current_addr = frame_stack.last().map(|f| f.address).unwrap_or(contract_address);
+            let is_delegate_frame = frame_stack.last().map(|f| f.is_delegate).unwrap_or(false);
+            let delegate_proxy = frame_stack.last().and_then(|f| f.delegate_proxy);
+
+            // We need to work with references that may or may not exist.
+            // To avoid borrow-checker issues with Option<&T> from registry we
+            // do the lookup here and produce local Option<&...> values.
+            let (cur_source_map, cur_pc_to_idx, cur_source_paths, cur_source_contents,
+                 cur_storage_layout, cur_solidity_ast):
+                (Option<&SourceMap>, &[usize], &[PathBuf], &[String],
+                 Option<&StorageLayout>, Option<&SolidityAst>) =
+            {
+                if is_delegate_frame {
+                    if let Some(proxy_addr) = delegate_proxy {
+                        if let Some(view) = registry.get_delegatecall(&current_addr, &proxy_addr) {
+                            (
+                                Some(view.source_map),
+                                view.pc_to_idx,
+                                view.source_paths,
+                                view.source_contents,
+                                view.storage_layout,
+                                view.solidity_ast,
+                            )
+                        } else {
+                            (None, &[], &[], &[], None, None)
+                        }
+                    } else {
+                        (None, &[], &[], &[], None, None)
+                    }
+                } else if let Some(a) = registry.get(&current_addr) {
+                    (
+                        Some(&a.source_map),
+                        &a.pc_to_idx,
+                        &a.source_paths,
+                        &a.source_contents,
+                        a.storage_layout.as_ref(),
+                        a.solidity_ast.as_ref(),
+                    )
+                } else {
+                    // Fall back to initial contract's data for unknown addresses.
+                    (init_source_map, init_pc_to_idx, init_source_paths, init_source_contents,
+                     init_storage_layout, init_solidity_ast)
+                }
+            };
+
+            // Convert &[String] to &[&str] slices that the existing helpers expect.
+            // We do this with a small temporary Vec allocated per step only when needed.
+            let source_contents_strs: Vec<&str> =
+                cur_source_contents.iter().map(|s| s.as_str()).collect();
+            let source_paths_paths: Vec<&Path> =
+                cur_source_paths.iter().map(|p| p.as_path()).collect();
+
+            let opcode: Option<u8> = opcode_from_name(log.op.as_ref());
+
+            let source_offset: Option<i32> = cur_source_map
+                .and_then(|sm| sm.get_entry_for_pc(pc, cur_pc_to_idx))
+                .filter(|e| e.file_index >= 0)
+                .map(|e| e.offset);
+
+            // ------------------------------------------------------------------
+            // Resolve PC to source location and emit step
+            // ------------------------------------------------------------------
+            let resolved_location = cur_source_map
+                .and_then(|sm| sm.resolve_pc(pc, cur_pc_to_idx, &source_contents_strs));
+
+            if let Some(location) = resolved_location {
+                let file_idx = location.file_index;
+                let line = location.line;
+                let current = (file_idx, line);
+
+                if prev_line != Some(current) {
+                    let step_path = source_paths_paths
+                        .get(file_idx as usize)
+                        .copied()
+                        .unwrap_or(main_path);
+                    TraceWriter::register_step(&mut *self.writer, step_path, Line(line as i64));
+                    prev_line = Some(current);
+                }
+
+                // Local variable tracking (M5 logic, applied per-frame).
+                if let Some(op) = opcode {
+                    if let (Some(ast), Some(src_off)) = (cur_solidity_ast, source_offset) {
+                        if let Some(func) = ast.function_at(src_off, file_idx) {
+                            let in_scope = func.vars_in_scope_at(src_off);
+                            let _ = tracker.process_step(op, pc, Some(src_off), &in_scope);
+
+                            if let Some(ref concrete_stack) = log.stack {
+                                for var in &in_scope {
+                                    if let Some(val) =
+                                        tracker.get_variable_value(&var.name, concrete_stack)
+                                    {
+                                        let type_id = TraceWriter::ensure_type_id(
+                                            &mut *self.writer,
+                                            TypeKind::Int,
+                                            &var.type_name,
+                                        );
+                                        let value_hex = format!("0x{:x}", val);
+                                        let val_record = ValueRecord::Raw {
+                                            r: value_hex,
+                                            type_id,
+                                        };
+                                        TraceWriter::register_variable_with_full_value(
+                                            &mut *self.writer,
+                                            &var.name,
+                                            val_record,
+                                        );
+                                    }
+                                }
+                            }
+                        } else {
+                            let _ = tracker.process_step(op, pc, Some(src_off), &[]);
+                        }
+                    } else {
+                        let _ = tracker.process_step(op, pc, source_offset, &[]);
+                    }
+                }
+
+                // Jump type: internal calls / returns.
+                if let Some(entry) = cur_source_map
+                    .and_then(|sm| sm.get_entry_for_pc(pc, cur_pc_to_idx))
+                {
+                    match entry.jump_type {
+                        JumpType::Into => {
+                            let fn_name = if let Some(next_log) = struct_logs.get(i + 1) {
+                                if let Some(next_loc) = cur_source_map.and_then(|sm| {
+                                    sm.resolve_pc(
+                                        next_log.pc as usize,
+                                        cur_pc_to_idx,
+                                        &source_contents_strs,
+                                    )
+                                }) {
+                                    format!(
+                                        "fn_at_{}:{}",
+                                        next_loc.file_index, next_loc.line
+                                    )
+                                } else {
+                                    format!("fn_at_pc_{}", next_log.pc)
+                                }
+                            } else {
+                                "unknown_fn".to_string()
+                            };
+
+                            let fn_path = source_paths_paths
+                                .get(file_idx as usize)
+                                .copied()
+                                .unwrap_or(main_path);
+                            let fn_id = TraceWriter::ensure_function_id(
+                                &mut *self.writer,
+                                &fn_name,
+                                fn_path,
+                                Line(line as i64),
+                            );
+                            TraceWriter::register_call(&mut *self.writer, fn_id, vec![]);
+                            tracker.reset();
+                        }
+                        JumpType::OutOf => {
+                            let ret_val = ValueRecord::Raw {
+                                r: "0x".to_string(),
+                                type_id: uint256_type_id,
+                            };
+                            TraceWriter::register_return(&mut *self.writer, ret_val);
+                            tracker.reset();
+                        }
+                        JumpType::Regular => {}
+                    }
+                }
+            } else if let Some(op) = opcode {
+                let _ = tracker.process_step(op, pc, source_offset, &[]);
+            }
+
+            // ------------------------------------------------------------------
+            // SSTORE: decode storage writes using current frame's storage layout
+            // ------------------------------------------------------------------
+            if log.op.as_ref() == "SSTORE"
+                && let Some(ref stack) = log.stack
+                && stack.len() >= 2
+            {
+                let slot = stack[stack.len() - 1];
+                let value = stack[stack.len() - 2];
+
+                let slot_decimal = slot.to_string();
+                let value_hex = format!("0x{:x}", value);
+
+                let var_name = cur_storage_layout
+                    .and_then(|sl| sl.resolve_slot(&slot_decimal))
+                    .map(|entry| entry.label.clone())
+                    .unwrap_or_else(|| format!("storage[{}]", slot_decimal));
+
+                let type_name = cur_storage_layout
+                    .and_then(|sl| sl.resolve_slot(&slot_decimal))
+                    .and_then(|entry| {
+                        cur_storage_layout
+                            .and_then(|sl| sl.type_info(entry))
+                            .map(|ti| ti.label.clone())
+                    })
+                    .unwrap_or_else(|| "uint256".to_string());
+
+                let type_id = TraceWriter::ensure_type_id(
+                    &mut *self.writer,
+                    TypeKind::Int,
+                    &type_name,
+                );
+                let val = ValueRecord::Raw { r: value_hex, type_id };
+                TraceWriter::register_variable_with_full_value(
+                    &mut *self.writer,
+                    &var_name,
+                    val,
+                );
+            }
+
+            // ------------------------------------------------------------------
+            // LOG0..LOG4: emit Solidity events
+            // ------------------------------------------------------------------
+            if log.op.as_ref().starts_with("LOG") {
+                let log_num = log
+                    .op
+                    .as_ref()
+                    .strip_prefix("LOG")
+                    .and_then(|n| n.parse::<u32>().ok())
+                    .unwrap_or(0);
+
+                if let Some(ref stack) = log.stack {
+                    let min_stack = 2 + log_num as usize;
+                    if stack.len() >= min_stack {
+                        let mut topics = Vec::new();
+                        for t in 0..log_num as usize {
+                            let topic_idx = stack.len() - 3 - t;
+                            if topic_idx < stack.len() {
+                                topics.push(format!("0x{:x}", stack[topic_idx]));
+                            }
+                        }
+                        let content = format!("LOG{}: {}", log_num, topics.join(", "));
+                        TraceWriter::register_special_event(
+                            &mut *self.writer,
+                            EventLogKind::Write,
+                            &content,
+                        );
+                    }
+                }
+            }
+
+            prev_depth = log.depth;
+        }
+
+        Ok(call_tree)
     }
 
     /// Finalize the trace output, flushing all buffered data.
