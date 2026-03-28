@@ -44,11 +44,17 @@ pub struct VarDecl {
     pub name: String,
     /// Solidity type name (e.g. `"uint256"`, `"address"`, `"bool"`).
     pub type_name: String,
-    /// Source range of the *variable declaration* node.
+    /// Source range of the *variable declaration* node (covers `uint256 a`).
     pub src: SourceRange,
     /// Byte offset in the source where this variable is first
     /// declared/assigned (same as `src.offset`).
     pub declaration_offset: i32,
+    /// Source range of the enclosing *VariableDeclarationStatement* node
+    /// (covers the whole `uint256 a = 10;`), if available.  This range is
+    /// needed for stack-tracker labelling because solc's source map may
+    /// point PUSH instructions to the initializer expression rather than
+    /// the declaration itself.
+    pub statement_range: Option<SourceRange>,
 }
 
 /// A function (or constructor / fallback) extracted from the AST.
@@ -220,6 +226,13 @@ impl SolidityAst {
         let node_type = node.get("nodeType").and_then(|v| v.as_str()).unwrap_or("");
 
         if node_type == "VariableDeclarationStatement" {
+            // Parse the statement-level source range (covers the whole
+            // `uint256 x = expr;` including the initializer).
+            let stmt_range = node
+                .get("src")
+                .and_then(|v| v.as_str())
+                .and_then(SourceRange::parse);
+
             // "declarations" is an array; each element is either a
             // VariableDeclaration node or null (for tuple destructuring blanks).
             if let Some(decls) = node.get("declarations").and_then(|v| v.as_array()) {
@@ -227,7 +240,8 @@ impl SolidityAst {
                     if decl.is_null() {
                         continue;
                     }
-                    if let Some(v) = Self::parse_var_decl_node(decl) {
+                    if let Some(mut v) = Self::parse_var_decl_node(decl) {
+                        v.statement_range = stmt_range.clone();
                         out.push(v);
                     }
                 }
@@ -278,7 +292,7 @@ impl SolidityAst {
             })
             .unwrap_or_else(|| "uint256".to_string());
 
-        Some(VarDecl { name, type_name, src, declaration_offset })
+        Some(VarDecl { name, type_name, src, declaration_offset, statement_range: None })
     }
 }
 
@@ -429,5 +443,66 @@ mod tests {
         assert_eq!(f.parameters[0].name, "x");
         assert_eq!(f.parameters[1].name, "y");
         assert_eq!(f.local_variables.len(), 0);
+        // Parameters don't come from VariableDeclarationStatement, so
+        // statement_range should be None.
+        assert!(f.parameters[0].statement_range.is_none());
+    }
+
+    #[test]
+    fn test_statement_range_captured() {
+        // Verify that local variables get their statement_range set from
+        // the enclosing VariableDeclarationStatement's src.
+        let json = r#"{
+            "sources": {
+                "S.sol": {
+                    "AST": {
+                        "nodeType": "SourceUnit",
+                        "nodes": [{
+                            "nodeType": "ContractDefinition",
+                            "name": "S",
+                            "nodes": [{
+                                "nodeType": "FunctionDefinition",
+                                "name": "f",
+                                "kind": "function",
+                                "src": "0:100:0",
+                                "parameters": { "parameters": [] },
+                                "body": {
+                                    "nodeType": "Block",
+                                    "statements": [{
+                                        "nodeType": "VariableDeclarationStatement",
+                                        "src": "20:18:0",
+                                        "declarations": [{
+                                            "nodeType": "VariableDeclaration",
+                                            "name": "x",
+                                            "src": "20:9:0",
+                                            "typeName": {
+                                                "nodeType": "ElementaryTypeName",
+                                                "name": "uint256"
+                                            }
+                                        }]
+                                    }]
+                                }
+                            }]
+                        }]
+                    }
+                }
+            }
+        }"#;
+
+        let ast = SolidityAst::from_combined_json(json).unwrap();
+        let f = &ast.functions[0];
+        assert_eq!(f.local_variables.len(), 1);
+        let var = &f.local_variables[0];
+        assert_eq!(var.name, "x");
+        // declaration src covers "uint256 x" (20:9)
+        assert_eq!(var.src.offset, 20);
+        assert_eq!(var.src.length, 9);
+        // statement range covers "uint256 x = 42;" (20:18)
+        let stmt = var.statement_range.as_ref().expect("statement_range should be set");
+        assert_eq!(stmt.offset, 20);
+        assert_eq!(stmt.length, 18);
+        // Offset 35 (within "= 42" part) is inside statement but outside decl
+        assert!(!var.src.contains_offset(35));
+        assert!(stmt.contains_offset(35));
     }
 }

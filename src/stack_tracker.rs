@@ -227,6 +227,40 @@ impl StackTracker {
             _ => {}
         }
 
+        // --- Post-processing: recover lost variable labels ---
+        //
+        // Solidity (unoptimized) initialises local variables with a common
+        // pattern:  PUSH0 (placeholder) → evaluate RHS → SWAP1 → POP.
+        //
+        // For literal initialisers (`uint256 a = 10`), the PUSH for the
+        // literal also falls inside the statement range, so we get two
+        // labelled slots and one survives the POP.
+        //
+        // For expression initialisers (`uint256 sum = a + b`), the RHS
+        // evaluation produces an anonymous result.  After SWAP+POP the
+        // label is on the popped placeholder and the actual value is left
+        // unlabelled.
+        //
+        // Recovery rule: if a variable's statement_range contains the
+        // current source offset but the variable has *no* labelled slot,
+        // label the top of stack with the variable name.  This catches
+        // the moment right after the POP removes the placeholder.
+        if let Some(offset) = source_offset {
+            for v in vars_in_scope {
+                if let Some(ref stmt) = v.statement_range {
+                    if stmt.contains_offset(offset) && !self.has_label(&v.name) {
+                        if let Some(top) = self.slots.last_mut() {
+                            *top = Some(v.name.clone());
+                            assignments.push(VarAssignment {
+                                name: v.name.clone(),
+                                stack_position: self.slots.len() - 1,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
         assignments
     }
 
@@ -263,6 +297,11 @@ impl StackTracker {
     // Private helpers
     // -----------------------------------------------------------------------
 
+    /// Check whether any slot currently carries the given label.
+    fn has_label(&self, name: &str) -> bool {
+        self.slots.iter().any(|s| s.as_deref() == Some(name))
+    }
+
     fn pop_n(&mut self, n: usize) {
         let new_len = self.slots.len().saturating_sub(n);
         self.slots.truncate(new_len);
@@ -283,22 +322,51 @@ impl StackTracker {
 
     /// Choose a label for a freshly-pushed value.
     ///
-    /// Strategy: if `source_offset` falls exactly on one of the variables'
-    /// declaration offsets, label the new slot with that variable's name.
+    /// Strategy: check if the source-map offset for this PUSH instruction
+    /// falls within the source range of a variable declaration.  We check
+    /// three ranges in priority order:
+    ///
+    /// 1. **Exact match** on `declaration_offset` (VariableDeclaration node).
+    /// 2. **Containment** within the VariableDeclaration's `src` range
+    ///    (`[src.offset, src.offset + src.length)`).
+    /// 3. **Containment** within the VariableDeclarationStatement's
+    ///    `statement_range` (covers the whole `uint256 x = expr;` including
+    ///    the initializer expression).
+    ///
+    /// This handles the common case where solc maps the PUSH for a literal
+    /// initializer to the expression offset (e.g. the `10` in `uint256 a = 10;`)
+    /// rather than the declaration itself.
     fn label_for_push(
         &self,
         source_offset: Option<i32>,
         vars_in_scope: &[&VarDecl],
     ) -> Option<String> {
         let offset = source_offset?;
-        // We look for variables whose declaration begins at exactly this offset
-        // or within a small window (handles cases where the PUSH is emitted
-        // for the RHS of `uint256 a = 10;` which maps to the whole statement).
+
+        // Priority 1: exact declaration offset match.
         for v in vars_in_scope {
             if v.declaration_offset == offset {
                 return Some(v.name.clone());
             }
         }
+
+        // Priority 2: offset within the VariableDeclaration's source range.
+        for v in vars_in_scope {
+            if v.src.contains_offset(offset) {
+                return Some(v.name.clone());
+            }
+        }
+
+        // Priority 3: offset within the enclosing statement range (covers
+        // the initializer expression).
+        for v in vars_in_scope {
+            if let Some(ref stmt) = v.statement_range {
+                if stmt.contains_offset(offset) {
+                    return Some(v.name.clone());
+                }
+            }
+        }
+
         None
     }
 }
@@ -348,6 +416,7 @@ mod tests {
             type_name: "uint256".to_string(),
             src: crate::solidity_ast::SourceRange { offset: 10, length: 9, file_index: 0 },
             declaration_offset: 10,
+            statement_range: None,
         };
         let vars = vec![&var];
 
@@ -375,12 +444,14 @@ mod tests {
             type_name: "uint256".to_string(),
             src: crate::solidity_ast::SourceRange { offset: 5, length: 1, file_index: 0 },
             declaration_offset: 5,
+            statement_range: None,
         };
         let var_b = VarDecl {
             name: "b".to_string(),
             type_name: "uint256".to_string(),
             src: crate::solidity_ast::SourceRange { offset: 20, length: 1, file_index: 0 },
             declaration_offset: 20,
+            statement_range: None,
         };
 
         // Push a (labelled), then b (labelled)
@@ -405,6 +476,7 @@ mod tests {
             type_name: "uint256".to_string(),
             src: crate::solidity_ast::SourceRange { offset: 99, length: 5, file_index: 0 },
             declaration_offset: 99,
+            statement_range: None,
         };
         // Push at a different offset — should not label
         let assignments = t.process_step(0x60, 0, Some(50), &[&var]);
@@ -420,12 +492,14 @@ mod tests {
             type_name: "uint256".to_string(),
             src: crate::solidity_ast::SourceRange { offset: 0, length: 1, file_index: 0 },
             declaration_offset: 0,
+            statement_range: None,
         };
         let var_b = VarDecl {
             name: "b".to_string(),
             type_name: "uint256".to_string(),
             src: crate::solidity_ast::SourceRange { offset: 10, length: 1, file_index: 0 },
             declaration_offset: 10,
+            statement_range: None,
         };
 
         t.process_step(0x60, 0, Some(0), &[&var_a]);
@@ -471,5 +545,73 @@ mod tests {
         t.process_step(0x60, 4, None, &[]); // depth 3
         t.process_step(0x5e, 6, None, &[]);
         assert_eq!(t.depth(), 0, "MCOPY should pop 3");
+    }
+
+    #[test]
+    fn test_label_via_statement_range() {
+        // Simulates `uint256 a = 10;` where:
+        //   - VariableDeclaration src: offset=100, length=9  (covers "uint256 a")
+        //   - VariableDeclarationStatement src: offset=100, length=15 (covers "uint256 a = 10;")
+        //   - PUSH1 for literal "10" maps to source offset 112 (within stmt range)
+        let mut t = StackTracker::new();
+        let var = VarDecl {
+            name: "a".to_string(),
+            type_name: "uint256".to_string(),
+            src: crate::solidity_ast::SourceRange { offset: 100, length: 9, file_index: 0 },
+            declaration_offset: 100,
+            statement_range: Some(crate::solidity_ast::SourceRange {
+                offset: 100,
+                length: 15,
+                file_index: 0,
+            }),
+        };
+        let vars = vec![&var];
+
+        // PUSH at offset 112 (the "10" literal) — exact match fails, decl range
+        // fails (100..109), but statement range succeeds (100..115).
+        let assignments = t.process_step(0x60, 0, Some(112), &vars);
+        assert_eq!(assignments.len(), 1, "should match via statement_range");
+        assert_eq!(assignments[0].name, "a");
+    }
+
+    #[test]
+    fn test_label_via_decl_src_range() {
+        // PUSH at an offset within the VariableDeclaration's src range but
+        // not at the exact declaration_offset.
+        let mut t = StackTracker::new();
+        let var = VarDecl {
+            name: "x".to_string(),
+            type_name: "uint256".to_string(),
+            src: crate::solidity_ast::SourceRange { offset: 50, length: 12, file_index: 0 },
+            declaration_offset: 50,
+            statement_range: None,
+        };
+        let vars = vec![&var];
+
+        // PUSH at offset 55 — within [50, 62) but not == 50
+        let assignments = t.process_step(0x60, 0, Some(55), &vars);
+        assert_eq!(assignments.len(), 1, "should match via decl src range containment");
+        assert_eq!(assignments[0].name, "x");
+    }
+
+    #[test]
+    fn test_no_label_outside_all_ranges() {
+        let mut t = StackTracker::new();
+        let var = VarDecl {
+            name: "z".to_string(),
+            type_name: "uint256".to_string(),
+            src: crate::solidity_ast::SourceRange { offset: 100, length: 9, file_index: 0 },
+            declaration_offset: 100,
+            statement_range: Some(crate::solidity_ast::SourceRange {
+                offset: 100,
+                length: 15,
+                file_index: 0,
+            }),
+        };
+        let vars = vec![&var];
+
+        // PUSH at offset 200 — outside all ranges
+        let assignments = t.process_step(0x60, 0, Some(200), &vars);
+        assert!(assignments.is_empty(), "should not match outside all ranges");
     }
 }
