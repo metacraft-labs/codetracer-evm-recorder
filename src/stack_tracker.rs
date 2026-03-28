@@ -158,7 +158,7 @@ impl StackTracker {
             // JUMPI
             0x57 => { self.pop_n(2); }
             // PC, MSIZE, GAS
-            0x58 | 0x59 | 0x5a => { self.push_anon(); }
+            0x58..=0x5a => { self.push_anon(); }
             // JUMPDEST
             0x5b => {}
             // TLOAD
@@ -249,12 +249,11 @@ impl StackTracker {
         // Walk top-to-bottom so the first occurrence of each name is the
         // most-recently pushed / active one.
         for (pos, slot) in self.slots.iter().enumerate().rev() {
-            if let Some(name) = slot {
-                if seen.insert(name.clone()) {
-                    if let Some(&val) = actual_stack.get(pos) {
-                        result.push((name.clone(), val));
-                    }
-                }
+            if let Some(name) = slot
+                && seen.insert(name.clone())
+                && let Some(&val) = actual_stack.get(pos)
+            {
+                result.push((name.clone(), val));
             }
         }
         result

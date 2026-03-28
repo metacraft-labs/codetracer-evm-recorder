@@ -1,8 +1,11 @@
+pub mod call_tree;
+pub mod contract_registry;
 pub mod inspector;
 pub mod recorder;
 pub mod replay;
 pub mod solidity_ast;
 pub mod source_map;
+pub mod source_fetcher;
 pub mod stack_tracker;
 pub mod storage_layout;
 pub mod structlog;

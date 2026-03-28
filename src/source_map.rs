@@ -76,7 +76,7 @@ impl SourceMap {
                     if s.is_empty() {
                         None
                     } else {
-                        Some(Self::parse_jump(*s))
+                        Some(Self::parse_jump(s))
                     }
                 })
                 .unwrap_or(prev.jump_type);
