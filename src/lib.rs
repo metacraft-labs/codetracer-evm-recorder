@@ -1,5 +1,6 @@
 pub mod inspector;
 pub mod recorder;
+pub mod replay;
 pub mod source_map;
 pub mod storage_layout;
 pub mod structlog;
