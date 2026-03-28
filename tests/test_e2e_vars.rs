@@ -685,3 +685,440 @@ async fn test_mapping_struct_storage() {
         sstore_count
     );
 }
+
+// ---------------------------------------------------------------------------
+// SyntaxTest.sol — comprehensive Solidity syntax form coverage
+// ---------------------------------------------------------------------------
+
+/// Helper: compile SyntaxTest.sol and parse the AST.
+fn compile_syntax_test() -> (serde_json::Value, String, SolidityAst) {
+    let (compiled, raw_json) = compile_contract("contracts/SyntaxTest.sol");
+    let ast = SolidityAst::from_combined_json(&raw_json).unwrap();
+    (compiled, raw_json, ast)
+}
+
+/// Helper: deploy SyntaxTest, call a function, and record the trace.
+async fn call_syntax_test(
+    func_sig: &str,
+    calldata_args: &[u8],
+) -> (
+    SolidityAst,
+    Vec<codetracer_evm_recorder::structlog::StructLog>,
+    tempfile::TempDir,
+) {
+    let (compiled, _raw_json, ast) = compile_syntax_test();
+    let arts = ContractArtifacts::from_compiled(&compiled, ":SyntaxTest");
+    let source_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("contracts/SyntaxTest.sol");
+    let source_contents = std::fs::read_to_string(&source_path).unwrap();
+
+    let helper = TraceHelper::new().await;
+    let contract = helper.deploy(&arts.deploy_hex, &[]).await;
+
+    let mut calldata = Vec::from(selector(func_sig));
+    calldata.extend_from_slice(calldata_args);
+
+    let struct_logs = helper.call_and_trace(contract, &calldata).await;
+
+    let trace_dir = record_trace(
+        "SyntaxTest",
+        &struct_logs,
+        &arts.source_map,
+        &arts.runtime_bytecode,
+        &source_path,
+        &source_contents,
+        arts.storage_layout.as_ref(),
+        &ast,
+    );
+
+    (ast, struct_logs, trace_dir)
+}
+
+/// SyntaxTest.namedReturns: verify named return variables are parsed as locals.
+#[tokio::test]
+async fn test_syntax_named_returns() {
+    assert!(has_solc(), "solc required");
+    assert!(has_anvil(), "anvil required");
+
+    let (_, _, ast) = compile_syntax_test();
+
+    let f = ast
+        .functions
+        .iter()
+        .find(|f| f.name == "namedReturns")
+        .expect("AST should contain `namedReturns`");
+
+    // Named return variables should appear as locals.
+    let local_names: Vec<_> = f.local_variables.iter().map(|v| v.name.as_str()).collect();
+    assert!(
+        local_names.contains(&"sum"),
+        "named return 'sum' should be a local; got {:?}",
+        local_names
+    );
+    assert!(
+        local_names.contains(&"product"),
+        "named return 'product' should be a local; got {:?}",
+        local_names
+    );
+
+    // Parameters should be a, b.
+    assert_eq!(f.parameters.len(), 2);
+
+    let mut args = Vec::new();
+    args.extend_from_slice(&U256::from(3).to_be_bytes::<32>());
+    args.extend_from_slice(&U256::from(7).to_be_bytes::<32>());
+
+    let (_ast, struct_logs, _trace_dir) =
+        call_syntax_test("namedReturns(uint256,uint256)", &args).await;
+
+    eprintln!(
+        "test_syntax_named_returns passed: {} struct logs, locals={:?}",
+        struct_logs.len(),
+        local_names
+    );
+}
+
+/// SyntaxTest.forLoop: verify for-loop init variable `i` is parsed.
+#[tokio::test]
+async fn test_syntax_for_loop_var() {
+    assert!(has_solc(), "solc required");
+    assert!(has_anvil(), "anvil required");
+
+    let (_, _, ast) = compile_syntax_test();
+
+    let f = ast
+        .functions
+        .iter()
+        .find(|f| f.name == "forLoop")
+        .expect("AST should contain `forLoop`");
+
+    let local_names: Vec<_> = f.local_variables.iter().map(|v| v.name.as_str()).collect();
+
+    // Named return `total` + for-loop init variable `i`.
+    assert!(
+        local_names.contains(&"total"),
+        "named return 'total' should be a local; got {:?}",
+        local_names
+    );
+    assert!(
+        local_names.contains(&"i"),
+        "for-loop variable 'i' should be a local; got {:?}",
+        local_names
+    );
+
+    let args = U256::from(5).to_be_bytes::<32>();
+    let (_ast, struct_logs, _trace_dir) =
+        call_syntax_test("forLoop(uint256)", &args).await;
+
+    // Loop runs 5 times → many struct log entries.
+    assert!(
+        struct_logs.len() > 50,
+        "forLoop(5) should produce many steps, got {}",
+        struct_logs.len()
+    );
+
+    eprintln!(
+        "test_syntax_for_loop_var passed: {} struct logs, locals={:?}",
+        struct_logs.len(),
+        local_names
+    );
+}
+
+/// SyntaxTest.whileLoop: verify while-loop variables.
+#[tokio::test]
+async fn test_syntax_while_loop() {
+    assert!(has_solc(), "solc required");
+    assert!(has_anvil(), "anvil required");
+
+    let (_, _, ast) = compile_syntax_test();
+
+    let f = ast
+        .functions
+        .iter()
+        .find(|f| f.name == "whileLoop")
+        .expect("AST should contain `whileLoop`");
+
+    let local_names: Vec<_> = f.local_variables.iter().map(|v| v.name.as_str()).collect();
+
+    // Named return `total` + explicitly declared `counter`.
+    assert!(
+        local_names.contains(&"total"),
+        "named return 'total' should be a local; got {:?}",
+        local_names
+    );
+    assert!(
+        local_names.contains(&"counter"),
+        "'counter' should be a local; got {:?}",
+        local_names
+    );
+
+    let args = U256::from(4).to_be_bytes::<32>();
+    let (_ast, struct_logs, _trace_dir) =
+        call_syntax_test("whileLoop(uint256)", &args).await;
+
+    eprintln!(
+        "test_syntax_while_loop passed: {} struct logs, locals={:?}",
+        struct_logs.len(),
+        local_names
+    );
+}
+
+/// SyntaxTest.uncheckedMath: verify variables inside `unchecked {}` blocks.
+#[tokio::test]
+async fn test_syntax_unchecked_block() {
+    assert!(has_solc(), "solc required");
+    assert!(has_anvil(), "anvil required");
+
+    let (_, _, ast) = compile_syntax_test();
+
+    let f = ast
+        .functions
+        .iter()
+        .find(|f| f.name == "uncheckedMath")
+        .expect("AST should contain `uncheckedMath`");
+
+    let local_names: Vec<_> = f.local_variables.iter().map(|v| v.name.as_str()).collect();
+
+    // Named return `result` + local `temp` inside unchecked block.
+    assert!(
+        local_names.contains(&"result"),
+        "named return 'result' should be a local; got {:?}",
+        local_names
+    );
+    assert!(
+        local_names.contains(&"temp"),
+        "'temp' inside unchecked block should be a local; got {:?}",
+        local_names
+    );
+
+    let mut args = Vec::new();
+    args.extend_from_slice(&U256::from(5).to_be_bytes::<32>());
+    args.extend_from_slice(&U256::from(3).to_be_bytes::<32>());
+
+    let (_ast, struct_logs, _trace_dir) =
+        call_syntax_test("uncheckedMath(uint256,uint256)", &args).await;
+
+    eprintln!(
+        "test_syntax_unchecked_block passed: {} struct logs, locals={:?}",
+        struct_logs.len(),
+        local_names
+    );
+}
+
+/// SyntaxTest.compoundOps: verify compound assignment tracking.
+#[tokio::test]
+async fn test_syntax_compound_ops() {
+    assert!(has_solc(), "solc required");
+    assert!(has_anvil(), "anvil required");
+
+    let args = U256::from(10).to_be_bytes::<32>();
+    let (_ast, struct_logs, _trace_dir) =
+        call_syntax_test("compoundOps(uint256)", &args).await;
+
+    // result = 10 → 20 → 17 → 34  (+=10, -=3, *=2)
+    eprintln!(
+        "test_syntax_compound_ops passed: {} struct logs",
+        struct_logs.len()
+    );
+}
+
+/// SyntaxTest.tupleDestructure: verify tuple destructuring variables.
+#[tokio::test]
+async fn test_syntax_tuple_destructure() {
+    assert!(has_solc(), "solc required");
+    assert!(has_anvil(), "anvil required");
+
+    let (_, _, ast) = compile_syntax_test();
+
+    let f = ast
+        .functions
+        .iter()
+        .find(|f| f.name == "tupleDestructure")
+        .expect("AST should contain `tupleDestructure`");
+
+    let local_names: Vec<_> = f.local_variables.iter().map(|v| v.name.as_str()).collect();
+
+    // Named returns sum, product + destructured locals s, p.
+    assert!(
+        local_names.contains(&"s"),
+        "destructured 's' should be a local; got {:?}",
+        local_names
+    );
+    assert!(
+        local_names.contains(&"p"),
+        "destructured 'p' should be a local; got {:?}",
+        local_names
+    );
+
+    let mut args = Vec::new();
+    args.extend_from_slice(&U256::from(4).to_be_bytes::<32>());
+    args.extend_from_slice(&U256::from(6).to_be_bytes::<32>());
+
+    let (_ast, struct_logs, _trace_dir) =
+        call_syntax_test("tupleDestructure(uint256,uint256)", &args).await;
+
+    eprintln!(
+        "test_syntax_tuple_destructure passed: {} struct logs, locals={:?}",
+        struct_logs.len(),
+        local_names
+    );
+}
+
+/// SyntaxTest.blockScope: verify variables in nested block scopes.
+#[tokio::test]
+async fn test_syntax_block_scope() {
+    assert!(has_solc(), "solc required");
+    assert!(has_anvil(), "anvil required");
+
+    let (_, _, ast) = compile_syntax_test();
+
+    let f = ast
+        .functions
+        .iter()
+        .find(|f| f.name == "blockScope")
+        .expect("AST should contain `blockScope`");
+
+    let local_names: Vec<_> = f.local_variables.iter().map(|v| v.name.as_str()).collect();
+
+    // Named return `result` + two `temp` variables in different blocks.
+    // Both have the same name but different offsets.
+    assert!(
+        local_names.contains(&"result"),
+        "named return 'result' should be a local; got {:?}",
+        local_names
+    );
+
+    // There should be exactly two `temp` declarations at different offsets.
+    let temp_vars: Vec<_> = f
+        .local_variables
+        .iter()
+        .filter(|v| v.name == "temp")
+        .collect();
+    assert_eq!(
+        temp_vars.len(),
+        2,
+        "should have two 'temp' declarations in different scopes; got {}",
+        temp_vars.len()
+    );
+    assert_ne!(
+        temp_vars[0].declaration_offset, temp_vars[1].declaration_offset,
+        "two 'temp' vars should have different offsets"
+    );
+
+    let args = U256::from(5).to_be_bytes::<32>();
+    let (_ast, struct_logs, _trace_dir) =
+        call_syntax_test("blockScope(uint256)", &args).await;
+
+    eprintln!(
+        "test_syntax_block_scope passed: {} struct logs, locals={:?}",
+        struct_logs.len(),
+        local_names
+    );
+}
+
+/// SyntaxTest.ternary: verify ternary conditional expression.
+#[tokio::test]
+async fn test_syntax_ternary() {
+    assert!(has_solc(), "solc required");
+    assert!(has_anvil(), "anvil required");
+
+    // Call ternary(true, 42, 99) → result should be 42
+    let mut args = Vec::new();
+    let mut bool_arg = [0u8; 32];
+    bool_arg[31] = 1; // true
+    args.extend_from_slice(&bool_arg);
+    args.extend_from_slice(&U256::from(42).to_be_bytes::<32>());
+    args.extend_from_slice(&U256::from(99).to_be_bytes::<32>());
+
+    let (_ast, struct_logs, _trace_dir) =
+        call_syntax_test("ternary(bool,uint256,uint256)", &args).await;
+
+    eprintln!(
+        "test_syntax_ternary passed: {} struct logs",
+        struct_logs.len()
+    );
+}
+
+/// SyntaxTest.typeCast: verify type conversions produce proper TypeKinds.
+#[tokio::test]
+async fn test_syntax_type_cast() {
+    assert!(has_solc(), "solc required");
+    assert!(has_anvil(), "anvil required");
+
+    let (_, _, ast) = compile_syntax_test();
+
+    let f = ast
+        .functions
+        .iter()
+        .find(|f| f.name == "typeCast")
+        .expect("AST should contain `typeCast`");
+
+    let local_names: Vec<_> = f
+        .local_variables
+        .iter()
+        .map(|v| (v.name.as_str(), v.type_name.as_str()))
+        .collect();
+
+    // Named returns: addr (address), flag (bool), hash (bytes32)
+    assert!(
+        local_names.iter().any(|(n, t)| *n == "addr" && *t == "address"),
+        "should have addr:address; got {:?}",
+        local_names
+    );
+    assert!(
+        local_names.iter().any(|(n, t)| *n == "flag" && *t == "bool"),
+        "should have flag:bool; got {:?}",
+        local_names
+    );
+    assert!(
+        local_names.iter().any(|(n, t)| *n == "hash" && *t == "bytes32"),
+        "should have hash:bytes32; got {:?}",
+        local_names
+    );
+
+    let args = U256::from(0x1234u64).to_be_bytes::<32>();
+    let (_ast, struct_logs, _trace_dir) =
+        call_syntax_test("typeCast(uint256)", &args).await;
+
+    eprintln!(
+        "test_syntax_type_cast passed: {} struct logs, locals={:?}",
+        struct_logs.len(),
+        local_names
+    );
+}
+
+/// SyntaxTest.multiAssign: verify multiple reassignments to the same variable.
+#[tokio::test]
+async fn test_syntax_multi_assign() {
+    assert!(has_solc(), "solc required");
+    assert!(has_anvil(), "anvil required");
+
+    let mut args = Vec::new();
+    args.extend_from_slice(&U256::from(3).to_be_bytes::<32>());
+    args.extend_from_slice(&U256::from(4).to_be_bytes::<32>());
+
+    let (_ast, struct_logs, _trace_dir) =
+        call_syntax_test("multiAssign(uint256,uint256)", &args).await;
+
+    // x = 3 → 7 → 14  (x = a, x = x + b, x = x * 2)
+    eprintln!(
+        "test_syntax_multi_assign passed: {} struct logs",
+        struct_logs.len()
+    );
+}
+
+/// SyntaxTest.incrDecr: verify increment/decrement operations.
+#[tokio::test]
+async fn test_syntax_incr_decr() {
+    assert!(has_solc(), "solc required");
+    assert!(has_anvil(), "anvil required");
+
+    let args = U256::from(10).to_be_bytes::<32>();
+    let (_ast, struct_logs, _trace_dir) =
+        call_syntax_test("incrDecr(uint256)", &args).await;
+
+    eprintln!(
+        "test_syntax_incr_decr passed: {} struct logs",
+        struct_logs.len()
+    );
+}

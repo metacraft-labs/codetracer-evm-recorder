@@ -13,6 +13,27 @@ use crate::stack_tracker::StackTracker;
 use crate::storage_layout::StorageLayout;
 use crate::structlog::StructLog;
 
+/// Map a Solidity type name to the appropriate CodeTracer `TypeKind`.
+fn type_kind_for_solidity_type(type_name: &str) -> TypeKind {
+    match type_name {
+        "bool" => TypeKind::Bool,
+        "string" => TypeKind::String,
+        "bytes" => TypeKind::Seq,
+        "address" | "address payable" => TypeKind::Raw,
+        s if s.starts_with("bytes") => {
+            // bytes1..bytes32 are fixed-size byte arrays (raw)
+            // but "bytes" (dynamic) is Seq — already handled above
+            TypeKind::Raw
+        }
+        s if s.starts_with("uint") || s.starts_with("int") => TypeKind::Int,
+        s if s.starts_with("enum ") => TypeKind::Int,
+        // Mappings, arrays, structs, contract types — fall back to Raw
+        // since on the stack they are represented as 256-bit values
+        // (storage slots, memory pointers, or addresses).
+        _ => TypeKind::Raw,
+    }
+}
+
 /// Main EVM trace recorder. Processes EVM execution traces (structLog or
 /// inspector-based) and writes them in CodeTracer's trace format.
 pub struct EvmRecorder {
@@ -237,9 +258,11 @@ impl EvmRecorder {
                                     if let Some(val) =
                                         tracker.get_variable_value(&var.name, concrete_stack)
                                     {
+                                        let type_kind =
+                                            type_kind_for_solidity_type(&var.type_name);
                                         let type_id = TraceWriter::ensure_type_id(
                                             &mut *self.writer,
-                                            TypeKind::Int,
+                                            type_kind,
                                             &var.type_name,
                                         );
                                         let value_hex = format!("0x{:x}", val);
