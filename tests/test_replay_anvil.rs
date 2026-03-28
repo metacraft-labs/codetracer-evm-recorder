@@ -1,6 +1,6 @@
 //! End-to-end replay test that requires a running Anvil instance.
 //!
-//! This test is marked `#[ignore]` because it requires:
+//! This test requires:
 //!   - `anvil` to be in PATH (from foundry)
 //!   - Network access (local loopback)
 //!
@@ -73,8 +73,7 @@ fn simple_contract_init_code() -> alloy::primitives::Bytes {
     alloy::primitives::Bytes::from(init)
 }
 
-#[tokio::test]
-#[ignore = "requires anvil to be installed and in PATH"]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_replay_anvil() {
     // ------------------------------------------------------------------ //
     // 1. Start anvil and create provider                                  //

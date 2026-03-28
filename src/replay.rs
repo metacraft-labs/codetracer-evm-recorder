@@ -60,6 +60,12 @@ pub async fn replay_transaction(rpc_url: &str, tx_hash: TxHash) -> Result<Execut
         .context("eth_getBlockByNumber failed")?
         .ok_or_else(|| eyre::eyre!("block {} not found", block_number))?;
 
+    // Fetch the chain ID early (before provider is moved into SharedBackend).
+    let chain_id = provider
+        .get_chain_id()
+        .await
+        .context("eth_chainId failed")?;
+
     // ------------------------------------------------------------------ //
     // 2.  Build a forked state pinned at the *parent* block               //
     // ------------------------------------------------------------------ //
@@ -105,6 +111,9 @@ pub async fn replay_transaction(rpc_url: &str, tx_hash: TxHash) -> Result<Execut
         RevmContext::new(db, spec);
     ctx.modify_block(|b| {
         *b = block_env;
+    });
+    ctx.modify_cfg(|cfg| {
+        cfg.chain_id = chain_id;
     });
 
     let mut evm = ctx.build_mainnet_with_inspector(NoOpInspector);
