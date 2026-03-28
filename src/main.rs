@@ -36,6 +36,7 @@ use clap::{Parser, Subcommand};
 use eyre::{Context, Result};
 
 use codetracer_evm_recorder::recorder::EvmRecorder;
+use codetracer_evm_recorder::solidity_ast::SolidityAst;
 use codetracer_evm_recorder::source_map::SourceMap;
 use codetracer_evm_recorder::storage_layout::StorageLayout;
 use codetracer_evm_recorder::trace_fetcher;
@@ -121,7 +122,7 @@ async fn record(args: RecordArgs) -> Result<()> {
     let compile_output = Command::new(&solc_cmd)
         .args([
             "--combined-json",
-            "abi,bin,bin-runtime,srcmap-runtime,storage-layout",
+            "abi,bin,bin-runtime,srcmap-runtime,storage-layout,ast",
             "--no-cbor-metadata",
             source_path.to_str().unwrap(),
         ])
@@ -136,8 +137,16 @@ async fn record(args: RecordArgs) -> Result<()> {
         ));
     }
 
-    let compiled: serde_json::Value = serde_json::from_slice(&compile_output.stdout)
-        .context("solc output is not valid JSON")?;
+    let compiled_json_str =
+        String::from_utf8(compile_output.stdout.clone()).context("solc output is not valid UTF-8")?;
+    let compiled: serde_json::Value =
+        serde_json::from_str(&compiled_json_str).context("solc output is not valid JSON")?;
+
+    // Parse the Solidity AST for local variable extraction.
+    // The combined-json output includes AST data in a "sources" key that
+    // SolidityAst::from_combined_json knows how to parse.
+    let solidity_ast = SolidityAst::from_combined_json(&compiled_json_str)
+        .context("failed to parse Solidity AST from solc output")?;
 
     // -----------------------------------------------------------------------
     // 2. Extract the first contract from the compiled output
@@ -364,7 +373,7 @@ async fn record(args: RecordArgs) -> Result<()> {
             &[source_path_ref],
             &[source_contents.as_str()],
             storage_layout.as_ref(),
-            None, // no AST for CLI recording
+            Some(&solidity_ast),
         )
         .context("recorder failed to process structlogs")?;
 
