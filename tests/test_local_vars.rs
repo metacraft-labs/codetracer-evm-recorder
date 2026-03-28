@@ -25,6 +25,7 @@ fn make_var(name: &str, type_name: &str, offset: i32) -> VarDecl {
             file_index: 0,
         },
         declaration_offset: offset,
+        statement_range: None,
     }
 }
 

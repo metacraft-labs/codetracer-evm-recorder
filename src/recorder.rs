@@ -214,6 +214,12 @@ impl EvmRecorder {
                 // --- Local variable emission (M5) ---
                 // After each step we check the in-scope variables and emit
                 // current values from the concrete stack.
+                //
+                // Important: structLog's `stack` is the state BEFORE the
+                // opcode executes.  The symbolic tracker models the state
+                // AFTER the opcode.  To reconcile, we look up concrete
+                // values from the NEXT step's stack (which reflects the
+                // post-execution state of the current opcode).
                 if let Some(op) = opcode {
                     if let (Some(ast), Some(src_off)) = (solidity_ast, source_offset) {
                         if let Some(func) = ast.function_at(src_off, file_idx) {
@@ -221,8 +227,12 @@ impl EvmRecorder {
                             // Update the symbolic tracker with in-scope variable info.
                             let _ = tracker.process_step(op, pc, Some(src_off), &in_scope);
 
-                            // Emit current values for all in-scope variables.
-                            if let Some(ref concrete_stack) = log.stack {
+                            // Use the next step's stack for value lookup (post-execution).
+                            let post_stack = struct_logs
+                                .get(i + 1)
+                                .and_then(|next| next.stack.as_ref());
+
+                            if let Some(concrete_stack) = post_stack {
                                 for var in &in_scope {
                                     if let Some(val) =
                                         tracker.get_variable_value(&var.name, concrete_stack)
