@@ -204,7 +204,7 @@ impl SolidityAst {
                 .to_string(),
         };
 
-        // Parameters
+        // Input parameters
         let parameters = node
             .get("parameters")
             .and_then(|p| p.get("parameters"))
@@ -212,8 +212,26 @@ impl SolidityAst {
             .map(|arr| arr.iter().filter_map(Self::parse_var_decl_node).collect())
             .unwrap_or_default();
 
-        // Collect all VariableDeclarationStatement nodes from the body.
+        // Named return variables — these are implicitly declared locals
+        // initialized to their type's zero value.  They are visible
+        // throughout the function body, so we treat them like locals.
         let mut local_variables: Vec<VarDecl> = Vec::new();
+        if let Some(ret_params) = node
+            .get("returnParameters")
+            .and_then(|p| p.get("parameters"))
+            .and_then(|v| v.as_array())
+        {
+            for rp in ret_params {
+                if let Some(v) = Self::parse_var_decl_node(rp) {
+                    // Only add named return variables (unnamed have empty name).
+                    if !v.name.is_empty() {
+                        local_variables.push(v);
+                    }
+                }
+            }
+        }
+
+        // Collect all VariableDeclarationStatement nodes from the body.
         if let Some(body) = node.get("body") {
             Self::collect_local_vars(body, &mut local_variables);
         }
@@ -248,8 +266,25 @@ impl SolidityAst {
             }
         }
 
-        // Recurse into sub-nodes.
-        for key in &["statements", "body", "trueBody", "falseBody", "loopExpression"] {
+        // Recurse into sub-nodes that may contain variable declarations.
+        //
+        // - statements:                Block, UncheckedBlock
+        // - body:                      ForStatement, WhileStatement, DoWhileStatement
+        // - trueBody / falseBody:      IfStatement
+        // - initializationExpression:  ForStatement (e.g. `uint i = 0`)
+        // - loopExpression:            ForStatement (e.g. `i++`)
+        // - clauses:                   TryStatement (array of TryCatchClause)
+        // - block:                     TryCatchClause body
+        for key in &[
+            "statements",
+            "body",
+            "trueBody",
+            "falseBody",
+            "initializationExpression",
+            "loopExpression",
+            "clauses",
+            "block",
+        ] {
             if let Some(child) = node.get(key) {
                 if let Some(arr) = child.as_array() {
                     for item in arr {
@@ -257,6 +292,24 @@ impl SolidityAst {
                     }
                 } else {
                     Self::collect_local_vars(child, out);
+                }
+            }
+        }
+
+        // TryCatchClause: extract the error parameters (e.g. `string memory reason`
+        // in `catch Error(string memory reason) { ... }`).
+        if node_type == "TryCatchClause" {
+            if let Some(params) = node
+                .get("parameters")
+                .and_then(|p| p.get("parameters"))
+                .and_then(|v| v.as_array())
+            {
+                for p in params {
+                    if let Some(v) = Self::parse_var_decl_node(p) {
+                        if !v.name.is_empty() {
+                            out.push(v);
+                        }
+                    }
                 }
             }
         }
@@ -504,5 +557,173 @@ mod tests {
         // Offset 35 (within "= 42" part) is inside statement but outside decl
         assert!(!var.src.contains_offset(35));
         assert!(stmt.contains_offset(35));
+    }
+
+    #[test]
+    fn test_named_return_variables() {
+        let json = r#"{
+            "sources": {
+                "T.sol": {
+                    "AST": {
+                        "nodeType": "SourceUnit",
+                        "nodes": [{
+                            "nodeType": "ContractDefinition",
+                            "name": "T",
+                            "nodes": [{
+                                "nodeType": "FunctionDefinition",
+                                "name": "calc",
+                                "kind": "function",
+                                "src": "0:100:0",
+                                "parameters": {
+                                    "parameters": [{
+                                        "nodeType": "VariableDeclaration",
+                                        "name": "a",
+                                        "src": "10:9:0",
+                                        "typeName": {"nodeType": "ElementaryTypeName", "name": "uint256"}
+                                    }]
+                                },
+                                "returnParameters": {
+                                    "parameters": [
+                                        {
+                                            "nodeType": "VariableDeclaration",
+                                            "name": "sum",
+                                            "src": "30:9:0",
+                                            "typeName": {"nodeType": "ElementaryTypeName", "name": "uint256"}
+                                        },
+                                        {
+                                            "nodeType": "VariableDeclaration",
+                                            "name": "",
+                                            "src": "41:7:0",
+                                            "typeName": {"nodeType": "ElementaryTypeName", "name": "uint256"}
+                                        }
+                                    ]
+                                },
+                                "body": {
+                                    "nodeType": "Block",
+                                    "statements": []
+                                }
+                            }]
+                        }]
+                    }
+                }
+            }
+        }"#;
+
+        let ast = SolidityAst::from_combined_json(json).unwrap();
+        let f = &ast.functions[0];
+        assert_eq!(f.parameters.len(), 1);
+        assert_eq!(f.parameters[0].name, "a");
+        // Named return "sum" should appear as a local, but unnamed return should not.
+        assert_eq!(f.local_variables.len(), 1);
+        assert_eq!(f.local_variables[0].name, "sum");
+    }
+
+    #[test]
+    fn test_for_loop_init_variable() {
+        let json = r#"{
+            "sources": {
+                "T.sol": {
+                    "AST": {
+                        "nodeType": "SourceUnit",
+                        "nodes": [{
+                            "nodeType": "ContractDefinition",
+                            "name": "T",
+                            "nodes": [{
+                                "nodeType": "FunctionDefinition",
+                                "name": "loop",
+                                "kind": "function",
+                                "src": "0:200:0",
+                                "parameters": { "parameters": [] },
+                                "returnParameters": { "parameters": [] },
+                                "body": {
+                                    "nodeType": "Block",
+                                    "statements": [{
+                                        "nodeType": "ForStatement",
+                                        "src": "50:80:0",
+                                        "initializationExpression": {
+                                            "nodeType": "VariableDeclarationStatement",
+                                            "src": "55:12:0",
+                                            "declarations": [{
+                                                "nodeType": "VariableDeclaration",
+                                                "name": "i",
+                                                "src": "55:9:0",
+                                                "typeName": {"nodeType": "ElementaryTypeName", "name": "uint256"}
+                                            }]
+                                        },
+                                        "body": {
+                                            "nodeType": "Block",
+                                            "statements": [{
+                                                "nodeType": "VariableDeclarationStatement",
+                                                "src": "100:18:0",
+                                                "declarations": [{
+                                                    "nodeType": "VariableDeclaration",
+                                                    "name": "temp",
+                                                    "src": "100:9:0",
+                                                    "typeName": {"nodeType": "ElementaryTypeName", "name": "uint256"}
+                                                }]
+                                            }]
+                                        }
+                                    }]
+                                }
+                            }]
+                        }]
+                    }
+                }
+            }
+        }"#;
+
+        let ast = SolidityAst::from_combined_json(json).unwrap();
+        let f = &ast.functions[0];
+        let local_names: Vec<_> = f.local_variables.iter().map(|v| v.name.as_str()).collect();
+        // Both the for-loop init var "i" and the body var "temp" should be collected.
+        assert!(local_names.contains(&"i"), "for-loop init var 'i' should be collected; got {:?}", local_names);
+        assert!(local_names.contains(&"temp"), "for-loop body var 'temp' should be collected; got {:?}", local_names);
+    }
+
+    #[test]
+    fn test_unchecked_block_variables() {
+        let json = r#"{
+            "sources": {
+                "T.sol": {
+                    "AST": {
+                        "nodeType": "SourceUnit",
+                        "nodes": [{
+                            "nodeType": "ContractDefinition",
+                            "name": "T",
+                            "nodes": [{
+                                "nodeType": "FunctionDefinition",
+                                "name": "f",
+                                "kind": "function",
+                                "src": "0:100:0",
+                                "parameters": { "parameters": [] },
+                                "returnParameters": { "parameters": [] },
+                                "body": {
+                                    "nodeType": "Block",
+                                    "statements": [{
+                                        "nodeType": "UncheckedBlock",
+                                        "src": "20:50:0",
+                                        "statements": [{
+                                            "nodeType": "VariableDeclarationStatement",
+                                            "src": "30:18:0",
+                                            "declarations": [{
+                                                "nodeType": "VariableDeclaration",
+                                                "name": "x",
+                                                "src": "30:9:0",
+                                                "typeName": {"nodeType": "ElementaryTypeName", "name": "uint256"}
+                                            }]
+                                        }]
+                                    }]
+                                }
+                            }]
+                        }]
+                    }
+                }
+            }
+        }"#;
+
+        let ast = SolidityAst::from_combined_json(json).unwrap();
+        let f = &ast.functions[0];
+        assert_eq!(f.local_variables.len(), 1);
+        assert_eq!(f.local_variables[0].name, "x");
     }
 }
