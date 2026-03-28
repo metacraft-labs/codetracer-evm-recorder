@@ -1,0 +1,35 @@
+[package]
+name = "codetracer-evm-recorder"
+version = "0.1.0"
+edition = "2024"
+authors = ["Metacraft Labs Ltd"]
+description = "CodeTracer recorder for EVM smart contracts (Solidity/Vyper)"
+license = "Apache-2.0"
+
+[dependencies]
+# CodeTracer trace format
+codetracer_trace_types = "0.16"
+codetracer_trace_writer = "0.17"
+
+# EVM execution
+revm = "34"
+revm-inspectors = "0.34"
+
+# State forking for on-chain replay
+foundry-fork-db = "0.23"
+
+# Ethereum types and RPC
+alloy = { version = "1", features = ["full", "node-bindings"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Error handling
+eyre = "0.6"
+
+[dev-dependencies]
+tempfile = "3"
