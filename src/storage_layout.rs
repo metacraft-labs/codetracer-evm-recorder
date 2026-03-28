@@ -68,6 +68,12 @@ impl StorageLayout {
         self.storage.iter().find(|e| e.label == label)
     }
 
+    /// Resolve a storage slot number (decimal string) to the corresponding
+    /// storage entry, if any.
+    pub fn resolve_slot(&self, slot: &str) -> Option<&StorageEntry> {
+        self.storage.iter().find(|e| e.slot == slot)
+    }
+
     /// Get the type info for a storage entry.
     pub fn type_info(&self, entry: &StorageEntry) -> Option<&StorageTypeInfo> {
         self.types.get(&entry.type_name)
