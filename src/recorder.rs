@@ -3,7 +3,9 @@ use codetracer_trace_writer::trace_writer::TraceWriter;
 use codetracer_trace_writer::{TraceEventsFileFormat, create_trace_writer};
 use std::path::{Path, PathBuf};
 
+use crate::solidity_ast::SolidityAst;
 use crate::source_map::{self, JumpType, SourceMap};
+use crate::stack_tracker::StackTracker;
 use crate::storage_layout::StorageLayout;
 use crate::structlog::StructLog;
 
@@ -79,8 +81,8 @@ impl EvmRecorder {
     }
 
     /// Process a sequence of structLog entries with the given source map,
-    /// bytecode, source file contents, source file paths, and optional
-    /// storage layout, emitting corresponding trace events.
+    /// bytecode, source file contents, source file paths, optional storage
+    /// layout, and optional Solidity AST, emitting corresponding trace events.
     ///
     /// # Arguments
     ///
@@ -90,6 +92,8 @@ impl EvmRecorder {
     /// * `source_paths` - Paths of the source files (indexed by file_index).
     /// * `source_contents` - Contents of the source files (indexed by file_index).
     /// * `storage_layout` - Optional storage layout for decoding SSTORE operations.
+    /// * `solidity_ast` - Optional Solidity AST for local variable reconstruction
+    ///   (only effective for unoptimized Solidity code).
     pub fn record_from_structlog(
         &mut self,
         struct_logs: &[StructLog],
@@ -98,6 +102,7 @@ impl EvmRecorder {
         source_paths: &[&Path],
         source_contents: &[&str],
         storage_layout: Option<&StorageLayout>,
+        solidity_ast: Option<&SolidityAst>,
     ) -> eyre::Result<()> {
         if struct_logs.is_empty() {
             return Ok(());
@@ -121,6 +126,12 @@ impl EvmRecorder {
         let mut prev_line: Option<(i32, u32)> = None; // (file_index, line)
         let mut prev_depth: u64 = 1;
 
+        // --- Local variable tracking (M5) ---
+        // One StackTracker per call-stack depth.  We keep a small Vec indexed
+        // by depth (depth 1 = index 0).  Resetting on depth changes keeps the
+        // symbolic stack consistent with the real EVM stack.
+        let mut stack_trackers: Vec<StackTracker> = Vec::new();
+
         for (i, log) in struct_logs.iter().enumerate() {
             let pc = log.pc as usize;
 
@@ -140,6 +151,10 @@ impl EvmRecorder {
                     call_line,
                 );
                 TraceWriter::register_call(&mut *self.writer, fn_id, vec![]);
+                // Push a fresh tracker for the new call depth.
+                while stack_trackers.len() < log.depth as usize {
+                    stack_trackers.push(StackTracker::new());
+                }
             } else if log.depth < prev_depth {
                 // Returning from an external call
                 let depth_diff = prev_depth - log.depth;
@@ -149,8 +164,26 @@ impl EvmRecorder {
                         type_id: uint256_type_id,
                     };
                     TraceWriter::register_return(&mut *self.writer, ret_val);
+                    // Pop the tracker for the exited depth.
+                    stack_trackers.pop();
                 }
             }
+
+            // Ensure we always have a tracker for the current depth.
+            while stack_trackers.len() < log.depth as usize {
+                stack_trackers.push(StackTracker::new());
+            }
+            let tracker_idx = (log.depth as usize).saturating_sub(1);
+            let tracker = &mut stack_trackers[tracker_idx];
+
+            // Decode the opcode byte (first byte of log.op hex, or look up by name).
+            let opcode: Option<u8> = opcode_from_name(log.op.as_ref());
+
+            // Resolve the source map entry for this PC to get the byte offset.
+            let source_offset: Option<i32> = source_map
+                .get_entry_for_pc(pc, &pc_to_idx)
+                .filter(|e| e.file_index >= 0)
+                .map(|e| e.offset);
 
             // --- Resolve PC to source location ---
             if let Some(location) = source_map.resolve_pc(pc, &pc_to_idx, source_contents)
@@ -171,6 +204,52 @@ impl EvmRecorder {
                         Line(line as i64),
                     );
                     prev_line = Some(current);
+                }
+
+                // --- Local variable emission (M5) ---
+                // After each step we check the in-scope variables and emit
+                // current values from the concrete stack.
+                if let Some(op) = opcode {
+                    if let (Some(ast), Some(src_off)) = (solidity_ast, source_offset) {
+                        if let Some(func) = ast.function_at(src_off, file_idx) {
+                            let in_scope = func.vars_in_scope_at(src_off);
+                            // Update the symbolic tracker with in-scope variable info.
+                            let _ = tracker.process_step(op, pc, Some(src_off), &in_scope);
+
+                            // Emit current values for all in-scope variables.
+                            if let Some(ref concrete_stack) = log.stack {
+                                for var in &in_scope {
+                                    if let Some(val) =
+                                        tracker.get_variable_value(&var.name, concrete_stack)
+                                    {
+                                        let type_id = TraceWriter::ensure_type_id(
+                                            &mut *self.writer,
+                                            TypeKind::Int,
+                                            &var.type_name,
+                                        );
+                                        let value_hex = format!("0x{:x}", val);
+                                        let val_record = ValueRecord::Raw {
+                                            r: value_hex,
+                                            type_id,
+                                        };
+                                        TraceWriter::register_variable_with_full_value(
+                                            &mut *self.writer,
+                                            &var.name,
+                                            val_record,
+                                        );
+                                    }
+                                }
+                            }
+                        } else {
+                            // AST present but this PC is outside any known function
+                            // (e.g., contract preamble / dispatcher). Still advance
+                            // the tracker so the symbolic stack stays in sync.
+                            let _ = tracker.process_step(op, pc, Some(src_off), &[]);
+                        }
+                    } else {
+                        // No AST, or no source offset — still advance the tracker.
+                        let _ = tracker.process_step(op, pc, source_offset, &[]);
+                    }
                 }
 
                 // --- Jump type: internal calls / returns ---
@@ -216,6 +295,9 @@ impl EvmRecorder {
                                 fn_id,
                                 vec![],
                             );
+                            // Reset the tracker when entering an internal function
+                            // so we start fresh for the callee's locals.
+                            tracker.reset();
                         }
                         JumpType::OutOf => {
                             // Internal function return
@@ -227,9 +309,15 @@ impl EvmRecorder {
                                 &mut *self.writer,
                                 ret_val,
                             );
+                            tracker.reset();
                         }
                         JumpType::Regular => {}
                     }
+                }
+            } else {
+                // No source location — still advance the tracker.
+                if let Some(op) = opcode {
+                    let _ = tracker.process_step(op, pc, source_offset, &[]);
                 }
             }
 
@@ -324,4 +412,125 @@ impl EvmRecorder {
             .map_err(|e| eyre::eyre!("{}", e))?;
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: map opcode mnemonic string to opcode byte
+// ---------------------------------------------------------------------------
+
+/// Convert a structLog `op` string (e.g. `"PUSH1"`, `"ADD"`) to its raw
+/// opcode byte.  Returns `None` for unknown mnemonics.
+fn opcode_from_name(name: &str) -> Option<u8> {
+    // Handle PUSH1..PUSH32, DUP1..DUP16, SWAP1..SWAP16
+    if let Some(n) = name.strip_prefix("PUSH") {
+        let n: u8 = n.parse().ok()?;
+        if n == 0 {
+            return Some(0x5f); // PUSH0
+        }
+        if (1..=32).contains(&n) {
+            return Some(0x5f + n);
+        }
+    }
+    if let Some(n) = name.strip_prefix("DUP") {
+        let n: u8 = n.parse().ok()?;
+        if (1..=16).contains(&n) {
+            return Some(0x7f + n);
+        }
+    }
+    if let Some(n) = name.strip_prefix("SWAP") {
+        let n: u8 = n.parse().ok()?;
+        if (1..=16).contains(&n) {
+            return Some(0x8f + n);
+        }
+    }
+    if let Some(n) = name.strip_prefix("LOG") {
+        let n: u8 = n.parse().ok()?;
+        if n <= 4 {
+            return Some(0xa0 + n);
+        }
+    }
+
+    Some(match name {
+        "STOP" => 0x00,
+        "ADD" => 0x01,
+        "MUL" => 0x02,
+        "SUB" => 0x03,
+        "DIV" => 0x04,
+        "SDIV" => 0x05,
+        "MOD" => 0x06,
+        "SMOD" => 0x07,
+        "ADDMOD" => 0x08,
+        "MULMOD" => 0x09,
+        "EXP" => 0x0a,
+        "SIGNEXTEND" => 0x0b,
+        "LT" => 0x10,
+        "GT" => 0x11,
+        "SLT" => 0x12,
+        "SGT" => 0x13,
+        "EQ" => 0x14,
+        "ISZERO" => 0x15,
+        "AND" => 0x16,
+        "OR" => 0x17,
+        "XOR" => 0x18,
+        "NOT" => 0x19,
+        "BYTE" => 0x1a,
+        "SHL" => 0x1b,
+        "SHR" => 0x1c,
+        "SAR" => 0x1d,
+        "SHA3" | "KECCAK256" => 0x20,
+        "ADDRESS" => 0x30,
+        "BALANCE" => 0x31,
+        "ORIGIN" => 0x32,
+        "CALLER" => 0x33,
+        "CALLVALUE" => 0x34,
+        "CALLDATALOAD" => 0x35,
+        "CALLDATASIZE" => 0x36,
+        "CALLDATACOPY" => 0x37,
+        "CODESIZE" => 0x38,
+        "CODECOPY" => 0x39,
+        "GASPRICE" => 0x3a,
+        "EXTCODESIZE" => 0x3b,
+        "EXTCODECOPY" => 0x3c,
+        "RETURNDATASIZE" => 0x3d,
+        "RETURNDATACOPY" => 0x3e,
+        "EXTCODEHASH" => 0x3f,
+        "BLOCKHASH" => 0x40,
+        "COINBASE" => 0x41,
+        "TIMESTAMP" => 0x42,
+        "NUMBER" => 0x43,
+        "PREVRANDAO" | "DIFFICULTY" => 0x44,
+        "GASLIMIT" => 0x45,
+        "CHAINID" => 0x46,
+        "SELFBALANCE" => 0x47,
+        "BASEFEE" => 0x48,
+        "BLOBHASH" => 0x49,
+        "BLOBBASEFEE" => 0x4a,
+        "POP" => 0x50,
+        "MLOAD" => 0x51,
+        "MSTORE" => 0x52,
+        "MSTORE8" => 0x53,
+        "SLOAD" => 0x54,
+        "SSTORE" => 0x55,
+        "JUMP" => 0x56,
+        "JUMPI" => 0x57,
+        "PC" => 0x58,
+        "MSIZE" => 0x59,
+        "GAS" => 0x5a,
+        "JUMPDEST" => 0x5b,
+        "TLOAD" => 0x5c,
+        "TSTORE" => 0x5d,
+        "MCOPY" => 0x5e,
+        "PUSH0" => 0x5f,
+        "CREATE" => 0xf0,
+        "CALL" => 0xf1,
+        "CALLCODE" => 0xf2,
+        "RETURN" => 0xf3,
+        "DELEGATECALL" => 0xf4,
+        "CREATE2" => 0xf5,
+        "STATICCALL" => 0xfa,
+        "REVERT" => 0xfd,
+        "INVALID" => 0xfe,
+        "SELFDESTRUCT" => 0xff,
+        _ => return None,
+    })
 }
