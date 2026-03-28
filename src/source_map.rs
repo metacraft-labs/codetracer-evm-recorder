@@ -39,6 +39,17 @@ impl Default for SourceMapEntry {
     }
 }
 
+/// A resolved source location: file index plus line/column.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceLocation {
+    /// Source file index (from the source map entry).
+    pub file_index: i32,
+    /// 1-based line number within the source file.
+    pub line: u32,
+    /// 0-based column (byte offset within the line).
+    pub column: u32,
+}
+
 /// Parsed Solidity/Vyper source map.
 pub struct SourceMap {
     entries: Vec<SourceMapEntry>,
@@ -100,6 +111,50 @@ impl SourceMap {
         self.entries.get(pc)
     }
 
+    /// Resolve a bytecode PC (byte offset) to a source location.
+    ///
+    /// `pc_to_idx` is the mapping from PC offset to instruction index,
+    /// built with [`build_pc_to_instruction_index`].
+    /// `source_contents` is the array of source file contents indexed by
+    /// `file_index`.
+    ///
+    /// Returns `None` if the PC or instruction index is out of range, or if
+    /// the entry refers to compiler-generated code (file_index == -1).
+    pub fn resolve_pc(
+        &self,
+        pc: usize,
+        pc_to_idx: &[usize],
+        source_contents: &[&str],
+    ) -> Option<SourceLocation> {
+        let &instr_idx = pc_to_idx.get(pc)?;
+        let entry = self.entries.get(instr_idx)?;
+        if entry.file_index < 0 {
+            return None;
+        }
+        let file_idx = entry.file_index as usize;
+        let source = source_contents.get(file_idx)?;
+        let byte_offset = entry.offset as usize;
+        if byte_offset > source.len() {
+            return None;
+        }
+        let (line, column) = offset_to_line_col(source, byte_offset);
+        Some(SourceLocation {
+            file_index: entry.file_index,
+            line,
+            column,
+        })
+    }
+
+    /// Get the source map entry for a bytecode PC, using a `pc_to_idx` mapping.
+    pub fn get_entry_for_pc<'a>(
+        &'a self,
+        pc: usize,
+        pc_to_idx: &[usize],
+    ) -> Option<&'a SourceMapEntry> {
+        let &instr_idx = pc_to_idx.get(pc)?;
+        self.entries.get(instr_idx)
+    }
+
     // -- private helpers --
 
     fn parse_field(field: Option<&&str>, prev: i32) -> i32 {
@@ -116,6 +171,57 @@ impl SourceMap {
             _ => JumpType::Regular,
         }
     }
+}
+
+/// Build a mapping from bytecode PC (byte offset) to instruction index.
+///
+/// EVM opcodes are variable-length: PUSH1..PUSH32 consume 1..32 extra bytes
+/// after the opcode byte; all other opcodes are exactly 1 byte.
+/// The source map is indexed by instruction position, so we need this mapping
+/// to convert a PC from structLog into a source map index.
+pub fn build_pc_to_instruction_index(bytecode: &[u8]) -> Vec<usize> {
+    let mut pc_to_idx = vec![0usize; bytecode.len()];
+    let mut pc = 0usize;
+    let mut idx = 0usize;
+    while pc < bytecode.len() {
+        pc_to_idx[pc] = idx;
+        let opcode = bytecode[pc];
+        // PUSH1 = 0x60 .. PUSH32 = 0x7f
+        if (0x60..=0x7f).contains(&opcode) {
+            let push_bytes = (opcode - 0x60 + 1) as usize;
+            // Fill the data bytes with the same instruction index
+            // so that if a PC somehow points into push data we still
+            // have a reasonable mapping.
+            for offset in 1..=push_bytes {
+                if pc + offset < bytecode.len() {
+                    pc_to_idx[pc + offset] = idx;
+                }
+            }
+            pc += 1 + push_bytes;
+        } else {
+            pc += 1;
+        }
+        idx += 1;
+    }
+    pc_to_idx
+}
+
+/// Convert a byte offset in source text to a (1-based line, 0-based column) pair.
+fn offset_to_line_col(source: &str, byte_offset: usize) -> (u32, u32) {
+    let mut line: u32 = 1;
+    let mut col: u32 = 0;
+    for (i, ch) in source.char_indices() {
+        if i >= byte_offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += ch.len_utf8() as u32;
+        }
+    }
+    (line, col)
 }
 
 #[cfg(test)]
