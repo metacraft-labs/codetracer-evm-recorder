@@ -310,18 +310,17 @@ impl SolidityAst {
 
         // TryCatchClause: extract the error parameters (e.g. `string memory reason`
         // in `catch Error(string memory reason) { ... }`).
-        if node_type == "TryCatchClause" {
-            if let Some(params) = node
+        if node_type == "TryCatchClause"
+            && let Some(params) = node
                 .get("parameters")
                 .and_then(|p| p.get("parameters"))
                 .and_then(|v| v.as_array())
-            {
-                for p in params {
-                    if let Some(v) = Self::parse_var_decl_node(p) {
-                        if !v.name.is_empty() {
-                            out.push(v);
-                        }
-                    }
+        {
+            for p in params {
+                if let Some(v) = Self::parse_var_decl_node(p)
+                    && !v.name.is_empty()
+                {
+                    out.push(v);
                 }
             }
         }

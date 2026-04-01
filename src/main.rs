@@ -173,7 +173,7 @@ async fn record(args: RecordArgs) -> Result<()> {
         .ok_or_else(|| eyre::eyre!("no contracts found in solc output"))?;
 
     // Extract the contract name for use as the recorder's program label.
-    let contract_name = contract_key.split(':').last().unwrap_or(file_stem);
+    let contract_name = contract_key.split(':').next_back().unwrap_or(file_stem);
 
     let deploy_bytecode_hex = contract_json["bin"]
         .as_str()
@@ -253,7 +253,7 @@ async fn record(args: RecordArgs) -> Result<()> {
     let selector = &alloy::primitives::keccak256(selector_input.as_bytes())[..4];
 
     // Determine constructor arguments (encode them if needed)
-    let constructor_args = encode_constructor_args(&abi, &contract_name)?;
+    let constructor_args = encode_constructor_args(&abi, contract_name)?;
 
     // -----------------------------------------------------------------------
     // 4. Spin up a local Anvil node

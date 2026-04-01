@@ -178,6 +178,7 @@ impl TraceHelper {
 }
 
 /// Record struct logs through the recorder and return the output directory.
+#[allow(clippy::too_many_arguments)]
 fn record_trace(
     program: &str,
     struct_logs: &[codetracer_evm_recorder::structlog::StructLog],
@@ -525,7 +526,7 @@ async fn test_control_flow_looping() {
         .expect("AST should contain `looping`");
     // Should have locals: total, and the loop var i (from the for loop).
     assert!(
-        looping_fn.local_variables.len() >= 1,
+        !looping_fn.local_variables.is_empty(),
         "looping() should have >= 1 local (total)"
     );
 

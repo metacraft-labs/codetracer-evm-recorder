@@ -360,14 +360,13 @@ impl StackTracker {
                 if let Some(ref stmt) = v.statement_range
                     && stmt.contains_offset(offset)
                     && !self.has_label(&v.name)
+                    && let Some(top) = self.slots.last_mut()
                 {
-                    if let Some(top) = self.slots.last_mut() {
-                        *top = Some(v.name.clone());
-                        assignments.push(VarAssignment {
-                            name: v.name.clone(),
-                            stack_position: self.slots.len() - 1,
-                        });
-                    }
+                    *top = Some(v.name.clone());
+                    assignments.push(VarAssignment {
+                        name: v.name.clone(),
+                        stack_position: self.slots.len() - 1,
+                    });
                 }
             }
         }
