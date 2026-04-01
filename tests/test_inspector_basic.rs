@@ -8,11 +8,8 @@ use revm::{
     database::InMemoryDB,
     handler::{MainBuilder, MainContext},
     inspector::InspectEvm,
-    primitives::{address, TxKind, U256},
-    state::{
-        bytecode::opcode,
-        AccountInfo, Bytecode,
-    },
+    primitives::{TxKind, U256, address},
+    state::{AccountInfo, Bytecode, bytecode::opcode},
 };
 
 // Re-use the BenchmarkDB from revm's database crate for simple tests.
@@ -70,13 +67,25 @@ fn test_inspector_basic_steps() {
     let first = &data.steps[0];
     assert_eq!(first.opcode_name, "PUSH1", "first opcode should be PUSH1");
     assert_eq!(first.pc, 0, "first step should be at PC=0");
-    assert_eq!(first.stack.len(), 0, "stack should be empty before first PUSH1");
+    assert_eq!(
+        first.stack.len(),
+        0,
+        "stack should be empty before first PUSH1"
+    );
 
     // Second step should also be PUSH1 (at PC=2, after PUSH1 + 1-byte immediate)
     let second = &data.steps[1];
     assert_eq!(second.opcode_name, "PUSH1", "second opcode should be PUSH1");
-    assert_eq!(second.stack.len(), 1, "stack should have 1 element before second PUSH1");
-    assert_eq!(second.stack[0], U256::from(0x42u8), "stack[0] should be 0x42");
+    assert_eq!(
+        second.stack.len(),
+        1,
+        "stack should have 1 element before second PUSH1"
+    );
+    assert_eq!(
+        second.stack[0],
+        U256::from(0x42u8),
+        "stack[0] should be 0x42"
+    );
 
     // Third step is ADD
     let add_step = data.steps.iter().find(|s| s.opcode_name == "ADD");
@@ -124,11 +133,15 @@ fn test_inspector_memory_tracking() {
 fn test_inspector_log_capture() {
     // PUSH1 0x42, PUSH1 0x00, MSTORE, PUSH1 0x20, PUSH1 0x00, LOG0, STOP
     let code = vec![
-        opcode::PUSH1, 0x42,
-        opcode::PUSH1, 0x00,
+        opcode::PUSH1,
+        0x42,
+        opcode::PUSH1,
+        0x00,
         opcode::MSTORE,
-        opcode::PUSH1, 0x20, // size
-        opcode::PUSH1, 0x00, // offset
+        opcode::PUSH1,
+        0x20, // size
+        opcode::PUSH1,
+        0x00, // offset
         opcode::LOG0,
         opcode::STOP,
     ];
@@ -139,7 +152,11 @@ fn test_inspector_log_capture() {
     assert_eq!(data.logs.len(), 1, "one LOG0 event should be captured");
     let log = &data.logs[0];
     assert_eq!(log.topics.len(), 0, "LOG0 has 0 topics");
-    assert_eq!(log.data.len(), 32, "LOG0 data should be 32 bytes (MSTORE slot)");
+    assert_eq!(
+        log.data.len(),
+        32,
+        "LOG0 data should be 32 bytes (MSTORE slot)"
+    );
 }
 
 // -------------------------------------------------------------------------
@@ -154,16 +171,23 @@ fn test_inspector_call_capture() {
 
     // Caller does: PUSH1 0, PUSH1 0, PUSH1 0, PUSH1 0, PUSH1 0, PUSH20 <callee>, PUSH2 0xFFFF, CALL, STOP
     let mut caller_code = vec![
-        opcode::PUSH1, 0x00, // retSize
-        opcode::PUSH1, 0x00, // retOffset
-        opcode::PUSH1, 0x00, // argsSize
-        opcode::PUSH1, 0x00, // argsOffset
-        opcode::PUSH1, 0x00, // value
-        opcode::PUSH20,      // 20-byte callee address
+        opcode::PUSH1,
+        0x00, // retSize
+        opcode::PUSH1,
+        0x00, // retOffset
+        opcode::PUSH1,
+        0x00, // argsSize
+        opcode::PUSH1,
+        0x00, // argsOffset
+        opcode::PUSH1,
+        0x00,           // value
+        opcode::PUSH20, // 20-byte callee address
     ];
     caller_code.extend_from_slice(callee_addr.as_slice());
     caller_code.extend_from_slice(&[
-        opcode::PUSH2, 0xFF, 0xFF, // gas
+        opcode::PUSH2,
+        0xFF,
+        0xFF, // gas
         opcode::CALL,
         opcode::STOP,
     ]);
@@ -178,7 +202,9 @@ fn test_inspector_call_capture() {
             balance: U256::from(1_000_000u64),
             nonce: 0,
             code_hash: revm::primitives::keccak256(&caller_code),
-            code: Some(Bytecode::new_raw(revm::primitives::Bytes::from(caller_code))),
+            code: Some(Bytecode::new_raw(revm::primitives::Bytes::from(
+                caller_code,
+            ))),
             account_id: None,
         },
     );
@@ -209,17 +235,25 @@ fn test_inspector_call_capture() {
     // Should have recorded at least two CALL events:
     // - index 0: the top-level call (BENCH_CALLER -> caller_addr / BENCH_TARGET)
     // - index 1: the inner CALL (caller_addr -> callee_addr)
-    assert!(data.calls.len() >= 2, "at least 2 CALL events should be recorded (top-level + inner)");
+    assert!(
+        data.calls.len() >= 2,
+        "at least 2 CALL events should be recorded (top-level + inner)"
+    );
 
     // Find the inner call targeting callee_addr
     let inner_call = data.calls.iter().find(|c| c.target == callee_addr);
     assert!(
         inner_call.is_some(),
         "should have a CALL targeting callee_addr {:?}; got calls: {:?}",
-        callee_addr, data.calls.iter().map(|c| c.target).collect::<Vec<_>>()
+        callee_addr,
+        data.calls.iter().map(|c| c.target).collect::<Vec<_>>()
     );
     let inner_call = inner_call.unwrap();
-    assert_eq!(inner_call.kind, CallKind::Call, "inner call kind should be CALL");
+    assert_eq!(
+        inner_call.kind,
+        CallKind::Call,
+        "inner call kind should be CALL"
+    );
     assert_eq!(inner_call.value, U256::ZERO, "inner call value should be 0");
 
     // Steps should be non-empty
@@ -236,14 +270,20 @@ fn test_inspector_create_capture() {
 
     // deployer code: store init_code in memory, then CREATE
     let mut deployer = vec![
-        opcode::PUSH1, init_code.len() as u8, // size
-        opcode::PUSH1, 0x0C,                   // code offset (after CREATE params below)
-        opcode::PUSH1, 0x00,                   // memory dest offset
+        opcode::PUSH1,
+        init_code.len() as u8, // size
+        opcode::PUSH1,
+        0x0C, // code offset (after CREATE params below)
+        opcode::PUSH1,
+        0x00, // memory dest offset
         opcode::CODECOPY,
         // CREATE(value=0, offset=0, size=len(init_code))
-        opcode::PUSH1, init_code.len() as u8,
-        opcode::PUSH1, 0x00,
-        opcode::PUSH1, 0x00,
+        opcode::PUSH1,
+        init_code.len() as u8,
+        opcode::PUSH1,
+        0x00,
+        opcode::PUSH1,
+        0x00,
         opcode::CREATE,
         opcode::STOP,
     ];
@@ -252,11 +292,12 @@ fn test_inspector_create_capture() {
     let inspector = run_bytecode(deployer);
     let data = inspector.execution_data();
 
-    let create_events: Vec<_> = data.calls.iter().filter(|c| c.kind == CallKind::Create).collect();
-    assert!(
-        !create_events.is_empty(),
-        "CREATE event should be recorded"
-    );
+    let create_events: Vec<_> = data
+        .calls
+        .iter()
+        .filter(|c| c.kind == CallKind::Create)
+        .collect();
+    assert!(!create_events.is_empty(), "CREATE event should be recorded");
     assert_eq!(
         create_events[0].value,
         U256::ZERO,

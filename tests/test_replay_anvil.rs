@@ -6,11 +6,11 @@
 //!
 //! Run with: `cargo test test_replay_anvil -- --ignored`
 
+use alloy::network::{EthereumWallet, TransactionBuilder};
 use alloy::primitives::TxHash;
 use alloy::providers::{Provider, ProviderBuilder};
-use alloy::signers::local::PrivateKeySigner;
-use alloy::network::{EthereumWallet, TransactionBuilder};
 use alloy::rpc::types::TransactionRequest;
+use alloy::signers::local::PrivateKeySigner;
 use codetracer_evm_recorder::replay::replay_transaction;
 
 /// Build EVM init code that:
@@ -36,14 +36,22 @@ fn simple_contract_init_code() -> alloy::primitives::Bytes {
     //   STOP           (1 byte:  00)
     // Total runtime = 18 bytes
     let runtime: Vec<u8> = vec![
-        opcode::PUSH2, 0xDE, 0xAD,   // value
-        opcode::PUSH1, 0x00,          // slot
+        opcode::PUSH2,
+        0xDE,
+        0xAD, // value
+        opcode::PUSH1,
+        0x00, // slot
         opcode::SSTORE,
-        opcode::PUSH2, 0xDE, 0xAD,   // value to store in memory
-        opcode::PUSH1, 0x00,          // memory offset
+        opcode::PUSH2,
+        0xDE,
+        0xAD, // value to store in memory
+        opcode::PUSH1,
+        0x00, // memory offset
         opcode::MSTORE,
-        opcode::PUSH1, 0x20,          // log data size
-        opcode::PUSH1, 0x00,          // log data offset
+        opcode::PUSH1,
+        0x20, // log data size
+        opcode::PUSH1,
+        0x00, // log data offset
         opcode::LOG0,
         opcode::STOP,
     ];
@@ -59,15 +67,24 @@ fn simple_contract_init_code() -> alloy::primitives::Bytes {
     //   PUSH1 0x00
     //   RETURN
     let mut init: Vec<u8> = vec![
-        opcode::PUSH1, runtime_len,
-        opcode::PUSH1, init_code_len,
-        opcode::PUSH1, 0x00,
+        opcode::PUSH1,
+        runtime_len,
+        opcode::PUSH1,
+        init_code_len,
+        opcode::PUSH1,
+        0x00,
         opcode::CODECOPY,
-        opcode::PUSH1, runtime_len,
-        opcode::PUSH1, 0x00,
+        opcode::PUSH1,
+        runtime_len,
+        opcode::PUSH1,
+        0x00,
         opcode::RETURN,
     ];
-    assert_eq!(init.len(), init_code_len as usize, "init code length mismatch");
+    assert_eq!(
+        init.len(),
+        init_code_len as usize,
+        "init code length mismatch"
+    );
 
     init.extend_from_slice(&runtime);
     alloy::primitives::Bytes::from(init)
@@ -161,10 +178,7 @@ async fn test_replay_anvil() {
     );
 
     // b. Should have at least one SSTORE step
-    let sstore_step = exec_data
-        .steps
-        .iter()
-        .find(|s| s.opcode_name == "SSTORE");
+    let sstore_step = exec_data.steps.iter().find(|s| s.opcode_name == "SSTORE");
     assert!(
         sstore_step.is_some(),
         "replay should record SSTORE opcode; got opcodes: {:?}",
@@ -186,7 +200,11 @@ async fn test_replay_anvil() {
     // and second-to-last is the value.
     let slot = sstore.stack[sstore.stack.len() - 1];
     let value = sstore.stack[sstore.stack.len() - 2];
-    assert_eq!(slot, alloy::primitives::U256::ZERO, "SSTORE slot should be 0");
+    assert_eq!(
+        slot,
+        alloy::primitives::U256::ZERO,
+        "SSTORE slot should be 0"
+    );
     assert_eq!(
         value,
         alloy::primitives::U256::from(0xDEADu32),

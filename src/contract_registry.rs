@@ -184,8 +184,14 @@ mod tests {
         registry.set_default(addr_a);
 
         // Exact lookup
-        assert_eq!(registry.get(&addr_a).map(|a| &a.name), Some(&"ContractA".to_string()));
-        assert_eq!(registry.get(&addr_b).map(|a| &a.name), Some(&"ContractB".to_string()));
+        assert_eq!(
+            registry.get(&addr_a).map(|a| &a.name),
+            Some(&"ContractA".to_string())
+        );
+        assert_eq!(
+            registry.get(&addr_b).map(|a| &a.name),
+            Some(&"ContractB".to_string())
+        );
 
         // Unknown address falls back to default (ContractA)
         assert_eq!(
@@ -252,6 +258,10 @@ mod tests {
         let unknown_addr: Address = "0x9999999999999999999999999999999999999999"
             .parse()
             .unwrap();
-        assert!(registry.get_delegatecall(&unknown_addr, &proxy_addr).is_none());
+        assert!(
+            registry
+                .get_delegatecall(&unknown_addr, &proxy_addr)
+                .is_none()
+        );
     }
 }

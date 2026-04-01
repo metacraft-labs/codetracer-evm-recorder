@@ -14,8 +14,8 @@
 //! - Complex control flow (loops, nested calls) may cause slot assignments to
 //!   drift.  The tracker resets on function calls/returns.
 
-use alloy::primitives::U256;
 use crate::solidity_ast::VarDecl;
+use alloy::primitives::U256;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -86,87 +86,175 @@ impl StackTracker {
             0x00 => {}
 
             // ADD, MUL, SUB, DIV, SDIV, MOD, SMOD, EXP, SIGNEXTEND (pop 2, push 1)
-            0x01..=0x07 | 0x0a | 0x0b => { self.pop_n(2); self.push_anon(); }
+            0x01..=0x07 | 0x0a | 0x0b => {
+                self.pop_n(2);
+                self.push_anon();
+            }
             // ADDMOD, MULMOD (pop 3, push 1)
-            0x08 | 0x09 => { self.pop_n(3); self.push_anon(); }
+            0x08 | 0x09 => {
+                self.pop_n(3);
+                self.push_anon();
+            }
 
             // LT, GT, SLT, SGT, EQ
-            0x10..=0x14 => { self.pop_n(2); self.push_anon(); }
+            0x10..=0x14 => {
+                self.pop_n(2);
+                self.push_anon();
+            }
             // ISZERO
-            0x15 => { self.pop_n(1); self.push_anon(); }
+            0x15 => {
+                self.pop_n(1);
+                self.push_anon();
+            }
             // AND, OR, XOR
-            0x16..=0x18 => { self.pop_n(2); self.push_anon(); }
+            0x16..=0x18 => {
+                self.pop_n(2);
+                self.push_anon();
+            }
             // NOT
-            0x19 => { self.pop_n(1); self.push_anon(); }
+            0x19 => {
+                self.pop_n(1);
+                self.push_anon();
+            }
             // BYTE
-            0x1a => { self.pop_n(2); self.push_anon(); }
+            0x1a => {
+                self.pop_n(2);
+                self.push_anon();
+            }
             // SHL, SHR, SAR
-            0x1b..=0x1d => { self.pop_n(2); self.push_anon(); }
+            0x1b..=0x1d => {
+                self.pop_n(2);
+                self.push_anon();
+            }
 
             // SHA3 / KECCAK256
-            0x20 => { self.pop_n(2); self.push_anon(); }
+            0x20 => {
+                self.pop_n(2);
+                self.push_anon();
+            }
 
             // ADDRESS(0x30): push 1
-            0x30 => { self.push_anon(); }
+            0x30 => {
+                self.push_anon();
+            }
             // BALANCE(0x31): pop 1, push 1
-            0x31 => { self.pop_n(1); self.push_anon(); }
+            0x31 => {
+                self.pop_n(1);
+                self.push_anon();
+            }
             // ORIGIN(0x32), CALLER(0x33), CALLVALUE(0x34): push 1
-            0x32..=0x34 => { self.push_anon(); }
+            0x32..=0x34 => {
+                self.push_anon();
+            }
             // CALLDATALOAD(0x35): pop 1, push 1
-            0x35 => { self.pop_n(1); self.push_anon(); }
+            0x35 => {
+                self.pop_n(1);
+                self.push_anon();
+            }
             // CALLDATASIZE(0x36), CODESIZE(0x38): push 1
-            0x36 | 0x38 => { self.push_anon(); }
+            0x36 | 0x38 => {
+                self.push_anon();
+            }
             // CALLDATACOPY(0x37), CODECOPY(0x39): pop 3
-            0x37 | 0x39 => { self.pop_n(3); }
+            0x37 | 0x39 => {
+                self.pop_n(3);
+            }
             // GASPRICE(0x3a): push 1
-            0x3a => { self.push_anon(); }
+            0x3a => {
+                self.push_anon();
+            }
             // EXTCODESIZE(0x3b): pop 1, push 1
-            0x3b => { self.pop_n(1); self.push_anon(); }
+            0x3b => {
+                self.pop_n(1);
+                self.push_anon();
+            }
             // EXTCODECOPY(0x3c): pop 4
-            0x3c => { self.pop_n(4); }
+            0x3c => {
+                self.pop_n(4);
+            }
             // RETURNDATASIZE(0x3d): push 1
-            0x3d => { self.push_anon(); }
+            0x3d => {
+                self.push_anon();
+            }
             // RETURNDATACOPY(0x3e): pop 3
-            0x3e => { self.pop_n(3); }
+            0x3e => {
+                self.pop_n(3);
+            }
             // EXTCODEHASH(0x3f): pop 1, push 1
-            0x3f => { self.pop_n(1); self.push_anon(); }
+            0x3f => {
+                self.pop_n(1);
+                self.push_anon();
+            }
 
             // BLOCKHASH(0x40): pop 1, push 1
-            0x40 => { self.pop_n(1); self.push_anon(); }
+            0x40 => {
+                self.pop_n(1);
+                self.push_anon();
+            }
             // COINBASE(0x41), TIMESTAMP(0x42), NUMBER(0x43), PREVRANDAO(0x44),
             // GASLIMIT(0x45), CHAINID(0x46), SELFBALANCE(0x47), BASEFEE(0x48),
             // BLOBBASEFEE(0x4a): push 1
-            0x41..=0x48 | 0x4a => { self.push_anon(); }
+            0x41..=0x48 | 0x4a => {
+                self.push_anon();
+            }
             // BLOBHASH(0x49): pop 1 push 1
-            0x49 => { self.pop_n(1); self.push_anon(); }
+            0x49 => {
+                self.pop_n(1);
+                self.push_anon();
+            }
 
             // POP
-            0x50 => { self.pop_n(1); }
+            0x50 => {
+                self.pop_n(1);
+            }
 
             // MLOAD
-            0x51 => { self.pop_n(1); self.push_anon(); }
+            0x51 => {
+                self.pop_n(1);
+                self.push_anon();
+            }
             // MSTORE, MSTORE8
-            0x52 | 0x53 => { self.pop_n(2); }
+            0x52 | 0x53 => {
+                self.pop_n(2);
+            }
 
             // SLOAD
-            0x54 => { self.pop_n(1); self.push_anon(); }
+            0x54 => {
+                self.pop_n(1);
+                self.push_anon();
+            }
             // SSTORE
-            0x55 => { self.pop_n(2); }
+            0x55 => {
+                self.pop_n(2);
+            }
 
             // JUMP
-            0x56 => { self.pop_n(1); }
+            0x56 => {
+                self.pop_n(1);
+            }
             // JUMPI
-            0x57 => { self.pop_n(2); }
+            0x57 => {
+                self.pop_n(2);
+            }
             // PC, MSIZE, GAS
-            0x58..=0x5a => { self.push_anon(); }
+            0x58..=0x5a => {
+                self.push_anon();
+            }
             // JUMPDEST
             0x5b => {}
             // TLOAD
-            0x5c => { self.pop_n(1); self.push_anon(); }
+            0x5c => {
+                self.pop_n(1);
+                self.push_anon();
+            }
             // TSTORE
-            0x5d => { self.pop_n(2); }
+            0x5d => {
+                self.pop_n(2);
+            }
             // MCOPY(0x5e): pop 3 (dst, src, length)
-            0x5e => { self.pop_n(3); }
+            0x5e => {
+                self.pop_n(3);
+            }
 
             // PUSH0
             0x5f => {
@@ -174,7 +262,10 @@ impl StackTracker {
                 let slot = self.slots.len();
                 self.slots.push(label.clone());
                 if let Some(name) = label {
-                    assignments.push(VarAssignment { name, stack_position: slot });
+                    assignments.push(VarAssignment {
+                        name,
+                        stack_position: slot,
+                    });
                 }
             }
 
@@ -184,7 +275,10 @@ impl StackTracker {
                 let slot = self.slots.len();
                 self.slots.push(label.clone());
                 if let Some(name) = label {
-                    assignments.push(VarAssignment { name, stack_position: slot });
+                    assignments.push(VarAssignment {
+                        name,
+                        stack_position: slot,
+                    });
                 }
             }
 
@@ -211,17 +305,33 @@ impl StackTracker {
             }
 
             // CREATE
-            0xf0 => { self.pop_n(3); self.push_anon(); }
+            0xf0 => {
+                self.pop_n(3);
+                self.push_anon();
+            }
             // CALL, CALLCODE
-            0xf1 | 0xf2 => { self.pop_n(7); self.push_anon(); }
+            0xf1 | 0xf2 => {
+                self.pop_n(7);
+                self.push_anon();
+            }
             // RETURN, REVERT
-            0xf3 | 0xfd => { self.pop_n(2); }
+            0xf3 | 0xfd => {
+                self.pop_n(2);
+            }
             // DELEGATECALL, STATICCALL
-            0xf4 | 0xfa => { self.pop_n(6); self.push_anon(); }
+            0xf4 | 0xfa => {
+                self.pop_n(6);
+                self.push_anon();
+            }
             // CREATE2
-            0xf5 => { self.pop_n(4); self.push_anon(); }
+            0xf5 => {
+                self.pop_n(4);
+                self.push_anon();
+            }
             // SELFDESTRUCT
-            0xff => { self.pop_n(1); }
+            0xff => {
+                self.pop_n(1);
+            }
 
             // INVALID and unknown opcodes — no stack effect modelled.
             _ => {}
@@ -271,7 +381,10 @@ impl StackTracker {
     /// concrete stack is too short.
     pub fn get_variable_value(&self, name: &str, actual_stack: &[U256]) -> Option<U256> {
         // Find the topmost slot labelled with `name` (most-recently-assigned).
-        let pos = self.slots.iter().rposition(|s| s.as_deref() == Some(name))?;
+        let pos = self
+            .slots
+            .iter()
+            .rposition(|s| s.as_deref() == Some(name))?;
         actual_stack.get(pos).copied()
     }
 
@@ -414,7 +527,11 @@ mod tests {
         let var = VarDecl {
             name: "x".to_string(),
             type_name: "uint256".to_string(),
-            src: crate::solidity_ast::SourceRange { offset: 10, length: 9, file_index: 0 },
+            src: crate::solidity_ast::SourceRange {
+                offset: 10,
+                length: 9,
+                file_index: 0,
+            },
             declaration_offset: 10,
             statement_range: None,
         };
@@ -442,14 +559,22 @@ mod tests {
         let var_a = VarDecl {
             name: "a".to_string(),
             type_name: "uint256".to_string(),
-            src: crate::solidity_ast::SourceRange { offset: 5, length: 1, file_index: 0 },
+            src: crate::solidity_ast::SourceRange {
+                offset: 5,
+                length: 1,
+                file_index: 0,
+            },
             declaration_offset: 5,
             statement_range: None,
         };
         let var_b = VarDecl {
             name: "b".to_string(),
             type_name: "uint256".to_string(),
-            src: crate::solidity_ast::SourceRange { offset: 20, length: 1, file_index: 0 },
+            src: crate::solidity_ast::SourceRange {
+                offset: 20,
+                length: 1,
+                file_index: 0,
+            },
             declaration_offset: 20,
             statement_range: None,
         };
@@ -474,7 +599,11 @@ mod tests {
         let var = VarDecl {
             name: "z".to_string(),
             type_name: "uint256".to_string(),
-            src: crate::solidity_ast::SourceRange { offset: 99, length: 5, file_index: 0 },
+            src: crate::solidity_ast::SourceRange {
+                offset: 99,
+                length: 5,
+                file_index: 0,
+            },
             declaration_offset: 99,
             statement_range: None,
         };
@@ -490,14 +619,22 @@ mod tests {
         let var_a = VarDecl {
             name: "a".to_string(),
             type_name: "uint256".to_string(),
-            src: crate::solidity_ast::SourceRange { offset: 0, length: 1, file_index: 0 },
+            src: crate::solidity_ast::SourceRange {
+                offset: 0,
+                length: 1,
+                file_index: 0,
+            },
             declaration_offset: 0,
             statement_range: None,
         };
         let var_b = VarDecl {
             name: "b".to_string(),
             type_name: "uint256".to_string(),
-            src: crate::solidity_ast::SourceRange { offset: 10, length: 1, file_index: 0 },
+            src: crate::solidity_ast::SourceRange {
+                offset: 10,
+                length: 1,
+                file_index: 0,
+            },
             declaration_offset: 10,
             statement_range: None,
         };
@@ -557,7 +694,11 @@ mod tests {
         let var = VarDecl {
             name: "a".to_string(),
             type_name: "uint256".to_string(),
-            src: crate::solidity_ast::SourceRange { offset: 100, length: 9, file_index: 0 },
+            src: crate::solidity_ast::SourceRange {
+                offset: 100,
+                length: 9,
+                file_index: 0,
+            },
             declaration_offset: 100,
             statement_range: Some(crate::solidity_ast::SourceRange {
                 offset: 100,
@@ -582,7 +723,11 @@ mod tests {
         let var = VarDecl {
             name: "x".to_string(),
             type_name: "uint256".to_string(),
-            src: crate::solidity_ast::SourceRange { offset: 50, length: 12, file_index: 0 },
+            src: crate::solidity_ast::SourceRange {
+                offset: 50,
+                length: 12,
+                file_index: 0,
+            },
             declaration_offset: 50,
             statement_range: None,
         };
@@ -590,7 +735,11 @@ mod tests {
 
         // PUSH at offset 55 — within [50, 62) but not == 50
         let assignments = t.process_step(0x60, 0, Some(55), &vars);
-        assert_eq!(assignments.len(), 1, "should match via decl src range containment");
+        assert_eq!(
+            assignments.len(),
+            1,
+            "should match via decl src range containment"
+        );
         assert_eq!(assignments[0].name, "x");
     }
 
@@ -600,7 +749,11 @@ mod tests {
         let var = VarDecl {
             name: "z".to_string(),
             type_name: "uint256".to_string(),
-            src: crate::solidity_ast::SourceRange { offset: 100, length: 9, file_index: 0 },
+            src: crate::solidity_ast::SourceRange {
+                offset: 100,
+                length: 9,
+                file_index: 0,
+            },
             declaration_offset: 100,
             statement_range: Some(crate::solidity_ast::SourceRange {
                 offset: 100,
@@ -612,6 +765,9 @@ mod tests {
 
         // PUSH at offset 200 — outside all ranges
         let assignments = t.process_step(0x60, 0, Some(200), &vars);
-        assert!(assignments.is_empty(), "should not match outside all ranges");
+        assert!(
+            assignments.is_empty(),
+            "should not match outside all ranges"
+        );
     }
 }

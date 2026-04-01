@@ -283,8 +283,14 @@ fn test_evm_local_vars_simple() {
 
     // Concrete stack after 2 pushes: [10, 20]
     let stack_after_push = vec![u256(10), u256(20)];
-    assert_eq!(tracker.get_variable_value("a", &stack_after_push), Some(u256(10)));
-    assert_eq!(tracker.get_variable_value("b", &stack_after_push), Some(u256(20)));
+    assert_eq!(
+        tracker.get_variable_value("a", &stack_after_push),
+        Some(u256(10))
+    );
+    assert_eq!(
+        tracker.get_variable_value("b", &stack_after_push),
+        Some(u256(20))
+    );
 
     // Step 3: ADD at source offset 120 — pops 2, pushes 1 (anonymous result)
     let scope_120 = func.vars_in_scope_at(120);

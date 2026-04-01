@@ -43,8 +43,14 @@ fn compile_contract() -> serde_json::Value {
 
 #[tokio::test]
 async fn test_e2e_trace() {
-    assert!(has_solc(), "solc must be available on PATH to run this test (use `nix develop` or install solc)");
-    assert!(has_anvil(), "anvil must be available on PATH to run this test (use `nix develop` or install foundry)");
+    assert!(
+        has_solc(),
+        "solc must be available on PATH to run this test (use `nix develop` or install solc)"
+    );
+    assert!(
+        has_anvil(),
+        "anvil must be available on PATH to run this test (use `nix develop` or install foundry)"
+    );
 
     // 1. Compile the contract
     let compiled = compile_contract();
@@ -56,9 +62,7 @@ async fn test_e2e_trace() {
         .find(|(k, _)| k.ends_with(":FlowTest"))
         .expect("FlowTest not found in solc output");
 
-    let deploy_bytecode_hex = contract_json["bin"]
-        .as_str()
-        .expect("missing bin");
+    let deploy_bytecode_hex = contract_json["bin"].as_str().expect("missing bin");
     let runtime_bytecode_hex = contract_json["bin-runtime"]
         .as_str()
         .expect("missing bin-runtime");
@@ -76,14 +80,14 @@ async fn test_e2e_trace() {
             .expect("failed to parse storage layout");
     assert_eq!(storage_layout.storage.len(), 2);
 
-    let runtime_bytecode = alloy::hex::decode(runtime_bytecode_hex)
-        .expect("invalid runtime bytecode hex");
+    let runtime_bytecode =
+        alloy::hex::decode(runtime_bytecode_hex).expect("invalid runtime bytecode hex");
 
     // Read the source file
-    let source_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("contracts/FlowTest.sol");
-    let source_contents = std::fs::read_to_string(&source_path)
-        .expect("failed to read FlowTest.sol");
+    let source_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("contracts/FlowTest.sol");
+    let source_contents =
+        std::fs::read_to_string(&source_path).expect("failed to read FlowTest.sol");
 
     // 2. Spawn anvil
     // `--steps-tracing` is required for debug_traceTransaction to return non-empty
@@ -94,8 +98,7 @@ async fn test_e2e_trace() {
     let rpc_url = anvil.endpoint();
 
     // 3. Deploy the contract
-    let provider = alloy::providers::ProviderBuilder::new()
-        .connect_http(rpc_url.parse().unwrap());
+    let provider = alloy::providers::ProviderBuilder::new().connect_http(rpc_url.parse().unwrap());
 
     use alloy::providers::Provider;
     let accounts = provider.get_accounts().await.unwrap();
@@ -129,12 +132,9 @@ async fn test_e2e_trace() {
     let tx_hash = call_receipt.transaction_hash;
 
     // 5. Fetch debug_traceTransaction
-    let frame = codetracer_evm_recorder::trace_fetcher::fetch_struct_logs(
-        &rpc_url,
-        tx_hash,
-    )
-    .await
-    .expect("fetch_struct_logs failed");
+    let frame = codetracer_evm_recorder::trace_fetcher::fetch_struct_logs(&rpc_url, tx_hash)
+        .await
+        .expect("fetch_struct_logs failed");
 
     let struct_logs = codetracer_evm_recorder::trace_fetcher::extract_struct_logs(&frame);
     assert!(
@@ -145,8 +145,7 @@ async fn test_e2e_trace() {
     // 6. Process through recorder
     let tmp_dir = tempfile::TempDir::new().unwrap();
     let mut recorder =
-        codetracer_evm_recorder::recorder::EvmRecorder::new("FlowTest", tmp_dir.path())
-            .unwrap();
+        codetracer_evm_recorder::recorder::EvmRecorder::new("FlowTest", tmp_dir.path()).unwrap();
     recorder.initialize().unwrap();
 
     let source_path_ref: &std::path::Path = source_path.as_path();

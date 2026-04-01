@@ -27,8 +27,15 @@ impl SourceRange {
         let parts: Vec<&str> = src.splitn(4, ':').collect();
         let offset = parts.first().and_then(|s| s.parse::<i32>().ok())?;
         let length = parts.get(1).and_then(|s| s.parse::<i32>().ok())?;
-        let file_index = parts.get(2).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
-        Some(Self { offset, length, file_index })
+        let file_index = parts
+            .get(2)
+            .and_then(|s| s.parse::<i32>().ok())
+            .unwrap_or(0);
+        Some(Self {
+            offset,
+            length,
+            file_index,
+        })
     }
 
     /// Returns `true` when `offset` falls within `[range.offset, range.offset + range.length)`.
@@ -136,9 +143,9 @@ impl SolidityAst {
     /// Find the function whose source range contains `offset` in file
     /// `file_index`.
     pub fn function_at(&self, offset: i32, file_index: i32) -> Option<&FunctionDef> {
-        self.functions.iter().find(|f| {
-            f.src.file_index == file_index && f.src.contains_offset(offset)
-        })
+        self.functions
+            .iter()
+            .find(|f| f.src.file_index == file_index && f.src.contains_offset(offset))
     }
 
     // -----------------------------------------------------------------------
@@ -236,7 +243,12 @@ impl SolidityAst {
             Self::collect_local_vars(body, &mut local_variables);
         }
 
-        Some(FunctionDef { name, src, parameters, local_variables })
+        Some(FunctionDef {
+            name,
+            src,
+            parameters,
+            local_variables,
+        })
     }
 
     /// Recursively collect VariableDeclarationStatement nodes.
@@ -326,7 +338,9 @@ impl SolidityAst {
             .get("typeName")
             .and_then(|tn| {
                 // ElementaryTypeName → name field
-                tn.get("name").and_then(|v| v.as_str()).map(str::to_string)
+                tn.get("name")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
                     // UserDefinedTypeName → pathNode.name or name
                     .or_else(|| {
                         tn.get("pathNode")
@@ -345,7 +359,13 @@ impl SolidityAst {
             })
             .unwrap_or_else(|| "uint256".to_string());
 
-        Some(VarDecl { name, type_name, src, declaration_offset, statement_range: None })
+        Some(VarDecl {
+            name,
+            type_name,
+            src,
+            declaration_offset,
+            statement_range: None,
+        })
     }
 }
 
@@ -551,7 +571,10 @@ mod tests {
         assert_eq!(var.src.offset, 20);
         assert_eq!(var.src.length, 9);
         // statement range covers "uint256 x = 42;" (20:18)
-        let stmt = var.statement_range.as_ref().expect("statement_range should be set");
+        let stmt = var
+            .statement_range
+            .as_ref()
+            .expect("statement_range should be set");
         assert_eq!(stmt.offset, 20);
         assert_eq!(stmt.length, 18);
         // Offset 35 (within "= 42" part) is inside statement but outside decl
@@ -676,8 +699,16 @@ mod tests {
         let f = &ast.functions[0];
         let local_names: Vec<_> = f.local_variables.iter().map(|v| v.name.as_str()).collect();
         // Both the for-loop init var "i" and the body var "temp" should be collected.
-        assert!(local_names.contains(&"i"), "for-loop init var 'i' should be collected; got {:?}", local_names);
-        assert!(local_names.contains(&"temp"), "for-loop body var 'temp' should be collected; got {:?}", local_names);
+        assert!(
+            local_names.contains(&"i"),
+            "for-loop init var 'i' should be collected; got {:?}",
+            local_names
+        );
+        assert!(
+            local_names.contains(&"temp"),
+            "for-loop body var 'temp' should be collected; got {:?}",
+            local_names
+        );
     }
 
     #[test]
