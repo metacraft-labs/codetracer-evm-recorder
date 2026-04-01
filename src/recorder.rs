@@ -1,4 +1,4 @@
-use codetracer_trace_types::{EventLogKind, Line, TypeKind, ValueRecord, TypeId};
+use codetracer_trace_types::{EventLogKind, Line, TypeId, TypeKind, ValueRecord};
 use codetracer_trace_writer::trace_writer::TraceWriter;
 use codetracer_trace_writer::{TraceEventsFileFormat, create_trace_writer};
 use std::path::{Path, PathBuf};
@@ -145,9 +145,8 @@ impl EvmRecorder {
         TraceWriter::start(&mut *self.writer, main_path, Line(1));
 
         // The uint256 type id (first registered type) for storage values
-        let uint256_type_id = TypeId(
-            TraceWriter::ensure_type_id(&mut *self.writer, TypeKind::Int, "uint256").0,
-        );
+        let uint256_type_id =
+            TypeId(TraceWriter::ensure_type_id(&mut *self.writer, TypeKind::Int, "uint256").0);
 
         let mut prev_line: Option<(i32, u32)> = None; // (file_index, line)
         let mut prev_depth: u64 = 1;
@@ -212,8 +211,7 @@ impl EvmRecorder {
                 .map(|e| e.offset);
 
             // --- Resolve PC to source location ---
-            if let Some(location) = source_map.resolve_pc(pc, &pc_to_idx, source_contents)
-            {
+            if let Some(location) = source_map.resolve_pc(pc, &pc_to_idx, source_contents) {
                 let file_idx = location.file_index;
                 let line = location.line;
                 let current = (file_idx, line);
@@ -224,11 +222,7 @@ impl EvmRecorder {
                         .get(file_idx as usize)
                         .copied()
                         .unwrap_or(main_path);
-                    TraceWriter::register_step(
-                        &mut *self.writer,
-                        step_path,
-                        Line(line as i64),
-                    );
+                    TraceWriter::register_step(&mut *self.writer, step_path, Line(line as i64));
                     prev_line = Some(current);
                 }
 
@@ -249,17 +243,15 @@ impl EvmRecorder {
                             let _ = tracker.process_step(op, pc, Some(src_off), &in_scope);
 
                             // Use the next step's stack for value lookup (post-execution).
-                            let post_stack = struct_logs
-                                .get(i + 1)
-                                .and_then(|next| next.stack.as_ref());
+                            let post_stack =
+                                struct_logs.get(i + 1).and_then(|next| next.stack.as_ref());
 
                             if let Some(concrete_stack) = post_stack {
                                 for var in &in_scope {
                                     if let Some(val) =
                                         tracker.get_variable_value(&var.name, concrete_stack)
                                     {
-                                        let type_kind =
-                                            type_kind_for_solidity_type(&var.type_name);
+                                        let type_kind = type_kind_for_solidity_type(&var.type_name);
                                         let type_id = TraceWriter::ensure_type_id(
                                             &mut *self.writer,
                                             type_kind,
@@ -291,26 +283,19 @@ impl EvmRecorder {
                 }
 
                 // --- Jump type: internal calls / returns ---
-                if let Some(entry) =
-                    source_map.get_entry_for_pc(pc, &pc_to_idx)
-                {
+                if let Some(entry) = source_map.get_entry_for_pc(pc, &pc_to_idx) {
                     match entry.jump_type {
                         JumpType::Into => {
                             // Internal function call
                             // Try to determine the target function from the
                             // next structLog entry's source location.
-                            let fn_name = if let Some(next_log) =
-                                struct_logs.get(i + 1)
-                            {
+                            let fn_name = if let Some(next_log) = struct_logs.get(i + 1) {
                                 if let Some(next_loc) = source_map.resolve_pc(
                                     next_log.pc as usize,
                                     &pc_to_idx,
                                     source_contents,
                                 ) {
-                                    format!(
-                                        "fn_at_{}:{}",
-                                        next_loc.file_index, next_loc.line
-                                    )
+                                    format!("fn_at_{}:{}", next_loc.file_index, next_loc.line)
                                 } else {
                                     format!("fn_at_pc_{}", next_log.pc)
                                 }
@@ -328,11 +313,7 @@ impl EvmRecorder {
                                 fn_path,
                                 Line(line as i64),
                             );
-                            TraceWriter::register_call(
-                                &mut *self.writer,
-                                fn_id,
-                                vec![],
-                            );
+                            TraceWriter::register_call(&mut *self.writer, fn_id, vec![]);
                             // Reset the tracker when entering an internal function
                             // so we start fresh for the callee's locals.
                             tracker.reset();
@@ -343,10 +324,7 @@ impl EvmRecorder {
                                 r: "0x".to_string(),
                                 type_id: uint256_type_id,
                             };
-                            TraceWriter::register_return(
-                                &mut *self.writer,
-                                ret_val,
-                            );
+                            TraceWriter::register_return(&mut *self.writer, ret_val);
                             tracker.reset();
                         }
                         JumpType::Regular => {}
@@ -385,26 +363,22 @@ impl EvmRecorder {
                     })
                     .unwrap_or_else(|| "uint256".to_string());
 
-                let type_id = TraceWriter::ensure_type_id(
-                    &mut *self.writer,
-                    TypeKind::Int,
-                    &type_name,
-                );
+                let type_id =
+                    TraceWriter::ensure_type_id(&mut *self.writer, TypeKind::Int, &type_name);
 
                 let val = ValueRecord::Raw {
                     r: value_hex,
                     type_id,
                 };
-                TraceWriter::register_variable_with_full_value(
-                    &mut *self.writer,
-                    &var_name,
-                    val,
-                );
+                TraceWriter::register_variable_with_full_value(&mut *self.writer, &var_name, val);
             }
 
             // --- LOG0..LOG4: emit Solidity events ---
             if log.op.as_ref().starts_with("LOG") {
-                let log_num = log.op.as_ref().strip_prefix("LOG")
+                let log_num = log
+                    .op
+                    .as_ref()
+                    .strip_prefix("LOG")
                     .and_then(|n| n.parse::<u32>().ok())
                     .unwrap_or(0);
 
@@ -420,8 +394,7 @@ impl EvmRecorder {
                                 topics.push(format!("0x{:x}", stack[topic_idx]));
                             }
                         }
-                        let content =
-                            format!("LOG{}: {}", log_num, topics.join(", "));
+                        let content = format!("LOG{}: {}", log_num, topics.join(", "));
                         TraceWriter::register_special_event(
                             &mut *self.writer,
                             EventLogKind::Write,
@@ -466,8 +439,14 @@ impl EvmRecorder {
 
         // ---------- initial artifacts for the entry-point contract ----------
         let initial_artifacts = registry.get(&contract_address);
-        let (init_source_map, init_bytecode, init_source_paths, init_source_contents,
-             init_storage_layout, init_solidity_ast) = match initial_artifacts {
+        let (
+            init_source_map,
+            init_bytecode,
+            init_source_paths,
+            init_source_contents,
+            init_storage_layout,
+            init_solidity_ast,
+        ) = match initial_artifacts {
             Some(a) => (
                 Some(&a.source_map),
                 a.runtime_bytecode.as_slice(),
@@ -498,9 +477,8 @@ impl EvmRecorder {
         };
         TraceWriter::start(&mut *self.writer, main_path, Line(1));
 
-        let uint256_type_id = TypeId(
-            TraceWriter::ensure_type_id(&mut *self.writer, TypeKind::Int, "uint256").0,
-        );
+        let uint256_type_id =
+            TypeId(TraceWriter::ensure_type_id(&mut *self.writer, TypeKind::Int, "uint256").0);
 
         // ---------- mutable "current context" pointers ----------
         // We track the current source-map context as owned data on a stack
@@ -574,7 +552,10 @@ impl EvmRecorder {
                                 Address::from_slice(&bytes[12..])
                             })
                             .unwrap_or(Address::ZERO);
-                        let proxy = frame_stack.last().map(|f| f.address).unwrap_or(Address::ZERO);
+                        let proxy = frame_stack
+                            .last()
+                            .map(|f| f.address)
+                            .unwrap_or(Address::ZERO);
                         (addr, CallType::DelegateCall, true, Some(proxy))
                     }
                     "STATICCALL" => {
@@ -614,7 +595,8 @@ impl EvmRecorder {
                             .get(frame_stack.len().saturating_sub(2))
                             .map(|f| f.address)
                             .unwrap_or(contract_address);
-                        registry.get(&caller_addr)
+                        registry
+                            .get(&caller_addr)
                             .and_then(|a| a.source_paths.get(fi as usize))
                             .map(|p| p.as_path())
                     })
@@ -666,18 +648,31 @@ impl EvmRecorder {
             // ------------------------------------------------------------------
             // Resolve source artifacts for the current call frame
             // ------------------------------------------------------------------
-            let current_addr = frame_stack.last().map(|f| f.address).unwrap_or(contract_address);
+            let current_addr = frame_stack
+                .last()
+                .map(|f| f.address)
+                .unwrap_or(contract_address);
             let is_delegate_frame = frame_stack.last().map(|f| f.is_delegate).unwrap_or(false);
             let delegate_proxy = frame_stack.last().and_then(|f| f.delegate_proxy);
 
             // We need to work with references that may or may not exist.
             // To avoid borrow-checker issues with Option<&T> from registry we
             // do the lookup here and produce local Option<&...> values.
-            let (cur_source_map, cur_pc_to_idx, cur_source_paths, cur_source_contents,
-                 cur_storage_layout, cur_solidity_ast):
-                (Option<&SourceMap>, &[usize], &[PathBuf], &[String],
-                 Option<&StorageLayout>, Option<&SolidityAst>) =
-            {
+            let (
+                cur_source_map,
+                cur_pc_to_idx,
+                cur_source_paths,
+                cur_source_contents,
+                cur_storage_layout,
+                cur_solidity_ast,
+            ): (
+                Option<&SourceMap>,
+                &[usize],
+                &[PathBuf],
+                &[String],
+                Option<&StorageLayout>,
+                Option<&SolidityAst>,
+            ) = {
                 if is_delegate_frame {
                     if let Some(proxy_addr) = delegate_proxy {
                         if let Some(view) = registry.get_delegatecall(&current_addr, &proxy_addr) {
@@ -706,8 +701,14 @@ impl EvmRecorder {
                     )
                 } else {
                     // Fall back to initial contract's data for unknown addresses.
-                    (init_source_map, init_pc_to_idx, init_source_paths, init_source_contents,
-                     init_storage_layout, init_solidity_ast)
+                    (
+                        init_source_map,
+                        init_pc_to_idx,
+                        init_source_paths,
+                        init_source_contents,
+                        init_storage_layout,
+                        init_solidity_ast,
+                    )
                 }
             };
 
@@ -784,8 +785,8 @@ impl EvmRecorder {
                 }
 
                 // Jump type: internal calls / returns.
-                if let Some(entry) = cur_source_map
-                    .and_then(|sm| sm.get_entry_for_pc(pc, cur_pc_to_idx))
+                if let Some(entry) =
+                    cur_source_map.and_then(|sm| sm.get_entry_for_pc(pc, cur_pc_to_idx))
                 {
                     match entry.jump_type {
                         JumpType::Into => {
@@ -797,10 +798,7 @@ impl EvmRecorder {
                                         &source_contents_strs,
                                     )
                                 }) {
-                                    format!(
-                                        "fn_at_{}:{}",
-                                        next_loc.file_index, next_loc.line
-                                    )
+                                    format!("fn_at_{}:{}", next_loc.file_index, next_loc.line)
                                 } else {
                                     format!("fn_at_pc_{}", next_log.pc)
                                 }
@@ -863,17 +861,13 @@ impl EvmRecorder {
                     })
                     .unwrap_or_else(|| "uint256".to_string());
 
-                let type_id = TraceWriter::ensure_type_id(
-                    &mut *self.writer,
-                    TypeKind::Int,
-                    &type_name,
-                );
-                let val = ValueRecord::Raw { r: value_hex, type_id };
-                TraceWriter::register_variable_with_full_value(
-                    &mut *self.writer,
-                    &var_name,
-                    val,
-                );
+                let type_id =
+                    TraceWriter::ensure_type_id(&mut *self.writer, TypeKind::Int, &type_name);
+                let val = ValueRecord::Raw {
+                    r: value_hex,
+                    type_id,
+                };
+                TraceWriter::register_variable_with_full_value(&mut *self.writer, &var_name, val);
             }
 
             // ------------------------------------------------------------------

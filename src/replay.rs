@@ -16,14 +16,14 @@ use alloy::primitives::{TxHash, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::types::BlockTransactions;
 use eyre::{Context, Result};
-use foundry_fork_db::{cache::BlockchainDbMeta, BlockchainDb, SharedBackend};
+use foundry_fork_db::{BlockchainDb, SharedBackend, cache::BlockchainDbMeta};
 use revm::{
+    Context as RevmContext,
     context::{BlockEnv, CfgEnv, Journal, TxEnv},
     database::CacheDB,
     handler::{ExecuteCommitEvm, MainBuilder},
     inspector::{InspectCommitEvm, NoOpInspector},
-    primitives::{hardfork::SpecId, TxKind},
-    Context as RevmContext,
+    primitives::{TxKind, hardfork::SpecId},
 };
 
 use crate::inspector::{CodeTracerInspector, ExecutionData};

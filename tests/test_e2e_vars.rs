@@ -12,7 +12,7 @@ use std::process::Command;
 
 use alloy::network::TransactionBuilder;
 use alloy::primitives::{Bytes, U256};
-use alloy::providers::{fillers::*, Identity, Provider, ProviderBuilder, RootProvider};
+use alloy::providers::{Identity, Provider, ProviderBuilder, RootProvider, fillers::*};
 use alloy::rpc::types::TransactionRequest;
 
 use codetracer_evm_recorder::recorder::EvmRecorder;
@@ -22,7 +22,10 @@ use codetracer_evm_recorder::storage_layout::StorageLayout;
 use codetracer_evm_recorder::trace_fetcher;
 
 type HttpProvider = FillProvider<
-    JoinFill<Identity, JoinFill<GasFiller, JoinFill<BlobGasFiller, JoinFill<NonceFiller, ChainIdFiller>>>>,
+    JoinFill<
+        Identity,
+        JoinFill<GasFiller, JoinFill<BlobGasFiller, JoinFill<NonceFiller, ChainIdFiller>>>,
+    >,
     RootProvider,
 >;
 
@@ -126,7 +129,11 @@ impl TraceHelper {
         }
     }
 
-    async fn deploy(&self, deploy_hex: &str, constructor_args: &[u8]) -> alloy::primitives::Address {
+    async fn deploy(
+        &self,
+        deploy_hex: &str,
+        constructor_args: &[u8],
+    ) -> alloy::primitives::Address {
         let mut deploy_bytes = alloy::hex::decode(deploy_hex).expect("invalid deploy bytecode");
         deploy_bytes.extend_from_slice(constructor_args);
         let deploy_tx = TransactionRequest::default()
@@ -199,7 +206,10 @@ fn record_trace(
     recorder.finalize().unwrap();
 
     // Basic sanity checks.
-    assert!(tmp_dir.path().join("trace.bin").exists(), "trace.bin missing");
+    assert!(
+        tmp_dir.path().join("trace.bin").exists(),
+        "trace.bin missing"
+    );
     assert!(
         tmp_dir.path().join("trace_metadata.json").exists(),
         "trace_metadata.json missing"
@@ -233,7 +243,10 @@ impl ContractArtifacts {
             .find(|(k, _)| k.ends_with(contract_suffix))
             .unwrap_or_else(|| panic!("contract {} not found in solc output", contract_suffix));
 
-        let deploy_hex = contract_json["bin"].as_str().expect("missing bin").to_string();
+        let deploy_hex = contract_json["bin"]
+            .as_str()
+            .expect("missing bin")
+            .to_string();
         let runtime_hex = contract_json["bin-runtime"]
             .as_str()
             .expect("missing bin-runtime");
@@ -274,8 +287,16 @@ async fn test_flowtest_vars() {
         .iter()
         .find(|f| f.name == "compute")
         .expect("AST should contain `compute`");
-    assert_eq!(compute_fn.local_variables.len(), 3, "compute() should have 3 locals");
-    let local_names: Vec<_> = compute_fn.local_variables.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(
+        compute_fn.local_variables.len(),
+        3,
+        "compute() should have 3 locals"
+    );
+    let local_names: Vec<_> = compute_fn
+        .local_variables
+        .iter()
+        .map(|v| v.name.as_str())
+        .collect();
     assert!(local_names.contains(&"a"), "missing local 'a'");
     assert!(local_names.contains(&"b"), "missing local 'b'");
     assert!(local_names.contains(&"result"), "missing local 'result'");
@@ -292,7 +313,10 @@ async fn test_flowtest_vars() {
     let struct_logs = helper.call_and_trace(contract, &calldata).await;
 
     // Verify SSTORE operations for storage writes.
-    let sstore_count = struct_logs.iter().filter(|l| l.op.as_ref() == "SSTORE").count();
+    let sstore_count = struct_logs
+        .iter()
+        .filter(|l| l.op.as_ref() == "SSTORE")
+        .count();
     assert!(
         sstore_count >= 2,
         "expected >= 2 SSTOREs (storedA, storedResult), got {}",
@@ -346,7 +370,11 @@ async fn test_solidity_flow_test_vars() {
         .iter()
         .find(|f| f.name == "run")
         .expect("AST should contain `run`");
-    assert_eq!(run_fn.local_variables.len(), 5, "run() should have 5 locals");
+    assert_eq!(
+        run_fn.local_variables.len(),
+        5,
+        "run() should have 5 locals"
+    );
 
     let expected_locals = ["a", "b", "sum_val", "doubled", "final_result"];
     for name in &expected_locals {
@@ -379,8 +407,15 @@ async fn test_solidity_flow_test_vars() {
     let struct_logs = helper.call_and_trace(contract, &calldata).await;
 
     // Verify we have SSTORE for storedResult.
-    let sstore_count = struct_logs.iter().filter(|l| l.op.as_ref() == "SSTORE").count();
-    assert!(sstore_count >= 1, "expected >= 1 SSTORE, got {}", sstore_count);
+    let sstore_count = struct_logs
+        .iter()
+        .filter(|l| l.op.as_ref() == "SSTORE")
+        .count();
+    assert!(
+        sstore_count >= 1,
+        "expected >= 1 SSTORE, got {}",
+        sstore_count
+    );
 
     // Verify LOG1 for the Computed event.
     let log_count = struct_logs
@@ -402,8 +437,7 @@ async fn test_solidity_flow_test_vars() {
 
     eprintln!(
         "test_solidity_flow_test_vars passed: 5 locals, {} SSTOREs, {} LOGs",
-        sstore_count,
-        log_count
+        sstore_count, log_count
     );
 }
 
@@ -422,7 +456,11 @@ async fn test_control_flow_branching() {
         .iter()
         .find(|f| f.name == "branching")
         .expect("AST should contain `branching`");
-    assert_eq!(branching_fn.parameters.len(), 1, "branching() should have 1 param");
+    assert_eq!(
+        branching_fn.parameters.len(),
+        1,
+        "branching() should have 1 param"
+    );
     assert_eq!(
         branching_fn.local_variables.len(),
         3,
@@ -446,7 +484,10 @@ async fn test_control_flow_branching() {
     let struct_logs = helper.call_and_trace(contract, &calldata).await;
 
     // Should have SSTORE for lastResult.
-    let sstore_count = struct_logs.iter().filter(|l| l.op.as_ref() == "SSTORE").count();
+    let sstore_count = struct_logs
+        .iter()
+        .filter(|l| l.op.as_ref() == "SSTORE")
+        .count();
     assert!(sstore_count >= 1, "expected >= 1 SSTORE for lastResult");
 
     let _trace_dir = record_trace(
@@ -541,7 +582,11 @@ async fn test_control_flow_nested_calls() {
         .iter()
         .find(|f| f.name == "nestedCalls")
         .expect("AST should contain `nestedCalls`");
-    assert_eq!(nested_fn.parameters.len(), 2, "nestedCalls() should have 2 params");
+    assert_eq!(
+        nested_fn.parameters.len(),
+        2,
+        "nestedCalls() should have 2 params"
+    );
 
     let arts = ContractArtifacts::from_compiled(&compiled, ":ControlFlowTest");
     let source_path =
@@ -559,7 +604,10 @@ async fn test_control_flow_nested_calls() {
     let struct_logs = helper.call_and_trace(contract, &calldata).await;
 
     // Should have jump-into patterns for internal calls.
-    let jump_count = struct_logs.iter().filter(|l| l.op.as_ref() == "JUMP").count();
+    let jump_count = struct_logs
+        .iter()
+        .filter(|l| l.op.as_ref() == "JUMP")
+        .count();
     assert!(
         jump_count >= 2,
         "nestedCalls should have >= 2 JUMPs (internal calls), got {}",
@@ -610,7 +658,10 @@ async fn test_mapping_storage_patterns() {
     let struct_logs = helper.call_and_trace(contract, &calldata).await;
 
     // 3 array slots + opCount increment = at least 4 SSTOREs.
-    let sstore_count = struct_logs.iter().filter(|l| l.op.as_ref() == "SSTORE").count();
+    let sstore_count = struct_logs
+        .iter()
+        .filter(|l| l.op.as_ref() == "SSTORE")
+        .count();
     assert!(
         sstore_count >= 4,
         "expected >= 4 SSTOREs (3 array + opCount), got {}",
@@ -662,7 +713,10 @@ async fn test_mapping_struct_storage() {
     let struct_logs = helper.call_and_trace(contract, &calldata).await;
 
     // Struct with 3 fields + opCount = at least 2 SSTOREs (fields may pack).
-    let sstore_count = struct_logs.iter().filter(|l| l.op.as_ref() == "SSTORE").count();
+    let sstore_count = struct_logs
+        .iter()
+        .filter(|l| l.op.as_ref() == "SSTORE")
+        .count();
     assert!(
         sstore_count >= 2,
         "expected >= 2 SSTOREs for struct fields, got {}",
@@ -807,8 +861,7 @@ async fn test_syntax_for_loop_var() {
     );
 
     let args = U256::from(5).to_be_bytes::<32>();
-    let (_ast, struct_logs, _trace_dir) =
-        call_syntax_test("forLoop(uint256)", &args).await;
+    let (_ast, struct_logs, _trace_dir) = call_syntax_test("forLoop(uint256)", &args).await;
 
     // Loop runs 5 times → many struct log entries.
     assert!(
@@ -853,8 +906,7 @@ async fn test_syntax_while_loop() {
     );
 
     let args = U256::from(4).to_be_bytes::<32>();
-    let (_ast, struct_logs, _trace_dir) =
-        call_syntax_test("whileLoop(uint256)", &args).await;
+    let (_ast, struct_logs, _trace_dir) = call_syntax_test("whileLoop(uint256)", &args).await;
 
     eprintln!(
         "test_syntax_while_loop passed: {} struct logs, locals={:?}",
@@ -912,8 +964,7 @@ async fn test_syntax_compound_ops() {
     assert!(has_anvil(), "anvil required");
 
     let args = U256::from(10).to_be_bytes::<32>();
-    let (_ast, struct_logs, _trace_dir) =
-        call_syntax_test("compoundOps(uint256)", &args).await;
+    let (_ast, struct_logs, _trace_dir) = call_syntax_test("compoundOps(uint256)", &args).await;
 
     // result = 10 → 20 → 17 → 34  (+=10, -=3, *=2)
     eprintln!(
@@ -1006,8 +1057,7 @@ async fn test_syntax_block_scope() {
     );
 
     let args = U256::from(5).to_be_bytes::<32>();
-    let (_ast, struct_logs, _trace_dir) =
-        call_syntax_test("blockScope(uint256)", &args).await;
+    let (_ast, struct_logs, _trace_dir) = call_syntax_test("blockScope(uint256)", &args).await;
 
     eprintln!(
         "test_syntax_block_scope passed: {} struct logs, locals={:?}",
@@ -1061,24 +1111,29 @@ async fn test_syntax_type_cast() {
 
     // Named returns: addr (address), flag (bool), hash (bytes32)
     assert!(
-        local_names.iter().any(|(n, t)| *n == "addr" && *t == "address"),
+        local_names
+            .iter()
+            .any(|(n, t)| *n == "addr" && *t == "address"),
         "should have addr:address; got {:?}",
         local_names
     );
     assert!(
-        local_names.iter().any(|(n, t)| *n == "flag" && *t == "bool"),
+        local_names
+            .iter()
+            .any(|(n, t)| *n == "flag" && *t == "bool"),
         "should have flag:bool; got {:?}",
         local_names
     );
     assert!(
-        local_names.iter().any(|(n, t)| *n == "hash" && *t == "bytes32"),
+        local_names
+            .iter()
+            .any(|(n, t)| *n == "hash" && *t == "bytes32"),
         "should have hash:bytes32; got {:?}",
         local_names
     );
 
     let args = U256::from(0x1234u64).to_be_bytes::<32>();
-    let (_ast, struct_logs, _trace_dir) =
-        call_syntax_test("typeCast(uint256)", &args).await;
+    let (_ast, struct_logs, _trace_dir) = call_syntax_test("typeCast(uint256)", &args).await;
 
     eprintln!(
         "test_syntax_type_cast passed: {} struct logs, locals={:?}",
@@ -1114,8 +1169,7 @@ async fn test_syntax_incr_decr() {
     assert!(has_anvil(), "anvil required");
 
     let args = U256::from(10).to_be_bytes::<32>();
-    let (_ast, struct_logs, _trace_dir) =
-        call_syntax_test("incrDecr(uint256)", &args).await;
+    let (_ast, struct_logs, _trace_dir) = call_syntax_test("incrDecr(uint256)", &args).await;
 
     eprintln!(
         "test_syntax_incr_decr passed: {} struct logs",

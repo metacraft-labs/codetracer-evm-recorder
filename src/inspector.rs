@@ -2,8 +2,9 @@
 //! for later processing by the CodeTracer source mapping / recording layer.
 
 use revm::interpreter::{
+    CallInputs, CallOutcome, CallScheme, CreateInputs, CreateOutcome, Interpreter,
+    InterpreterTypes,
     interpreter_types::{Jumps, MemoryTr, StackTr},
-    CallInputs, CallOutcome, CallScheme, CreateInputs, CreateOutcome, Interpreter, InterpreterTypes,
 };
 use revm::primitives::{Address, Log, U256};
 

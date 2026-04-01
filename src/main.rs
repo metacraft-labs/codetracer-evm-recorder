@@ -137,8 +137,8 @@ async fn record(args: RecordArgs) -> Result<()> {
         ));
     }
 
-    let compiled_json_str =
-        String::from_utf8(compile_output.stdout.clone()).context("solc output is not valid UTF-8")?;
+    let compiled_json_str = String::from_utf8(compile_output.stdout.clone())
+        .context("solc output is not valid UTF-8")?;
     let compiled: serde_json::Value =
         serde_json::from_str(&compiled_json_str).context("solc output is not valid JSON")?;
 
@@ -173,22 +173,25 @@ async fn record(args: RecordArgs) -> Result<()> {
         .ok_or_else(|| eyre::eyre!("no contracts found in solc output"))?;
 
     // Extract the contract name for use as the recorder's program label.
-    let contract_name = contract_key
-        .split(':')
-        .last()
-        .unwrap_or(file_stem);
+    let contract_name = contract_key.split(':').last().unwrap_or(file_stem);
 
     let deploy_bytecode_hex = contract_json["bin"]
         .as_str()
         .ok_or_else(|| eyre::eyre!("missing 'bin' in contract JSON for {}", contract_key))?;
 
-    let runtime_bytecode_hex = contract_json["bin-runtime"]
-        .as_str()
-        .ok_or_else(|| eyre::eyre!("missing 'bin-runtime' in contract JSON for {}", contract_key))?;
+    let runtime_bytecode_hex = contract_json["bin-runtime"].as_str().ok_or_else(|| {
+        eyre::eyre!(
+            "missing 'bin-runtime' in contract JSON for {}",
+            contract_key
+        )
+    })?;
 
-    let source_map_raw = contract_json["srcmap-runtime"]
-        .as_str()
-        .ok_or_else(|| eyre::eyre!("missing 'srcmap-runtime' in contract JSON for {}", contract_key))?;
+    let source_map_raw = contract_json["srcmap-runtime"].as_str().ok_or_else(|| {
+        eyre::eyre!(
+            "missing 'srcmap-runtime' in contract JSON for {}",
+            contract_key
+        )
+    })?;
 
     let storage_layout_json = &contract_json["storage-layout"];
 
@@ -294,10 +297,7 @@ async fn record(args: RecordArgs) -> Result<()> {
         .contract_address
         .ok_or_else(|| eyre::eyre!("deploy transaction produced no contract address"))?;
 
-    eprintln!(
-        "Deployed {} at {}",
-        contract_name, contract_address
-    );
+    eprintln!("Deployed {} at {}", contract_name, contract_address);
 
     // -----------------------------------------------------------------------
     // 6. Call the target function
@@ -360,9 +360,11 @@ async fn record(args: RecordArgs) -> Result<()> {
     // -----------------------------------------------------------------------
     // 9. Process through the recorder and write trace output
     // -----------------------------------------------------------------------
-    let mut recorder = EvmRecorder::new(contract_name, trace_dir)
-        .context("failed to create EvmRecorder")?;
-    recorder.initialize().context("failed to initialize EvmRecorder")?;
+    let mut recorder =
+        EvmRecorder::new(contract_name, trace_dir).context("failed to create EvmRecorder")?;
+    recorder
+        .initialize()
+        .context("failed to initialize EvmRecorder")?;
 
     let source_path_ref: &Path = source_copy_path.as_path();
     recorder
@@ -377,12 +379,11 @@ async fn record(args: RecordArgs) -> Result<()> {
         )
         .context("recorder failed to process structlogs")?;
 
-    recorder.finalize().context("failed to finalize EvmRecorder")?;
+    recorder
+        .finalize()
+        .context("failed to finalize EvmRecorder")?;
 
-    eprintln!(
-        "Trace written to {}",
-        trace_dir.display()
-    );
+    eprintln!("Trace written to {}", trace_dir.display());
     eprintln!("  trace.bin");
     eprintln!("  trace_metadata.json");
     eprintln!("  trace_paths.json");
@@ -435,10 +436,7 @@ fn resolve_function_name(abi: &[serde_json::Value], preferred: &str) -> String {
 /// Full ABI encoding for arbitrary constructor signatures is outside the scope
 /// of the CLI. If the contract's constructor requires non-trivial arguments,
 /// encoding will fail with a descriptive error.
-fn encode_constructor_args(
-    abi: &[serde_json::Value],
-    contract_name: &str,
-) -> Result<Vec<u8>> {
+fn encode_constructor_args(abi: &[serde_json::Value], contract_name: &str) -> Result<Vec<u8>> {
     // Find the constructor entry in the ABI, if any.
     let constructor = abi
         .iter()
@@ -462,10 +460,7 @@ fn encode_constructor_args(
     // For a single uint256 argument we use a default value of 10,
     // which matches the canonical flow-test contract pattern.
     if inputs.len() == 1 {
-        let type_str = inputs[0]
-            .get("type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let type_str = inputs[0].get("type").and_then(|v| v.as_str()).unwrap_or("");
         if type_str.starts_with("uint") {
             // ABI-encode a single uint256(10): 32-byte big-endian
             let mut encoded = vec![0u8; 32];

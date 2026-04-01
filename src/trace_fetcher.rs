@@ -1,8 +1,8 @@
 //! RPC client for fetching `debug_traceTransaction` struct logs from an EVM node.
 
 use alloy::primitives::TxHash;
-use alloy::providers::ext::DebugApi;
 use alloy::providers::ProviderBuilder;
+use alloy::providers::ext::DebugApi;
 use alloy::rpc::types::trace::geth::{
     DefaultFrame, GethDebugTracingOptions, GethDefaultTracingOptions, GethTrace,
 };
@@ -13,10 +13,7 @@ use crate::structlog::StructLog;
 ///
 /// Connects to `rpc_url`, calls `debug_traceTransaction` with the default
 /// (structLog) tracer, and returns the resulting log entries for processing.
-pub async fn fetch_struct_logs(
-    rpc_url: &str,
-    tx_hash: TxHash,
-) -> eyre::Result<DefaultFrame> {
+pub async fn fetch_struct_logs(rpc_url: &str, tx_hash: TxHash) -> eyre::Result<DefaultFrame> {
     let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
 
     let opts = GethDebugTracingOptions {
