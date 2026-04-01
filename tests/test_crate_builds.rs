@@ -18,7 +18,7 @@ fn test_source_map_parsing() {
     let raw = "0:100:0:-:0;26:74:0;39:5:0;:11;44:1;:5:0:i;102:3:0:o";
     let map = SourceMap::parse(raw);
 
-    assert!(map.len() > 0);
+    assert!(!map.is_empty());
     let first = map.get(0).unwrap();
     assert_eq!(first.offset, 0);
     assert_eq!(first.length, 100);
