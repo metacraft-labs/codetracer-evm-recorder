@@ -357,15 +357,16 @@ impl StackTracker {
         // the moment right after the POP removes the placeholder.
         if let Some(offset) = source_offset {
             for v in vars_in_scope {
-                if let Some(ref stmt) = v.statement_range {
-                    if stmt.contains_offset(offset) && !self.has_label(&v.name) {
-                        if let Some(top) = self.slots.last_mut() {
-                            *top = Some(v.name.clone());
-                            assignments.push(VarAssignment {
-                                name: v.name.clone(),
-                                stack_position: self.slots.len() - 1,
-                            });
-                        }
+                if let Some(ref stmt) = v.statement_range
+                    && stmt.contains_offset(offset)
+                    && !self.has_label(&v.name)
+                {
+                    if let Some(top) = self.slots.last_mut() {
+                        *top = Some(v.name.clone());
+                        assignments.push(VarAssignment {
+                            name: v.name.clone(),
+                            stack_position: self.slots.len() - 1,
+                        });
                     }
                 }
             }
@@ -473,10 +474,10 @@ impl StackTracker {
         // Priority 3: offset within the enclosing statement range (covers
         // the initializer expression).
         for v in vars_in_scope {
-            if let Some(ref stmt) = v.statement_range {
-                if stmt.contains_offset(offset) {
-                    return Some(v.name.clone());
-                }
+            if let Some(ref stmt) = v.statement_range
+                && stmt.contains_offset(offset)
+            {
+                return Some(v.name.clone());
             }
         }
 
