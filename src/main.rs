@@ -384,7 +384,7 @@ async fn record(args: RecordArgs) -> Result<()> {
         .context("failed to finalize EvmRecorder")?;
 
     eprintln!("Trace written to {}", trace_dir.display());
-    eprintln!("  trace.bin");
+    eprintln!("  trace.json");
     eprintln!("  trace_metadata.json");
     eprintln!("  trace_paths.json");
     eprintln!("  {}", source_filename.to_string_lossy());

@@ -206,10 +206,12 @@ fn record_trace(
         .unwrap();
     recorder.finalize().unwrap();
 
-    // Basic sanity checks.
+    // Basic sanity checks — accept either JSON or Binary trace format.
+    let trace_json = tmp_dir.path().join("trace.json");
+    let trace_bin = tmp_dir.path().join("trace.bin");
     assert!(
-        tmp_dir.path().join("trace.bin").exists(),
-        "trace.bin missing"
+        trace_json.exists() || trace_bin.exists(),
+        "expected trace.json or trace.bin in output directory"
     );
     assert!(
         tmp_dir.path().join("trace_metadata.json").exists(),
@@ -220,10 +222,9 @@ fn record_trace(
         "trace_paths.json missing"
     );
 
-    let trace_size = std::fs::metadata(tmp_dir.path().join("trace.bin"))
-        .unwrap()
-        .len();
-    assert!(trace_size > 0, "trace.bin should be non-empty");
+    let trace_file = if trace_json.exists() { trace_json } else { trace_bin };
+    let trace_size = std::fs::metadata(&trace_file).unwrap().len();
+    assert!(trace_size > 0, "trace file should be non-empty");
 
     tmp_dir
 }
