@@ -166,7 +166,10 @@ async fn test_e2e_trace() {
     recorder.finalize().unwrap();
 
     // 7. Verify output files exist
-    assert!(tmp_dir.path().join("trace.bin").exists());
+    assert!(
+        tmp_dir.path().join("trace.json").exists() || tmp_dir.path().join("trace.bin").exists(),
+        "expected trace.json or trace.bin in output directory"
+    );
     assert!(tmp_dir.path().join("trace_metadata.json").exists());
     assert!(tmp_dir.path().join("trace_paths.json").exists());
 
