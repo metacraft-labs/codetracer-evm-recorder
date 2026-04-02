@@ -157,6 +157,14 @@ impl EvmRecorder {
         // symbolic stack consistent with the real EVM stack.
         let mut stack_trackers: Vec<StackTracker> = Vec::new();
 
+        // --- Storage variable carry-forward ---
+        // SSTORE opcodes only fire once per slot write.  To make storage
+        // variables visible in the debugger at every subsequent step, we cache
+        // the last written value per variable name and re-emit the full set
+        // whenever a new source-line step is registered.
+        let mut storage_state: std::collections::HashMap<String, ValueRecord> =
+            std::collections::HashMap::new();
+
         for (i, log) in struct_logs.iter().enumerate() {
             let pc = log.pc as usize;
 
@@ -224,6 +232,17 @@ impl EvmRecorder {
                         .unwrap_or(main_path);
                     TraceWriter::register_step(&mut *self.writer, step_path, Line(line as i64));
                     prev_line = Some(current);
+
+                    // Re-emit all cached storage variables so they remain visible
+                    // in the debugger at every source-line step, not just at the
+                    // SSTORE opcode.
+                    for (svar_name, svar_val) in &storage_state {
+                        TraceWriter::register_variable_with_full_value(
+                            &mut *self.writer,
+                            svar_name,
+                            svar_val.clone(),
+                        );
+                    }
                 }
 
                 // --- Local variable emission (M5) ---
@@ -370,6 +389,8 @@ impl EvmRecorder {
                     r: value_hex,
                     type_id,
                 };
+                // Cache the storage variable for carry-forward to subsequent steps.
+                storage_state.insert(var_name.clone(), val.clone());
                 TraceWriter::register_variable_with_full_value(&mut *self.writer, &var_name, val);
             }
 
@@ -516,6 +537,14 @@ impl EvmRecorder {
         let mut prev_line: Option<(i32, u32)> = None;
         let mut stack_trackers: Vec<StackTracker> = Vec::new();
 
+        // Storage variable carry-forward per call frame.  Each entry in the
+        // Vec corresponds to an EVM call depth (depth 1 = index 0).  When a
+        // new call frame is entered, a fresh map is pushed; when a frame is
+        // exited, its map is popped.
+        let mut storage_states: Vec<std::collections::HashMap<String, ValueRecord>> = vec![
+            std::collections::HashMap::new(),
+        ];
+
         for (i, log) in struct_logs.iter().enumerate() {
             let pc = log.pc as usize;
 
@@ -613,6 +642,10 @@ impl EvmRecorder {
                 while stack_trackers.len() < log.depth as usize {
                     stack_trackers.push(StackTracker::new());
                 }
+                // Fresh storage state for the new call frame.
+                while storage_states.len() < log.depth as usize {
+                    storage_states.push(std::collections::HashMap::new());
+                }
             } else if log.depth < prev_depth {
                 let depth_diff = prev_depth - log.depth;
                 for _ in 0..depth_diff {
@@ -622,12 +655,11 @@ impl EvmRecorder {
                     };
                     TraceWriter::register_return(&mut *self.writer, ret_val);
                     stack_trackers.pop();
+                    // Pop the exited frame's storage state (keep root frame).
+                    if storage_states.len() > 1 {
+                        storage_states.pop();
+                    }
                     call_tree.exit_call(i);
-                    // Never pop the root frame (the entry-point contract).  An
-                    // unexpected depth-0 or multi-level drop must not leave the
-                    // frame_stack empty, which would otherwise cause a fallback
-                    // to the entry-point address for all subsequent lookups and
-                    // confuse the source-map selection.
                     if frame_stack.len() > 1 {
                         frame_stack.pop();
                     }
@@ -744,6 +776,18 @@ impl EvmRecorder {
                         .unwrap_or(main_path);
                     TraceWriter::register_step(&mut *self.writer, step_path, Line(line as i64));
                     prev_line = Some(current);
+
+                    // Re-emit all cached storage variables for the current frame.
+                    let ss_idx = (log.depth as usize).saturating_sub(1);
+                    if let Some(ss) = storage_states.get(ss_idx) {
+                        for (svar_name, svar_val) in ss {
+                            TraceWriter::register_variable_with_full_value(
+                                &mut *self.writer,
+                                svar_name,
+                                svar_val.clone(),
+                            );
+                        }
+                    }
                 }
 
                 // Local variable tracking (M5 logic, applied per-frame).
@@ -867,6 +911,12 @@ impl EvmRecorder {
                     r: value_hex,
                     type_id,
                 };
+                // Cache for carry-forward to subsequent steps in this frame.
+                let ss_idx = (log.depth as usize).saturating_sub(1);
+                while storage_states.len() <= ss_idx {
+                    storage_states.push(std::collections::HashMap::new());
+                }
+                storage_states[ss_idx].insert(var_name.clone(), val.clone());
                 TraceWriter::register_variable_with_full_value(&mut *self.writer, &var_name, val);
             }
 
