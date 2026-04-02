@@ -155,6 +155,24 @@ impl EvmRecorder {
         let mut prev_line: Option<(i32, u32)> = None; // (file_index, line)
         let mut prev_depth: u64 = 1;
 
+        // --- First internal call merging ---
+        // The Solidity compiler's function dispatcher (contract preamble) runs
+        // before the actual user function. `TraceWriter::start()` opens a
+        // `<toplevel>` call at depth 0, and the first JumpType::Into from the
+        // dispatcher into the target function would normally push depth to 1.
+        //
+        // This is problematic because the db-backend's "step over" (next)
+        // skips all steps at deeper call depths. If the user function body
+        // is at depth 1, stepping from the entry point skips the ENTIRE body.
+        //
+        // Fix: absorb the first JumpType::Into into `<toplevel>` by not
+        // emitting a register_call for it, and skip the matching OutOf return.
+        // This keeps the target function's steps at depth 0.
+        let mut first_internal_call_absorbed = false;
+        // Track the call nesting depth relative to the absorbed call so we
+        // know when the matching return (OutOf) happens.
+        let mut absorbed_call_nesting: i32 = 0;
+
         // --- Local variable tracking (M5) ---
         // One StackTracker per call-stack depth.  We keep a small Vec indexed
         // by depth (depth 1 = index 0).  Resetting on depth changes keeps the
@@ -309,46 +327,79 @@ impl EvmRecorder {
                 if let Some(entry) = source_map.get_entry_for_pc(pc, &pc_to_idx) {
                     match entry.jump_type {
                         JumpType::Into => {
-                            // Internal function call
-                            // Try to determine the target function from the
-                            // next structLog entry's source location.
-                            let fn_name = if let Some(next_log) = struct_logs.get(i + 1) {
-                                if let Some(next_loc) = source_map.resolve_pc(
-                                    next_log.pc as usize,
-                                    &pc_to_idx,
-                                    source_contents,
-                                ) {
-                                    format!("fn_at_{}:{}", next_loc.file_index, next_loc.line)
-                                } else {
-                                    format!("fn_at_pc_{}", next_log.pc)
-                                }
+                            if !first_internal_call_absorbed {
+                                // Absorb the first internal call (dispatcher → target
+                                // function) into <toplevel>. This keeps the target
+                                // function's steps at depth 0 so step-over works.
+                                first_internal_call_absorbed = true;
+                                absorbed_call_nesting = 1;
+                                // Still reset the tracker for a clean start.
+                                tracker.reset();
                             } else {
-                                "unknown_fn".to_string()
-                            };
+                                // Track nesting within the absorbed scope.
+                                if absorbed_call_nesting > 0 {
+                                    absorbed_call_nesting += 1;
+                                }
 
-                            let fn_path = source_paths
-                                .get(file_idx as usize)
-                                .copied()
-                                .unwrap_or(main_path);
-                            let fn_id = TraceWriter::ensure_function_id(
-                                &mut *self.writer,
-                                &fn_name,
-                                fn_path,
-                                Line(line as i64),
-                            );
-                            TraceWriter::register_call(&mut *self.writer, fn_id, vec![]);
-                            // Reset the tracker when entering an internal function
-                            // so we start fresh for the callee's locals.
-                            tracker.reset();
+                                // Internal function call
+                                // Try to determine the target function from the
+                                // next structLog entry's source location.
+                                let fn_name = if let Some(next_log) = struct_logs.get(i + 1) {
+                                    if let Some(next_loc) = source_map.resolve_pc(
+                                        next_log.pc as usize,
+                                        &pc_to_idx,
+                                        source_contents,
+                                    ) {
+                                        format!("fn_at_{}:{}", next_loc.file_index, next_loc.line)
+                                    } else {
+                                        format!("fn_at_pc_{}", next_log.pc)
+                                    }
+                                } else {
+                                    "unknown_fn".to_string()
+                                };
+
+                                let fn_path = source_paths
+                                    .get(file_idx as usize)
+                                    .copied()
+                                    .unwrap_or(main_path);
+                                let fn_id = TraceWriter::ensure_function_id(
+                                    &mut *self.writer,
+                                    &fn_name,
+                                    fn_path,
+                                    Line(line as i64),
+                                );
+                                TraceWriter::register_call(&mut *self.writer, fn_id, vec![]);
+                                // Reset the tracker when entering an internal function
+                                // so we start fresh for the callee's locals.
+                                tracker.reset();
+                            }
                         }
                         JumpType::OutOf => {
-                            // Internal function return
-                            let ret_val = ValueRecord::Raw {
-                                r: "0x".to_string(),
-                                type_id: uint256_type_id,
-                            };
-                            TraceWriter::register_return(&mut *self.writer, ret_val);
-                            tracker.reset();
+                            if absorbed_call_nesting > 0 {
+                                absorbed_call_nesting -= 1;
+                                if absorbed_call_nesting == 0 {
+                                    // This is the return from the absorbed call.
+                                    // Don't emit register_return — the <toplevel>
+                                    // call will be closed by finalize().
+                                    tracker.reset();
+                                } else {
+                                    // Return from a nested call within the absorbed scope.
+                                    let ret_val = ValueRecord::Raw {
+                                        r: "0x".to_string(),
+                                        type_id: uint256_type_id,
+                                    };
+                                    TraceWriter::register_return(&mut *self.writer, ret_val);
+                                    tracker.reset();
+                                }
+                            } else {
+                                // Internal function return outside the absorbed scope.
+                                let ret_val = ValueRecord::Raw {
+                                    r: "0x".to_string(),
+                                    type_id: uint256_type_id,
+                                };
+                                TraceWriter::register_return(&mut *self.writer, ret_val);
+                                tracker.reset();
+                            }
                         }
                         JumpType::Regular => {}
                     }
