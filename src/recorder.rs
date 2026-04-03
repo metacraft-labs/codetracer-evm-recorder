@@ -1,4 +1,4 @@
-use codetracer_trace_types::{EventLogKind, Line, TypeId, TypeKind, ValueRecord};
+use codetracer_trace_types::{EventLogKind, Line, TypeId, TypeKind, ValueRecord, NONE_VALUE};
 use codetracer_trace_writer::trace_writer::TraceWriter;
 use codetracer_trace_writer::{TraceEventsFileFormat, create_trace_writer};
 use std::path::{Path, PathBuf};
@@ -1013,6 +1013,9 @@ impl EvmRecorder {
 
     /// Finalize the trace output, flushing all buffered data.
     pub fn finalize(&mut self) -> eyre::Result<()> {
+        // Close the <toplevel> call that start() opened.
+        TraceWriter::register_return(&mut *self.writer, NONE_VALUE);
+
         TraceWriter::finish_writing_trace_events(&mut *self.writer)
             .map_err(|e| eyre::eyre!("{}", e))?;
         TraceWriter::finish_writing_trace_metadata(&mut *self.writer)
