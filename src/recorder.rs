@@ -596,9 +596,8 @@ impl EvmRecorder {
         // Vec corresponds to an EVM call depth (depth 1 = index 0).  When a
         // new call frame is entered, a fresh map is pushed; when a frame is
         // exited, its map is popped.
-        let mut storage_states: Vec<std::collections::HashMap<String, ValueRecord>> = vec![
-            std::collections::HashMap::new(),
-        ];
+        let mut storage_states: Vec<std::collections::HashMap<String, ValueRecord>> =
+            vec![std::collections::HashMap::new()];
 
         for (i, log) in struct_logs.iter().enumerate() {
             let pc = log.pc as usize;
