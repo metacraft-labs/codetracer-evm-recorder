@@ -222,7 +222,11 @@ fn record_trace(
         "trace_paths.json missing"
     );
 
-    let trace_file = if trace_json.exists() { trace_json } else { trace_bin };
+    let trace_file = if trace_json.exists() {
+        trace_json
+    } else {
+        trace_bin
+    };
     let trace_size = std::fs::metadata(&trace_file).unwrap().len();
     assert!(trace_size > 0, "trace file should be non-empty");
 
