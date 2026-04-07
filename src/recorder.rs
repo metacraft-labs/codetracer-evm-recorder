@@ -45,7 +45,7 @@ pub struct EvmRecorder {
 impl EvmRecorder {
     /// Create a new recorder targeting `output_dir`.
     pub fn new(program: &str, output_dir: &Path) -> eyre::Result<Self> {
-        let writer = create_trace_writer(program, &[], TraceEventsFileFormat::Binary);
+        let writer = create_trace_writer(program, &[], TraceEventsFileFormat::Ctfs);
         Ok(Self {
             writer,
             type_names: Vec::new(),
@@ -53,9 +53,9 @@ impl EvmRecorder {
         })
     }
 
-    /// Initialize trace output files (trace.bin, trace_metadata.json, trace_paths.json).
+    /// Initialize trace output files (trace.ct, trace_metadata.json, trace_paths.json).
     pub fn initialize(&mut self) -> eyre::Result<()> {
-        let events_path = self.output_dir.join("trace.bin");
+        let events_path = self.output_dir.join("trace.ct");
         let metadata_path = self.output_dir.join("trace_metadata.json");
         let paths_path = self.output_dir.join("trace_paths.json");
 

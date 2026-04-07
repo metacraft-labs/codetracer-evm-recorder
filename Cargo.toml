@@ -8,8 +8,8 @@ license = "Apache-2.0"
 
 [dependencies]
 # CodeTracer trace format
-codetracer_trace_types = "0.16"
-codetracer_trace_writer = "0.17"
+codetracer_trace_types = { version = "0.16", path = "../codetracer-trace-format/codetracer_trace_types" }
+codetracer_trace_writer = { version = "0.17", path = "../codetracer-trace-format/codetracer_trace_writer" }
 
 # EVM execution
 revm = "34"
