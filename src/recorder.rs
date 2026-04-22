@@ -1,6 +1,6 @@
 use codetracer_trace_types::{EventLogKind, Line, NONE_VALUE, TypeId, TypeKind, ValueRecord};
-use codetracer_trace_writer::trace_writer::TraceWriter;
-use codetracer_trace_writer::{TraceEventsFileFormat, create_trace_writer};
+use codetracer_trace_writer_nim::trace_writer::TraceWriter;
+use codetracer_trace_writer_nim::{TraceEventsFileFormat, create_trace_writer};
 use std::path::{Path, PathBuf};
 
 use alloy::primitives::Address;
@@ -474,6 +474,7 @@ impl EvmRecorder {
                         TraceWriter::register_special_event(
                             &mut *self.writer,
                             EventLogKind::Write,
+                            "",
                             &content,
                         );
                     }
@@ -999,6 +1000,7 @@ impl EvmRecorder {
                         TraceWriter::register_special_event(
                             &mut *self.writer,
                             EventLogKind::Write,
+                            "",
                             &content,
                         );
                     }
