@@ -206,29 +206,25 @@ fn record_trace(
         .unwrap();
     recorder.finalize().unwrap();
 
-    // Basic sanity checks — accept either JSON or Binary trace format.
-    let trace_json = tmp_dir.path().join("trace.json");
-    let trace_bin = tmp_dir.path().join("trace.bin");
+    // Basic sanity checks — verify .ct container produced by the Nim CTFS backend.
+    let ct_files: Vec<_> = std::fs::read_dir(tmp_dir.path())
+        .expect("failed to read output directory")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().map_or(false, |ext| ext == "ct"))
+        .collect();
     assert!(
-        trace_json.exists() || trace_bin.exists(),
-        "expected trace.json or trace.bin in output directory"
+        !ct_files.is_empty(),
+        "expected .ct file in output directory {:?}",
+        tmp_dir.path()
     );
-    assert!(
-        tmp_dir.path().join("trace_metadata.json").exists(),
-        "trace_metadata.json missing"
+    let ct_content = std::fs::read(&ct_files[0]).expect("failed to read .ct file");
+    assert!(ct_content.len() >= 5, ".ct file too small");
+    assert_eq!(
+        &ct_content[..5],
+        &[0xC0u8, 0xDE, 0x72, 0xAC, 0xE2],
+        "CTFS magic bytes mismatch"
     );
-    assert!(
-        tmp_dir.path().join("trace_paths.json").exists(),
-        "trace_paths.json missing"
-    );
-
-    let trace_file = if trace_json.exists() {
-        trace_json
-    } else {
-        trace_bin
-    };
-    let trace_size = std::fs::metadata(&trace_file).unwrap().len();
-    assert!(trace_size > 0, "trace file should be non-empty");
 
     tmp_dir
 }
