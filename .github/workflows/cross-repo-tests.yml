@@ -117,13 +117,22 @@ jobs:
           CT_REF="${{ steps.resolve-refs.outputs.codetracer_ref }}"
           DEST="$GITHUB_WORKSPACE/../codetracer"
           rm -rf "$DEST"
-          git clone --depth 1 --recurse-submodules --shallow-submodules \
+          git clone --depth 1 \
             "https://x-access-token:${GH_TOKEN}@github.com/metacraft-labs/codetracer.git" \
             "$DEST"
           if [ "$CT_REF" != "main" ]; then
             git -C "$DEST" fetch origin "$CT_REF"
             git -C "$DEST" checkout "$CT_REF"
           fi
+          # Initialize submodules one-by-one to tolerate individual failures
+          set +e
+          cd "$DEST"
+          git submodule init
+          git submodule foreach --quiet 'echo $name' | while read -r mod; do
+            git submodule update --depth 1 "$mod" || \
+              echo "WARNING: failed to update submodule $mod (continuing)"
+          done
+          set -e
 
       - name: Clone codetracer-vscode-extension
         env:
