@@ -1024,6 +1024,7 @@ impl EvmRecorder {
             .map_err(|e| eyre::eyre!("{}", e))?;
         TraceWriter::finish_writing_trace_paths(&mut *self.writer)
             .map_err(|e| eyre::eyre!("{}", e))?;
+        self.writer.close().map_err(|e| eyre::eyre!("{}", e))?;
         Ok(())
     }
 }

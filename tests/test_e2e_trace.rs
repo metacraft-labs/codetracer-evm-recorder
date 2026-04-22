@@ -165,13 +165,25 @@ async fn test_e2e_trace() {
 
     recorder.finalize().unwrap();
 
-    // 7. Verify output files exist
+    // 7. Verify output files exist (.ct container produced by the Nim CTFS backend)
+    let ct_files: Vec<_> = std::fs::read_dir(tmp_dir.path())
+        .expect("failed to read output directory")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().map_or(false, |ext| ext == "ct"))
+        .collect();
     assert!(
-        tmp_dir.path().join("trace.json").exists() || tmp_dir.path().join("trace.bin").exists(),
-        "expected trace.json or trace.bin in output directory"
+        !ct_files.is_empty(),
+        "expected .ct file in output directory {:?}",
+        tmp_dir.path()
     );
-    assert!(tmp_dir.path().join("trace_metadata.json").exists());
-    assert!(tmp_dir.path().join("trace_paths.json").exists());
+    let ct_content = std::fs::read(&ct_files[0]).expect("failed to read .ct file");
+    assert!(ct_content.len() >= 5, ".ct file too small");
+    assert_eq!(
+        &ct_content[..5],
+        &[0xC0u8, 0xDE, 0x72, 0xAC, 0xE2],
+        "CTFS magic bytes mismatch"
+    );
 
     // 8. Verify we had SSTORE opcodes (storage writes)
     let sstore_count = struct_logs
