@@ -36,12 +36,33 @@ jobs:
           fi
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y capnproto
+        run: sudo apt-get update && sudo apt-get install -y capnproto libzstd-dev
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+
+      - name: Install Nim
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: "2.2.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build Nim trace writer library
+        run: |
+          TOKEN="${{ secrets.GH_READ_METACRAFT_PRIVATE_REPOS }}"
+          if [ -n "${TOKEN}" ]; then
+            CLONE_URL="https://x-access-token:${TOKEN}@github.com/metacraft-labs/codetracer-trace-format-nim.git"
+          else
+            CLONE_URL="https://github.com/metacraft-labs/codetracer-trace-format-nim.git"
+          fi
+          git clone --depth 1 "${CLONE_URL}" "${GITHUB_WORKSPACE}/../codetracer-trace-format-nim"
+          cd "${GITHUB_WORKSPACE}/../codetracer-trace-format-nim"
+          nimble install -y stew results
+          nim c --app:staticlib --mm:arc --noMain -d:release --passC:'-fPIC' -p:src \
+            -o:libcodetracer_trace_writer.a src/codetracer_trace_writer_ffi.nim
+          echo "CODETRACER_NIM_LIB_DIR=${GITHUB_WORKSPACE}/../codetracer-trace-format-nim" >> "$GITHUB_ENV"
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
@@ -79,6 +100,30 @@ jobs:
             git clone --no-checkout "${CLONE_URL}" "${GITHUB_WORKSPACE}/../codetracer-trace-format"
             git -C "${GITHUB_WORKSPACE}/../codetracer-trace-format" checkout "${TF_REF}"
           fi
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libzstd-dev
+
+      - name: Install Nim
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: "2.2.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build Nim trace writer library
+        run: |
+          TOKEN="${{ secrets.GH_READ_METACRAFT_PRIVATE_REPOS }}"
+          if [ -n "${TOKEN}" ]; then
+            CLONE_URL="https://x-access-token:${TOKEN}@github.com/metacraft-labs/codetracer-trace-format-nim.git"
+          else
+            CLONE_URL="https://github.com/metacraft-labs/codetracer-trace-format-nim.git"
+          fi
+          git clone --depth 1 "${CLONE_URL}" "${GITHUB_WORKSPACE}/../codetracer-trace-format-nim"
+          cd "${GITHUB_WORKSPACE}/../codetracer-trace-format-nim"
+          nimble install -y stew results
+          nim c --app:staticlib --mm:arc --noMain -d:release --passC:'-fPIC' -p:src \
+            -o:libcodetracer_trace_writer.a src/codetracer_trace_writer_ffi.nim
+          echo "CODETRACER_NIM_LIB_DIR=${GITHUB_WORKSPACE}/../codetracer-trace-format-nim" >> "$GITHUB_ENV"
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
