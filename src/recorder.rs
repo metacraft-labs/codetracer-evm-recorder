@@ -44,8 +44,22 @@ pub struct EvmRecorder {
 
 impl EvmRecorder {
     /// Create a new recorder targeting `output_dir`.
+    ///
+    /// The recorder uses [`TraceEventsFileFormat::Ctfs`] (CodeTracer's
+    /// canonical multi-stream container format).  This matches the format
+    /// used by the Ruby and Python native recorders post-2026-04 (handoff
+    /// entries 1.21 / 1.22 / 1.27) and is the format the Nim trace reader
+    /// (`NimTraceReaderHandle` in `codetracer_trace_writer_nim`) and the
+    /// db-backend's `CTFSTraceReader` consume directly via the structured
+    /// `ct_reader_*` FFI — no postprocessing pass required.
+    ///
+    /// Historical note: this previously used `TraceEventsFileFormat::Json`
+    /// because the OLD CBOR+Zstd binary format produced empty locals in the
+    /// db-backend.  That note is no longer applicable; the modern CTFS
+    /// multi-stream format is well-tested across Ruby/Python and is the
+    /// CTFS-migration target tracked by mission goal #6.
     pub fn new(program: &str, output_dir: &Path) -> eyre::Result<Self> {
-        let writer = create_trace_writer(program, &[], TraceEventsFileFormat::Json);
+        let writer = create_trace_writer(program, &[], TraceEventsFileFormat::Ctfs);
         Ok(Self {
             writer,
             type_names: Vec::new(),
@@ -55,9 +69,11 @@ impl EvmRecorder {
 
     /// Initialize trace output files.
     ///
-    /// Uses JSON format for trace events (trace.json) because the Binary
-    /// CBOR+zstd format produced incorrect results when read by db-backend
-    /// (empty locals despite valid data).  JSON is authoritative and well-tested.
+    /// The path arguments are essentially hints for the Nim writer: the
+    /// produced `.ct` file goes to `<output_dir>/<program>.ct` regardless,
+    /// so we keep these as the legacy `trace.json` / `trace_metadata.json`
+    /// / `trace_paths.json` names for backward compatibility with any
+    /// external callers that introspect them.
     pub fn initialize(&mut self) -> eyre::Result<()> {
         let events_path = self.output_dir.join("trace.json");
         let metadata_path = self.output_dir.join("trace_metadata.json");
@@ -341,21 +357,58 @@ impl EvmRecorder {
                                     absorbed_call_nesting += 1;
                                 }
 
-                                // Internal function call
-                                // Try to determine the target function from the
-                                // next structLog entry's source location.
-                                let fn_name = if let Some(next_log) = struct_logs.get(i + 1) {
-                                    if let Some(next_loc) = source_map.resolve_pc(
-                                        next_log.pc as usize,
-                                        &pc_to_idx,
-                                        source_contents,
-                                    ) {
-                                        format!("fn_at_{}:{}", next_loc.file_index, next_loc.line)
+                                // Internal function call.
+                                //
+                                // Resolve the target function name by looking
+                                // at upcoming structLog entries' source offsets
+                                // and matching them to a function definition
+                                // in the Solidity AST.  We scan up to a
+                                // small number of entries because the
+                                // first instruction(s) after a JUMP into a
+                                // function often land on JUMPDEST or
+                                // dispatcher preamble that has no source
+                                // mapping (file_index == -1) — the function
+                                // body proper starts a few opcodes later.
+                                //
+                                // Falls back to a `fn_at_*` placeholder when
+                                // the AST isn't available or when the offset
+                                // doesn't fall inside any known function.
+                                let fn_name = {
+                                    // Lookahead window: empirically 5 is enough
+                                    // for solc-generated function prologues
+                                    // (PUSH/JUMPDEST/POP/...) before the body.
+                                    const LOOKAHEAD: usize = 5;
+                                    let resolved_via_ast = solidity_ast.and_then(|ast| {
+                                        (1..=LOOKAHEAD).find_map(|step| {
+                                            let nl = struct_logs.get(i + step)?;
+                                            let entry = source_map
+                                                .get_entry_for_pc(nl.pc as usize, &pc_to_idx)?;
+                                            if entry.file_index < 0 {
+                                                return None;
+                                            }
+                                            ast.function_at(entry.offset, entry.file_index)
+                                                .map(|f| f.name.clone())
+                                        })
+                                    });
+                                    if let Some(name) = resolved_via_ast {
+                                        name
+                                    } else if let Some(next_log) = struct_logs.get(i + 1) {
+                                        let next_pc = next_log.pc as usize;
+                                        if let Some(next_loc) = source_map.resolve_pc(
+                                            next_pc,
+                                            &pc_to_idx,
+                                            source_contents,
+                                        ) {
+                                            format!(
+                                                "fn_at_{}:{}",
+                                                next_loc.file_index, next_loc.line
+                                            )
+                                        } else {
+                                            format!("fn_at_pc_{}", next_log.pc)
+                                        }
                                     } else {
-                                        format!("fn_at_pc_{}", next_log.pc)
+                                        "unknown_fn".to_string()
                                     }
-                                } else {
-                                    "unknown_fn".to_string()
                                 };
 
                                 let fn_path = source_paths
@@ -449,7 +502,20 @@ impl EvmRecorder {
                 TraceWriter::register_variable_with_full_value(&mut *self.writer, &var_name, val);
             }
 
-            // --- LOG0..LOG4: emit Solidity events ---
+            // --- LOG0..LOG4: emit Solidity events as EvmEvent ---
+            //
+            // EVM `LOG{n}` opcodes are structured contract events, not stdout
+            // writes.  Tag them with `EventLogKind::EvmEvent` so the frontend
+            // routes them through the EVM-event renderer (codetracer's
+            // `event_log.nim` and `flow.nim` special-case this kind) rather
+            // than displaying them in the terminal-output pane alongside
+            // `Write` records produced by other recorders.
+            //
+            // metadata carries the opcode mnemonic (`LOG0`..`LOG4`); the
+            // content carries the indexed topics.  This matches the
+            // Stylus recorder's convention of `metadata = hook name,
+            // content = payload` (see codetracer-native-backend stylus
+            // tracer + db-backend `tests/stylus_flow_integration.rs`).
             if log.op.as_ref().starts_with("LOG") {
                 let log_num = log
                     .op
@@ -470,11 +536,12 @@ impl EvmRecorder {
                                 topics.push(format!("0x{:x}", stack[topic_idx]));
                             }
                         }
-                        let content = format!("LOG{}: {}", log_num, topics.join(", "));
+                        let metadata = format!("LOG{}", log_num);
+                        let content = topics.join(", ");
                         TraceWriter::register_special_event(
                             &mut *self.writer,
-                            EventLogKind::Write,
-                            "",
+                            EventLogKind::EvmEvent,
+                            &metadata,
                             &content,
                         );
                     }
@@ -889,20 +956,44 @@ impl EvmRecorder {
                 {
                     match entry.jump_type {
                         JumpType::Into => {
-                            let fn_name = if let Some(next_log) = struct_logs.get(i + 1) {
-                                if let Some(next_loc) = cur_source_map.and_then(|sm| {
-                                    sm.resolve_pc(
-                                        next_log.pc as usize,
-                                        cur_pc_to_idx,
-                                        &source_contents_strs,
-                                    )
-                                }) {
-                                    format!("fn_at_{}:{}", next_loc.file_index, next_loc.line)
+                            // Resolve the target function name via the
+                            // Solidity AST (mirror of the single-contract
+                            // path).  Lookahead handles solc-generated
+                            // function prologues (JUMPDEST + PUSH/POP) that
+                            // sit at the head of every internal function and
+                            // typically have no source map entry.
+                            let fn_name = {
+                                const LOOKAHEAD: usize = 5;
+                                let resolved_via_ast = cur_solidity_ast.and_then(|ast| {
+                                    (1..=LOOKAHEAD).find_map(|step| {
+                                        let nl = struct_logs.get(i + step)?;
+                                        let entry = cur_source_map
+                                            .and_then(|sm| sm.get_entry_for_pc(nl.pc as usize, cur_pc_to_idx))?;
+                                        if entry.file_index < 0 {
+                                            return None;
+                                        }
+                                        ast.function_at(entry.offset, entry.file_index)
+                                            .map(|f| f.name.clone())
+                                    })
+                                });
+                                if let Some(name) = resolved_via_ast {
+                                    name
+                                } else if let Some(next_log) = struct_logs.get(i + 1) {
+                                    let next_pc = next_log.pc as usize;
+                                    if let Some(next_loc) = cur_source_map.and_then(|sm| {
+                                        sm.resolve_pc(
+                                            next_pc,
+                                            cur_pc_to_idx,
+                                            &source_contents_strs,
+                                        )
+                                    }) {
+                                        format!("fn_at_{}:{}", next_loc.file_index, next_loc.line)
+                                    } else {
+                                        format!("fn_at_pc_{}", next_log.pc)
+                                    }
                                 } else {
-                                    format!("fn_at_pc_{}", next_log.pc)
+                                    "unknown_fn".to_string()
                                 }
-                            } else {
-                                "unknown_fn".to_string()
                             };
 
                             let fn_path = source_paths_paths
@@ -976,7 +1067,10 @@ impl EvmRecorder {
             }
 
             // ------------------------------------------------------------------
-            // LOG0..LOG4: emit Solidity events
+            // LOG0..LOG4: emit Solidity events as EvmEvent
+            //
+            // See the equivalent block in `record_from_structlog` for
+            // rationale on `EventLogKind::EvmEvent`.
             // ------------------------------------------------------------------
             if log.op.as_ref().starts_with("LOG") {
                 let log_num = log
@@ -996,11 +1090,12 @@ impl EvmRecorder {
                                 topics.push(format!("0x{:x}", stack[topic_idx]));
                             }
                         }
-                        let content = format!("LOG{}: {}", log_num, topics.join(", "));
+                        let metadata = format!("LOG{}", log_num);
+                        let content = topics.join(", ");
                         TraceWriter::register_special_event(
                             &mut *self.writer,
-                            EventLogKind::Write,
-                            "",
+                            EventLogKind::EvmEvent,
+                            &metadata,
                             &content,
                         );
                     }
