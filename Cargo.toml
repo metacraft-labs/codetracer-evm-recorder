@@ -36,3 +36,7 @@ clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
 tempfile = "3"
+# CTFS trace reader used by smoke tests to verify the events emitted by
+# the recorder land in the .ct container correctly (CTFS audit, see
+# AUDIT-CTFS-2026-05.md).
+codetracer_trace_reader = { path = "../codetracer-trace-format/codetracer_trace_reader" }
