@@ -352,6 +352,20 @@ async fn audit_ctfs_call_args_writer_gap_known_empty() {
         fn_names.push(reader.function(i).expect("function name missing"));
     }
 
+    // Narrow the remaining gap: `TraceWriter::arg` registers the EVM
+    // parameters as varnames / step values, so source-level recovery and the
+    // variable side of the Nim writer FFI are both live.  The failure is the
+    // separate pending-call-arg attachment consumed by `register_call`.
+    let mut varnames = Vec::new();
+    for i in 0..reader.varname_count() {
+        varnames.push(reader.varname(i).expect("varname missing"));
+    }
+    assert!(
+        varnames.iter().any(|name| name == "x") && varnames.iter().any(|name| name == "y"),
+        "expected staged add(x, y) names in the CTFS varname table, got {:?}",
+        varnames
+    );
+
     let mut add_call_key = None;
     for k in 0..reader.call_count() {
         let raw = reader.call_json(k).expect("call record JSON missing");

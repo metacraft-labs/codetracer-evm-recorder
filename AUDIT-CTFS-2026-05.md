@@ -115,10 +115,18 @@ confirmed the recorder recovered and staged `x=0xa` and `y=0x14` for
 `FlowTest.add(uint256,uint256)`, but `NimTraceReaderHandle::call_json`
 still returned `"args":[]`.
 
+An additional focused diagnostic now asserts that `x` and `y` are present
+in the CTFS varname table while the `add` call record still has empty
+`args`.  That proves the EVM source-level parameter recovery and the
+variable-value side of `TraceWriter::arg` are live in the produced `.ct`;
+the missing layer is specifically the pending-call-argument attachment
+that `trace_writer_register_call` is supposed to consume.
+
 Remaining next-layer fix shape: inspect the
 `codetracer_trace_writer_nim` / `codetracer_trace_writer_ffi.nim`
 `trace_writer_register_call_arg` path used by Rust recorders.  The
-recorder reaches `TraceWriter::arg` before `register_call`, but the
+recorder reaches `TraceWriter::arg` before `register_call` and the CTFS
+varname stream includes the staged parameter names, but the
 pending-call-args buffer is not represented in the readback call record
 for this dependency path.  Once that writer-side attachment issue is
 fixed, replace
