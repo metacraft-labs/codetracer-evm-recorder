@@ -367,6 +367,8 @@ async fn audit_ctfs_call_args_writer_gap_known_empty() {
     );
 
     let mut add_call_key = None;
+    let mut call_summaries = Vec::new();
+    let mut calls_with_args = Vec::new();
     for k in 0..reader.call_count() {
         let raw = reader.call_json(k).expect("call record JSON missing");
         let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
@@ -375,13 +377,38 @@ async fn audit_ctfs_call_args_writer_gap_known_empty() {
             .or_else(|| parsed["functionId"].as_u64())
             .unwrap_or(u64::MAX);
         let fid = fid_raw.saturating_sub(1);
-        if fn_names.get(fid as usize).is_some_and(|name| name == "add") {
+        let function_name = fn_names
+            .get(fid as usize)
+            .cloned()
+            .unwrap_or_else(|| format!("<unknown:{fid_raw}>"));
+        let args_len = parsed["args"].as_array().map_or(0, Vec::len);
+        call_summaries.push(format!("{k}:{function_name}:args={args_len}"));
+        if args_len > 0 {
+            calls_with_args.push(format!("{k}:{function_name}:args={args_len}"));
+        }
+        if function_name == "add" {
             add_call_key = Some(k);
-            break;
         }
     }
 
-    let add_call_key = add_call_key.expect("expected a Call record for internal `add`");
+    let add_call_key = add_call_key.unwrap_or_else(|| {
+        panic!(
+            "expected a Call record for internal `add`; call summaries: {:?}",
+            call_summaries
+        )
+    });
+    assert_eq!(
+        add_call_key, 0,
+        "expected the first completed call record to be `add`; this rules \
+         out an earlier call consuming the staged add(x, y) args. Call \
+         summaries: {:?}",
+        call_summaries
+    );
+    assert!(
+        calls_with_args.is_empty(),
+        "staged add(x, y) args were attached to a different call record: {:?}",
+        calls_with_args
+    );
     let raw = reader
         .call_json(add_call_key)
         .expect("add call record JSON missing");
@@ -394,6 +421,7 @@ async fn audit_ctfs_call_args_writer_gap_known_empty() {
         arg_count, 0,
         "CTFS Call.args are now attached for add(x, y); replace this \
          diagnostic with a positive readback assertion and close the \
-         writer-side follow-up in AUDIT-CTFS-2026-05.md"
+         writer-side follow-up in AUDIT-CTFS-2026-05.md. Call summaries: {:?}",
+        call_summaries
     );
 }

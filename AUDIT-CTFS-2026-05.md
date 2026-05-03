@@ -122,6 +122,14 @@ variable-value side of `TraceWriter::arg` are live in the produced `.ct`;
 the missing layer is specifically the pending-call-argument attachment
 that `trace_writer_register_call` is supposed to consume.
 
+The latest diagnostic run also proves the staged arguments are not simply
+being consumed by an earlier call: the first completed call record is the
+internal `add` call itself, and every call record in the trace still reports
+zero args.  The loss is therefore between the EVM-side
+`TraceWriter::arg("x"/"y", ...)` staging call and the next
+`trace_writer_register_call(add)` writing a populated `CallRecord.args`
+entry, not later call-key lookup or accidental attachment to a sibling call.
+
 Remaining next-layer fix shape: inspect the
 `codetracer_trace_writer_nim` / `codetracer_trace_writer_ffi.nim`
 `trace_writer_register_call_arg` path used by Rust recorders.  The
