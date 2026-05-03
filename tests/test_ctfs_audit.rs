@@ -289,9 +289,7 @@ async fn audit_ctfs_log_event_kind_is_evmevent() {
     let mut stderr_count = 0usize;
     let mut other_kinds = Vec::new();
     for i in 0..event_count {
-        let raw = reader
-            .event_json(i)
-            .expect("event record JSON missing");
+        let raw = reader.event_json(i).expect("event record JSON missing");
         let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
         let kind = parsed["kind"].as_str().unwrap_or("<missing>").to_string();
         if kind == "stderr" {
@@ -333,18 +331,13 @@ async fn audit_ctfs_step_records_emitted() {
     );
 }
 
-/// Audit (b) — KNOWN GAP regression guard.
-///
-/// CallRecord.args is currently always empty for the EVM recorder.  Solidity
-/// internal calls put their formal-parameter values on the EVM stack at
-/// JumpType::Into time; a future fix would walk the callee's symbolic
-/// stack-tracker against the next struct-log entry's stack to recover them
-/// and stage them via `NimTraceWriter::arg(name, value)` before
-/// register_call (see AUDIT-CTFS-2026-05.md, "Open: call args").  Until that
-/// fix lands, pin the current behaviour so a future change that DOES
-/// populate args trips this test and forces an audit-doc update.
+/// Audit (b) diagnostic: the recorder can now recover and stage Solidity
+/// internal-call parameters, but the current Nim writer dependency still
+/// reads the resulting CTFS `Call.args` back as empty.  Keep this guard until
+/// the writer-side `register_call_arg` attachment path is fixed, then replace
+/// it with a positive `add(x, y)` readback assertion.
 #[tokio::test]
-async fn audit_ctfs_call_args_known_empty() {
+async fn audit_ctfs_call_args_writer_gap_known_empty() {
     if !has_solc() || !has_anvil() {
         eprintln!("skipping: solc/anvil unavailable");
         return;
@@ -353,31 +346,40 @@ async fn audit_ctfs_call_args_known_empty() {
     let tmp_dir = record_flow_test().await;
     let reader = open_reader(tmp_dir.path());
 
-    let call_count = reader.call_count();
-    assert!(
-        call_count > 0,
-        "no Call records to audit (separate test covers Call emission)"
-    );
-    let mut calls_with_args: u64 = 0;
-    for k in 0..call_count {
+    let fn_count = reader.function_count();
+    let mut fn_names: Vec<String> = Vec::with_capacity(fn_count as usize);
+    for i in 0..fn_count {
+        fn_names.push(reader.function(i).expect("function name missing"));
+    }
+
+    let mut add_call_key = None;
+    for k in 0..reader.call_count() {
         let raw = reader.call_json(k).expect("call record JSON missing");
         let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        // The Nim reader serialises args as either a JSON array directly
-        // on `args` or as a separate field — parse defensively.
-        let args_empty = match parsed.get("args") {
-            Some(serde_json::Value::Array(v)) => v.is_empty(),
-            Some(_) => false,
-            None => true,
-        };
-        if !args_empty {
-            calls_with_args += 1;
+        let fid_raw = parsed["function_id"]
+            .as_u64()
+            .or_else(|| parsed["functionId"].as_u64())
+            .unwrap_or(u64::MAX);
+        let fid = fid_raw.saturating_sub(1);
+        if fn_names.get(fid as usize).is_some_and(|name| name == "add") {
+            add_call_key = Some(k);
+            break;
         }
     }
+
+    let add_call_key = add_call_key.expect("expected a Call record for internal `add`");
+    let raw = reader
+        .call_json(add_call_key)
+        .expect("add call record JSON missing");
+    let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let args = parsed["args"]
+        .as_array()
+        .expect("add call args should be a JSON array");
+    let arg_count = args.len();
     assert_eq!(
-        calls_with_args, 0,
-        "Call.args is now populated for {}/{} calls — \
-         delete this regression-pin test and document the fix in \
-         AUDIT-CTFS-2026-05.md",
-        calls_with_args, call_count
+        arg_count, 0,
+        "CTFS Call.args are now attached for add(x, y); replace this \
+         diagnostic with a positive readback assertion and close the \
+         writer-side follow-up in AUDIT-CTFS-2026-05.md"
     );
 }

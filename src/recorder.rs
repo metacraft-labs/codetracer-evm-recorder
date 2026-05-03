@@ -7,11 +7,13 @@ use alloy::primitives::Address;
 
 use crate::call_tree::{CallTree, CallType};
 use crate::contract_registry::ContractRegistry;
-use crate::solidity_ast::SolidityAst;
+use crate::solidity_ast::{FunctionDef, SolidityAst};
 use crate::source_map::{self, JumpType, SourceMap};
 use crate::stack_tracker::StackTracker;
 use crate::storage_layout::StorageLayout;
 use crate::structlog::StructLog;
+
+const INTERNAL_CALL_LOOKAHEAD: usize = 5;
 
 /// Map a Solidity type name to the appropriate CodeTracer `TypeKind`.
 fn type_kind_for_solidity_type(type_name: &str) -> TypeKind {
@@ -32,6 +34,73 @@ fn type_kind_for_solidity_type(type_name: &str) -> TypeKind {
         // (storage slots, memory pointers, or addresses).
         _ => TypeKind::Raw,
     }
+}
+
+/// Resolve the Solidity function entered by an internal EVM jump.
+///
+/// The first few instructions after a Solidity internal-function JUMP often
+/// belong to compiler-generated prologue code with no useful source map entry.
+/// Looking ahead a small fixed window lets us land on the first body
+/// instruction whose source offset falls inside the callee's FunctionDefinition.
+fn resolve_internal_call_target<'a>(
+    struct_logs: &[StructLog],
+    current_index: usize,
+    source_map: &SourceMap,
+    pc_to_idx: &[usize],
+    solidity_ast: Option<&'a SolidityAst>,
+) -> Option<&'a FunctionDef> {
+    let ast = solidity_ast?;
+    (1..=INTERNAL_CALL_LOOKAHEAD).find_map(|step| {
+        let next_log = struct_logs.get(current_index + step)?;
+        let entry = source_map.get_entry_for_pc(next_log.pc as usize, pc_to_idx)?;
+        if entry.file_index < 0 {
+            return None;
+        }
+        ast.function_at(entry.offset, entry.file_index)
+    })
+}
+
+fn stage_internal_call_args(
+    writer: &mut dyn TraceWriter,
+    tracker: &mut StackTracker,
+    target_fn: Option<&FunctionDef>,
+    concrete_stack: Option<&[alloy::primitives::U256]>,
+    stack_items_above_params: usize,
+) {
+    let Some(target_fn) = target_fn else {
+        tracker.reset();
+        return;
+    };
+
+    let param_names: Vec<String> = target_fn
+        .parameters
+        .iter()
+        .map(|param| param.name.clone())
+        .collect();
+    let Some(stack) = concrete_stack else {
+        tracker.reset();
+        return;
+    };
+    let callee_stack_depth = stack.len().saturating_sub(stack_items_above_params);
+    let occupied_slots = param_names.len() + stack_items_above_params;
+    if param_names.is_empty() || occupied_slots > stack.len() {
+        tracker.seed_top_labels(callee_stack_depth, &param_names);
+        return;
+    }
+
+    let first_param_slot = stack.len() - occupied_slots;
+    for (idx, param) in target_fn.parameters.iter().enumerate() {
+        let value = stack[first_param_slot + idx];
+        let type_kind = type_kind_for_solidity_type(&param.type_name);
+        let type_id = TraceWriter::ensure_type_id(writer, type_kind, &param.type_name);
+        let val_record = ValueRecord::Raw {
+            r: format!("0x{:x}", value),
+            type_id,
+        };
+        writer.arg(&param.name, val_record);
+    }
+
+    tracker.seed_top_labels(callee_stack_depth, &param_names);
 }
 
 /// Main EVM trace recorder. Processes EVM execution traces (structLog or
@@ -373,25 +442,16 @@ impl EvmRecorder {
                                 // Falls back to a `fn_at_*` placeholder when
                                 // the AST isn't available or when the offset
                                 // doesn't fall inside any known function.
+                                let target_fn = resolve_internal_call_target(
+                                    struct_logs,
+                                    i,
+                                    source_map,
+                                    &pc_to_idx,
+                                    solidity_ast,
+                                );
                                 let fn_name = {
-                                    // Lookahead window: empirically 5 is enough
-                                    // for solc-generated function prologues
-                                    // (PUSH/JUMPDEST/POP/...) before the body.
-                                    const LOOKAHEAD: usize = 5;
-                                    let resolved_via_ast = solidity_ast.and_then(|ast| {
-                                        (1..=LOOKAHEAD).find_map(|step| {
-                                            let nl = struct_logs.get(i + step)?;
-                                            let entry = source_map
-                                                .get_entry_for_pc(nl.pc as usize, &pc_to_idx)?;
-                                            if entry.file_index < 0 {
-                                                return None;
-                                            }
-                                            ast.function_at(entry.offset, entry.file_index)
-                                                .map(|f| f.name.clone())
-                                        })
-                                    });
-                                    if let Some(name) = resolved_via_ast {
-                                        name
+                                    if let Some(target_fn) = target_fn {
+                                        target_fn.name.clone()
                                     } else if let Some(next_log) = struct_logs.get(i + 1) {
                                         let next_pc = next_log.pc as usize;
                                         if let Some(next_loc) = source_map.resolve_pc(
@@ -421,10 +481,14 @@ impl EvmRecorder {
                                     fn_path,
                                     Line(line as i64),
                                 );
+                                stage_internal_call_args(
+                                    &mut *self.writer,
+                                    tracker,
+                                    target_fn,
+                                    log.stack.as_deref(),
+                                    1,
+                                );
                                 TraceWriter::register_call(&mut *self.writer, fn_id, vec![]);
-                                // Reset the tracker when entering an internal function
-                                // so we start fresh for the callee's locals.
-                                tracker.reset();
                             }
                         }
                         JumpType::OutOf => {
@@ -962,30 +1026,22 @@ impl EvmRecorder {
                             // function prologues (JUMPDEST + PUSH/POP) that
                             // sit at the head of every internal function and
                             // typically have no source map entry.
+                            let target_fn = cur_source_map.and_then(|source_map| {
+                                resolve_internal_call_target(
+                                    struct_logs,
+                                    i,
+                                    source_map,
+                                    cur_pc_to_idx,
+                                    cur_solidity_ast,
+                                )
+                            });
                             let fn_name = {
-                                const LOOKAHEAD: usize = 5;
-                                let resolved_via_ast = cur_solidity_ast.and_then(|ast| {
-                                    (1..=LOOKAHEAD).find_map(|step| {
-                                        let nl = struct_logs.get(i + step)?;
-                                        let entry = cur_source_map
-                                            .and_then(|sm| sm.get_entry_for_pc(nl.pc as usize, cur_pc_to_idx))?;
-                                        if entry.file_index < 0 {
-                                            return None;
-                                        }
-                                        ast.function_at(entry.offset, entry.file_index)
-                                            .map(|f| f.name.clone())
-                                    })
-                                });
-                                if let Some(name) = resolved_via_ast {
-                                    name
+                                if let Some(target_fn) = target_fn {
+                                    target_fn.name.clone()
                                 } else if let Some(next_log) = struct_logs.get(i + 1) {
                                     let next_pc = next_log.pc as usize;
                                     if let Some(next_loc) = cur_source_map.and_then(|sm| {
-                                        sm.resolve_pc(
-                                            next_pc,
-                                            cur_pc_to_idx,
-                                            &source_contents_strs,
-                                        )
+                                        sm.resolve_pc(next_pc, cur_pc_to_idx, &source_contents_strs)
                                     }) {
                                         format!("fn_at_{}:{}", next_loc.file_index, next_loc.line)
                                     } else {
@@ -1006,8 +1062,14 @@ impl EvmRecorder {
                                 fn_path,
                                 Line(line as i64),
                             );
+                            stage_internal_call_args(
+                                &mut *self.writer,
+                                tracker,
+                                target_fn,
+                                log.stack.as_deref(),
+                                1,
+                            );
                             TraceWriter::register_call(&mut *self.writer, fn_id, vec![]);
-                            tracker.reset();
                         }
                         JumpType::OutOf => {
                             let ret_val = ValueRecord::Raw {

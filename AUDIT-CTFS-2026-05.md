@@ -11,7 +11,7 @@ and JavaScript (1.38) recorders set the canonical fix patterns.
 | # | Check | Status | Notes |
 |---|---|---|---|
 | a | `register_call` for each call | OK (post-fix) | Internal Solidity calls now use AST-resolved function names (`add` etc.) instead of `fn_at_pc_<N>` placeholders.  External call frames at depth changes already routed through `register_call`. |
-| b | Call args via `register_call_arg` / `arg` | **OPEN GAP** | `Call.args` is always empty (`register_call(fid, vec![])`).  Solidity calling conventions require symbolic stack analysis to recover argument values; full fix tracked as a follow-up.  Smoke test pins the current behaviour. |
+| b | Call args via `register_call_arg` / `arg` | **PARTIAL** | Internal Solidity calls now seed callee parameter labels from the concrete EVM stack at `JumpType::Into` and stage each `(name, value)` through `TraceWriter::arg` before `register_call`.  CTFS readback still reports empty `Call.args`, pinning the remaining writer-side attachment gap. |
 | c | Write / WriteOther for stdout/stderr | N/A — fixed semantically | EVM has no stdout/stderr.  LOG opcodes now route through `register_special_event(EvmEvent, "LOG{n}", topics)` instead of the `Write` mis-tag, matching the Stylus tracer convention and the frontend's `EventLogKind::EvmEvent` rendering path. |
 | d | Thread events (ThreadStart / Exit / Switch) | OK | EVM is single-threaded; recorder correctly emits no thread events.  Smoke-test guard rails this against future regressions. |
 | e | Step records for line navigation | OK | `register_step(path, line)` is called on every source-line change; e2e traces produce >5 steps for `FlowTest::compute()`. |
@@ -85,65 +85,47 @@ unavailable or the offset doesn't fall inside any known function.
 - `audit_ctfs_step_records_emitted` — asserts at least 5 Step
   records are produced for `FlowTest::compute()` so source-line
   navigation works end-to-end.
-- `audit_ctfs_call_args_known_empty` — pins the open-gap behaviour
-  for `Call.args`: any future change that DOES populate args trips
-  this test and forces an audit-doc update.
+- `audit_ctfs_call_args_writer_gap_known_empty` — pins the remaining
+  writer/readback gap: even after recorder-side symbolic stack staging,
+  the internal `add(x, y)` call currently reads back with empty CTFS
+  `Call.args`.
+
+## Concrete partial fix applied in follow-up
+
+### 4. Internal-call `Call.args` staged from the callee stack
+
+The follow-up keeps the AST lookahead from the original audit, but
+adds explicit stack-label seeding for already-live callee parameters.
+At `JumpType::Into`, after resolving the target `FunctionDef`, the
+recorder reads the current JUMP instruction's pre-execution concrete
+stack.  Solidity internal-call parameters sit immediately below the
+jump destination in source parameter order, so the recorder stages each
+value with `TraceWriter::arg(param.name, ValueRecord::Raw{...})` before
+emitting `register_call`.
+
+`StackTracker::seed_top_labels(stack_depth, labels)` mirrors the same
+mapping in the symbolic tracker.  That keeps parameter locals visible
+after the function entry instead of resetting the tracker to an empty
+stack.  If the AST or concrete stack is unavailable, the recorder still
+emits the call and resets the tracker; it does not fabricate args.
+
+The fix is applied to both `record_from_structlog` and
+`record_from_structlog_multi_contract`.  A targeted diagnostic run
+confirmed the recorder recovered and staged `x=0xa` and `y=0x14` for
+`FlowTest.add(uint256,uint256)`, but `NimTraceReaderHandle::call_json`
+still returned `"args":[]`.
+
+Remaining next-layer fix shape: inspect the
+`codetracer_trace_writer_nim` / `codetracer_trace_writer_ffi.nim`
+`trace_writer_register_call_arg` path used by Rust recorders.  The
+recorder reaches `TraceWriter::arg` before `register_call`, but the
+pending-call-args buffer is not represented in the readback call record
+for this dependency path.  Once that writer-side attachment issue is
+fixed, replace
+`audit_ctfs_call_args_writer_gap_known_empty` with a positive assertion
+that `add(x, y)` carries two args named `x` and `y`.
 
 ## Open gaps / follow-ups
-
-### Call args (`b`)
-
-Populating `CallRecord.args` for Solidity internal calls requires
-walking the EVM stack at the entry of each callee with a fresh
-`StackTracker` initialised from the target function's formal
-parameters, then staging each `(name, value)` via
-`NimTraceWriter::arg(name, value)` BEFORE emitting `register_call`.
-The values for the formal parameters live at the top of the EVM stack
-at function entry by Solidity calling convention; the existing
-`StackTracker::get_variable_value` API already does the
-position-to-value lookup.
-
-Concrete fix shape:
-
-```rust
-// At JumpType::Into, after resolving target_fn via AST:
-if let Some(next_log) = struct_logs.get(i + 1)
-    && let Some(target_fn) = solidity_ast.and_then(|ast|
-        ast.function_at(next_offset, file_idx))
-{
-    let mut callee_tracker = StackTracker::new();
-    if let Some(op) = opcode_from_name(next_log.op.as_ref()) {
-        let in_scope: Vec<&VarDecl> =
-            target_fn.parameters.iter().collect();
-        let _ = callee_tracker.process_step(
-            op, next_log.pc as usize,
-            Some(next_offset_off), &in_scope);
-    }
-    if let Some(stack) = next_log.stack.as_ref() {
-        for param in &target_fn.parameters {
-            if let Some(val) = callee_tracker
-                .get_variable_value(&param.name, stack)
-            {
-                let kind = type_kind_for_solidity_type(&param.type_name);
-                let type_id = TraceWriter::ensure_type_id(
-                    &mut *self.writer, kind, &param.type_name);
-                let v = ValueRecord::Raw {
-                    r: format!("0x{:x}", val), type_id };
-                let _ = TraceWriter::arg(&mut *self.writer,
-                                          &param.name, v);
-            }
-        }
-    }
-}
-TraceWriter::register_call(&mut *self.writer, fn_id, vec![]);
-```
-
-This mirrors the Ruby (1.22) and JS (1.38) call-arg-staging fixes but
-is significantly more complex because EVM has no API call that gives
-you "function entered with args (x=7, b=35)" — values must be
-recovered from the symbolic stack.  The known-gap regression test in
-`test_ctfs_audit.rs::audit_ctfs_call_args_known_empty` will trip when
-this lands.
 
 ### Multi-stream `EvmEvent` semantics
 
