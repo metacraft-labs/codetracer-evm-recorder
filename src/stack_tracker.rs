@@ -58,6 +58,32 @@ impl StackTracker {
         self.slots.len()
     }
 
+    /// Seed labels for values that already exist on the concrete EVM stack.
+    ///
+    /// Solidity internal calls transfer parameters by leaving their values on
+    /// the stack before the callee starts executing.  No callee-side PUSH
+    /// instruction creates those slots, so `process_step` cannot infer the
+    /// names from source ranges.  The recorder calls this at `JumpType::Into`
+    /// after resolving the callee function and before processing the first
+    /// callee instruction.
+    ///
+    /// `labels` are assigned left-to-right to the top `labels.len()` stack
+    /// entries.  For `f(x, y)` and stack `[... x, y]`, `x` labels
+    /// `stack_depth - 2` and `y` labels `stack_depth - 1`.
+    pub fn seed_top_labels(&mut self, stack_depth: usize, labels: &[String]) {
+        self.slots.clear();
+        self.slots.resize(stack_depth, None);
+
+        if labels.is_empty() || labels.len() > stack_depth {
+            return;
+        }
+
+        let first_labelled_slot = stack_depth - labels.len();
+        for (idx, label) in labels.iter().enumerate() {
+            self.slots[first_labelled_slot + idx] = Some(label.clone());
+        }
+    }
+
     /// Process one EVM opcode step, updating the symbolic stack and returning
     /// any newly detected variable assignments.
     ///
@@ -769,5 +795,17 @@ mod tests {
             assignments.is_empty(),
             "should not match outside all ranges"
         );
+    }
+
+    #[test]
+    fn test_seed_top_labels_for_call_parameters() {
+        let mut t = StackTracker::new();
+        t.seed_top_labels(4, &["x".to_string(), "y".to_string()]);
+
+        let stack = vec![u256(1), u256(2), u256(10), u256(20)];
+        assert_eq!(t.depth(), 4);
+        assert_eq!(t.get_variable_value("x", &stack), Some(u256(10)));
+        assert_eq!(t.get_variable_value("y", &stack), Some(u256(20)));
+        assert_eq!(t.get_variable_value("z", &stack), None);
     }
 }
