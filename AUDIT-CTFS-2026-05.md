@@ -85,10 +85,14 @@ unavailable or the offset doesn't fall inside any known function.
 - `audit_ctfs_step_records_emitted` — asserts at least 5 Step
   records are produced for `FlowTest::compute()` so source-line
   navigation works end-to-end.
+- `audit_ctfs_linked_writer_staged_args_roundtrip` — proves the
+  exact `codetracer_trace_writer_nim` dependency linked into this
+  recorder can attach `TraceWriter::arg("x"/"y", Raw(...))` to the next
+  `register_call(add)` in a minimal CTFS trace.
 - `audit_ctfs_call_args_writer_gap_known_empty` — pins the remaining
-  writer/readback gap: even after recorder-side symbolic stack staging,
-  the internal `add(x, y)` call currently reads back with empty CTFS
-  `Call.args`.
+  EVM lifecycle gap: even though the linked writer attaches staged args
+  in isolation, the internal `add(x, y)` call in the real EVM trace
+  currently reads back with empty CTFS `Call.args`.
 
 ## Concrete partial fix applied in follow-up
 
@@ -130,14 +134,20 @@ zero args.  The loss is therefore between the EVM-side
 `trace_writer_register_call(add)` writing a populated `CallRecord.args`
 entry, not later call-key lookup or accidental attachment to a sibling call.
 
-Remaining next-layer fix shape: inspect the
-`codetracer_trace_writer_nim` / `codetracer_trace_writer_ffi.nim`
-`trace_writer_register_call_arg` path used by Rust recorders.  The
-recorder reaches `TraceWriter::arg` before `register_call` and the CTFS
-varname stream includes the staged parameter names, but the
-pending-call-args buffer is not represented in the readback call record
-for this dependency path.  Once that writer-side attachment issue is
-fixed, replace
+The newest linked-writer guard closes one suspected dependency branch:
+the sibling `codetracer_trace_writer_nim` crate and linked Nim archive
+do attach `TraceWriter::arg("x"/"y", Raw(...))` to the immediately
+following `register_call(add)` in a synthetic CTFS trace.  The remaining
+loss is therefore specific to the real EVM recording lifecycle/order
+around the internal `JumpType::Into` call, not a stale static library or
+generic Rust Nim-writer staged-arg failure.
+
+Remaining next-layer fix shape: instrument the EVM `JumpType::Into`
+path around `stage_internal_call_args` and the following return sequence,
+then reduce the synthetic writer guard until it includes the missing
+EVM ordering ingredient (surrounding steps/values, absorbed top-level
+call, nested `fn_at_pc_*` calls, or return timing).  Once isolated,
+replace
 `audit_ctfs_call_args_writer_gap_known_empty` with a positive assertion
 that `add(x, y)` carries two args named `x` and `y`.
 

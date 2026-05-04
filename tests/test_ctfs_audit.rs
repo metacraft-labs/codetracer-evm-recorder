@@ -25,7 +25,10 @@ use codetracer_evm_recorder::source_map::SourceMap;
 use codetracer_evm_recorder::storage_layout::StorageLayout;
 use codetracer_evm_recorder::trace_fetcher;
 
+use codetracer_trace_types::{Line, TypeKind, ValueRecord};
 use codetracer_trace_writer_nim::NimTraceReaderHandle;
+use codetracer_trace_writer_nim::trace_writer::TraceWriter;
+use codetracer_trace_writer_nim::{TraceEventsFileFormat, create_trace_writer};
 
 // ---------------------------------------------------------------------------
 // Toolchain detection
@@ -167,6 +170,15 @@ fn open_reader(dir: &Path) -> NimTraceReaderHandle {
     let ct_path = find_ct_container(dir);
     NimTraceReaderHandle::open(ct_path.to_str().unwrap())
         .unwrap_or_else(|e| panic!("failed to open .ct via Nim FFI: {}", e))
+}
+
+fn call_arg_count(reader: &NimTraceReaderHandle, call_key: u64) -> usize {
+    let raw = reader.call_json(call_key).expect("call record JSON missing");
+    let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    parsed["args"]
+        .as_array()
+        .expect("call args should be a JSON array")
+        .len()
 }
 
 // ---------------------------------------------------------------------------
@@ -331,6 +343,67 @@ async fn audit_ctfs_step_records_emitted() {
     );
 }
 
+/// Dependency-boundary guard: the exact `codetracer_trace_writer_nim`
+/// dependency linked into this recorder can attach staged `TraceWriter::arg`
+/// entries to the next `register_call` in a minimal trace.
+///
+/// If this fails, the EVM `Call.args` gap is in the linked writer archive or
+/// Rust wrapper, not EVM control-flow ordering.  If this passes while
+/// `audit_ctfs_call_args_writer_gap_known_empty` remains known-empty, the
+/// remaining boundary is the EVM recorder's call/step/return lifecycle.
+#[test]
+fn audit_ctfs_linked_writer_staged_args_roundtrip() {
+    let tmp_dir = tempfile::TempDir::new().unwrap();
+    let mut writer = create_trace_writer("linked-writer-args", &[], TraceEventsFileFormat::Ctfs);
+    let events_path = tmp_dir.path().join("trace.json");
+    let metadata_path = tmp_dir.path().join("trace_metadata.json");
+    let paths_path = tmp_dir.path().join("trace_paths.json");
+    let source_path = tmp_dir.path().join("FlowTest.sol");
+
+    TraceWriter::begin_writing_trace_events(&mut *writer, &events_path).unwrap();
+    TraceWriter::begin_writing_trace_metadata(&mut *writer, &metadata_path).unwrap();
+    TraceWriter::begin_writing_trace_paths(&mut *writer, &paths_path).unwrap();
+    TraceWriter::start(&mut *writer, &source_path, Line(1));
+
+    let type_id = TraceWriter::ensure_type_id(&mut *writer, TypeKind::Int, "uint256");
+    let fn_id = TraceWriter::ensure_function_id(&mut *writer, "add", &source_path, Line(18));
+    TraceWriter::arg(
+        &mut *writer,
+        "x",
+        ValueRecord::Raw {
+            r: "0xa".to_string(),
+            type_id,
+        },
+    );
+    TraceWriter::arg(
+        &mut *writer,
+        "y",
+        ValueRecord::Raw {
+            r: "0x14".to_string(),
+            type_id,
+        },
+    );
+    TraceWriter::register_call(&mut *writer, fn_id, vec![]);
+    TraceWriter::register_return(&mut *writer, ValueRecord::None { type_id });
+    TraceWriter::finish_writing_trace_events(&mut *writer).unwrap();
+    TraceWriter::finish_writing_trace_metadata(&mut *writer).unwrap();
+    TraceWriter::finish_writing_trace_paths(&mut *writer).unwrap();
+    writer.close().unwrap();
+    drop(writer);
+
+    let reader = open_reader(tmp_dir.path());
+    assert_eq!(
+        reader.call_count(),
+        1,
+        "expected the completed add call"
+    );
+    assert_eq!(
+        call_arg_count(&reader, 0),
+        2,
+        "the linked writer failed to attach staged x/y args in a minimal trace"
+    );
+}
+
 /// Audit (b) diagnostic: the recorder can now recover and stage Solidity
 /// internal-call parameters, but the current Nim writer dependency still
 /// reads the resulting CTFS `Call.args` back as empty.  Keep this guard until
@@ -409,14 +482,7 @@ async fn audit_ctfs_call_args_writer_gap_known_empty() {
         "staged add(x, y) args were attached to a different call record: {:?}",
         calls_with_args
     );
-    let raw = reader
-        .call_json(add_call_key)
-        .expect("add call record JSON missing");
-    let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
-    let args = parsed["args"]
-        .as_array()
-        .expect("add call args should be a JSON array");
-    let arg_count = args.len();
+    let arg_count = call_arg_count(&reader, add_call_key);
     assert_eq!(
         arg_count, 0,
         "CTFS Call.args are now attached for add(x, y); replace this \
