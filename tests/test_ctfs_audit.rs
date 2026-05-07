@@ -173,7 +173,9 @@ fn open_reader(dir: &Path) -> NimTraceReaderHandle {
 }
 
 fn call_arg_count(reader: &NimTraceReaderHandle, call_key: u64) -> usize {
-    let raw = reader.call_json(call_key).expect("call record JSON missing");
+    let raw = reader
+        .call_json(call_key)
+        .expect("call record JSON missing");
     let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
     parsed["args"]
         .as_array()
@@ -392,11 +394,7 @@ fn audit_ctfs_linked_writer_staged_args_roundtrip() {
     drop(writer);
 
     let reader = open_reader(tmp_dir.path());
-    assert_eq!(
-        reader.call_count(),
-        1,
-        "expected the completed add call"
-    );
+    assert_eq!(reader.call_count(), 1, "expected the completed add call");
     assert_eq!(
         call_arg_count(&reader, 0),
         2,

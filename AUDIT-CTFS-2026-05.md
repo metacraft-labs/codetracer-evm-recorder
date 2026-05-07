@@ -184,3 +184,111 @@ resolution) but its behaviour is verified only through the
 pre-existing e2e tests in `tests/test_e2e_vars.rs` (which all still
 pass).  Adding a smoke test that exercises a contract-with-DELEGATECALL
 fixture would close this gap.
+
+## Convention compliance follow-up — 2026-05-08
+
+Closes the `--out-dir` / env-var gap flagged in
+`codetracer-specs/Recorder-CLI-Conventions.md` §3 / §5 (the
+"Implementation Status" table previously listed the EVM recorder as
+"⚠ Partial — uses `--trace-dir`"). Cairo precedent: commit `2710b5e`
+in `codetracer-cairo-recorder` (2026-05-08).  This recorder was
+already CTFS-only post-audit (see "1. Switched output container..."
+above), so the fix here is narrower than the cairo / cardano /
+circom rollups — no `--format` to drop.
+
+### 1. `--trace-dir` → `--out-dir` (with deprecated alias)
+
+`src/main.rs` now accepts the canonical `--out-dir <PATH>` /
+`-o <PATH>` flag.  `--trace-dir <PATH>` is kept as a hidden
+deprecated alias so existing scripts (and any in-tree wrappers that
+still call `--trace-dir`) keep working — when used, the CLI emits a
+one-line stderr note:
+
+```
+warning: --trace-dir is deprecated, use --out-dir
+```
+
+The `record_trace` helper internals (`trace_dir` Rust local) were
+renamed to `out_dir` throughout for consistency with the flag.
+
+### 2. Standard env vars added (§5)
+
+Two recorder-scoped env vars now drive the CLI:
+
+* `CODETRACER_EVM_RECORDER_OUT_DIR` — fallback for `--out-dir`.  CLI
+  flag always wins; deprecated `--trace-dir` flag also wins if given.
+* `CODETRACER_EVM_RECORDER_DISABLED` — set to `1`/`true` to skip
+  recording entirely.  The EVM recorder doesn't run a separate
+  target subprocess (it spins up Anvil and calls the contract
+  itself), so "disabled" simply means "don't emit any trace
+  artefacts and skip the Anvil round-trip".  The recorder still
+  exits 0.
+
+Resolution order matches the cairo/cardano/circom precedent:
+
+1. `--out-dir` (canonical).
+2. `--trace-dir` (deprecated alias; emits stderr note).
+3. `CODETRACER_EVM_RECORDER_OUT_DIR` env var.
+4. Error (no usable default — explicit output dir required).
+
+`resolve_out_dir()` and `recording_disabled()` helpers mirror the
+cairo precedent.
+
+### 3. `--help` mentions `ct print`
+
+The clap `long_about` now points users at `ct print` from
+`codetracer-trace-format-nim` for human-readable conversion of the
+recorded `.ct` bundle, and documents the two env vars.  This is the
+contract that `Recorder-CLI-Conventions.md` §4 requires for
+CTFS-only recorders.
+
+### 4. Tests added (`tests/test_cli_convention.rs`, 6 tests)
+
+* `test_no_format_flag_in_help` — guards against accidentally adding
+  a `--format` flag (CTFS is the only on-disk shape; this is a
+  positive forward-going regression rail).
+* `test_help_mentions_ct_print` — guards the §4 contract.
+* `test_env_out_dir_used_when_flag_omitted` — exercises the env-var
+  fallback through a real recorder run against `FlowTest.sol`.
+* `test_env_disabled_skips_recording` — exercises the disabled mode
+  (no Anvil spin-up, no `.ct` written, exit 0).  Doesn't require
+  solc/anvil because the disabled path short-circuits before any
+  toolchain calls.
+* `test_trace_dir_alias_still_works_with_deprecation_note` —
+  exercises the legacy alias and asserts the deprecation note lands
+  on stderr.
+* `test_recorded_trace_via_ct_print_json` — records `FlowTest.sol`,
+  pipes the produced `.ct` through `ct print --json`, and asserts on
+  **structural anchors** (source filename, contract program label,
+  the internal `add` Solidity helper in the function table, and the
+  `storedA`/`storedResult` storage-variable names in the varname
+  table).  Falls back to structural anchors instead of integer
+  values because EVM recorder Variable record payloads don't
+  round-trip through `ct print --json` today (same pre-existing
+  limitation as Cardano 1.48 / Circom 1.49; tracked elsewhere as a
+  recorder-internal follow-up).
+
+### 5. No-silent-skip guard
+(`tests/verify-cli-convention-no-silent-skip.sh`)
+
+A bash-level guard asserts the CLI continues to comply with the
+convention even if Rust-level tests are bypassed:
+
+* `--format` and `CODETRACER_FORMAT` are absent from `--help`
+  (top-level and `record`).
+* `--out-dir`, `--version`, and `ct print` are present in the
+  appropriate `--help` outputs.
+* `CODETRACER_EVM_RECORDER_OUT_DIR` and
+  `CODETRACER_EVM_RECORDER_DISABLED` are referenced in `src/`
+  (i.e. the env-var fallbacks cannot be silently removed).
+
+Wired into `Justfile`'s `lint` and `test` recipes (and the
+standalone `verify-cli-convention` recipe).
+
+### 6. Implementation Status table updated
+
+`codetracer-specs/Recorder-CLI-Conventions.md` now lists the EVM
+recorder row as `✓ Compliant (CTFS-only)` with the
+`CODETRACER_EVM_RECORDER_OUT_DIR` /
+`CODETRACER_EVM_RECORDER_DISABLED` env vars enumerated, matching
+the cairo / cardano / circom rows.

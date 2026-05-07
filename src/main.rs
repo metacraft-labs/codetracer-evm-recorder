@@ -9,9 +9,14 @@
 //!
 //! ```text
 //! codetracer-evm-recorder record <solidity-file> \
-//!     --trace-dir <output-dir> \
+//!     --out-dir <output-dir> \
 //!     [--function <name>]
 //! ```
+//!
+//! The recorder always writes a canonical CodeTracer multi-stream CTFS
+//! `.ct` bundle (see `Recorder-CLI-Conventions.md` §4 in
+//! `codetracer-specs`). Human-readable conversion of CTFS traces is the
+//! job of `ct print` (shipped with `codetracer-trace-format-nim`).
 //!
 //! The `record` subcommand will:
 //! 1. Compile `<solidity-file>` with `solc --combined-json`.
@@ -21,10 +26,23 @@
 //!    non-constructor function in the ABI).
 //! 5. Fetch `debug_traceTransaction` structlogs.
 //! 6. Run the [`EvmRecorder`] pipeline.
-//! 7. Write `trace.bin`, `trace_metadata.json`, and `trace_paths.json` into
-//!    `--trace-dir`.
-//! 8. Copy the source file into `--trace-dir` so the db-backend can resolve
+//! 7. Write the CTFS bundle into `--out-dir`.
+//! 8. Copy the source file into `--out-dir` so the db-backend can resolve
 //!    source paths when the trace is loaded.
+//!
+//! # Environment variables
+//!
+//! * `CODETRACER_EVM_RECORDER_OUT_DIR` — fallback for `--out-dir` when the
+//!   flag is not given. The CLI flag always wins.
+//! * `CODETRACER_EVM_RECORDER_DISABLED` — set to `1` or `true` to skip
+//!   recording entirely. The recorder still validates inputs but does not
+//!   spin up Anvil or write any trace artefacts.
+//!
+//! # Deprecated flags
+//!
+//! * `--trace-dir` — legacy alias for `--out-dir`. Still accepted (so
+//!   existing scripts keep working) but emits a one-line stderr
+//!   deprecation note. New callers should use `--out-dir` / `-o`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -42,15 +60,43 @@ use codetracer_evm_recorder::storage_layout::StorageLayout;
 use codetracer_evm_recorder::trace_fetcher;
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Environment variable used as a fallback for `--out-dir` when the CLI
+/// flag is omitted.  Convention: see `Recorder-CLI-Conventions.md` §5.
+const ENV_OUT_DIR: &str = "CODETRACER_EVM_RECORDER_OUT_DIR";
+
+/// Environment variable that, when set to `1`/`true`, disables tracing
+/// entirely — the recorder runs as a pass-through (no Anvil spin-up, no
+/// output written).  Convention: §5.
+const ENV_DISABLED: &str = "CODETRACER_EVM_RECORDER_DISABLED";
+
+// ---------------------------------------------------------------------------
 // CLI definition
 // ---------------------------------------------------------------------------
 
 /// CodeTracer EVM recorder — record Solidity/EVM execution traces.
+///
+/// Traces are always written in the canonical CTFS multi-stream format.
+/// To convert a recorded `.ct` bundle to JSON / text for inspection, use
+/// `ct print` from `codetracer-trace-format-nim`.
 #[derive(Debug, Parser)]
 #[command(
     name = "codetracer-evm-recorder",
     version,
-    about = "Record EVM smart-contract execution traces for CodeTracer"
+    about = "Record EVM smart-contract execution traces for CodeTracer (CTFS-only). \
+             Use `ct print` from codetracer-trace-format-nim for human-readable conversion.",
+    long_about = "Record EVM smart-contract execution traces for CodeTracer.\n\
+                  \n\
+                  Output is always written in the canonical CodeTracer CTFS\n\
+                  multi-stream format. Use `ct print` (shipped with the\n\
+                  codetracer-trace-format-nim sibling) to convert a recorded\n\
+                  `.ct` bundle to JSON or other human-readable forms.\n\
+                  \n\
+                  Environment variables:\n\
+                    CODETRACER_EVM_RECORDER_OUT_DIR    fallback for --out-dir\n\
+                    CODETRACER_EVM_RECORDER_DISABLED   set to 1/true to skip recording"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -63,7 +109,7 @@ enum Commands {
     ///
     /// Compiles the contract with `solc`, deploys it to a temporary local
     /// Anvil node, calls the specified entry-point function, and writes the
-    /// CodeTracer trace files to `--trace-dir`.
+    /// CodeTracer CTFS bundle to `--out-dir`.
     Record(RecordArgs),
 }
 
@@ -74,11 +120,21 @@ struct RecordArgs {
 
     /// Directory where the trace files will be written.
     ///
-    /// The directory will be created if it does not exist.
-    /// Three files are produced: `trace.bin`, `trace_metadata.json`, and
-    /// `trace_paths.json`. The source file is also copied into this directory.
-    #[arg(long)]
-    trace_dir: PathBuf,
+    /// The directory will be created if it does not exist.  A canonical
+    /// CTFS `.ct` bundle is written here, alongside a copy of the source
+    /// file so the db-backend can resolve source paths when the trace is
+    /// loaded.
+    ///
+    /// Falls back to the `CODETRACER_EVM_RECORDER_OUT_DIR` environment
+    /// variable when the flag is omitted.
+    #[arg(short = 'o', long)]
+    out_dir: Option<PathBuf>,
+
+    /// Deprecated alias for `--out-dir`.  Still accepted so existing
+    /// scripts keep working; emits a one-line stderr deprecation note
+    /// when used.  Will be removed in a future release.
+    #[arg(long, hide = true, value_name = "PATH")]
+    trace_dir: Option<PathBuf>,
 
     /// Name of the function to call (without argument types or parentheses).
     ///
@@ -86,6 +142,57 @@ struct RecordArgs {
     /// ABI, the first non-constructor function is used instead.
     #[arg(long, default_value = "run")]
     function: String,
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Resolve the effective output directory:
+///   1. `--out-dir` if given on the CLI.
+///   2. `--trace-dir` (deprecated alias) if given on the CLI; emits a
+///      one-line stderr deprecation note.
+///   3. `CODETRACER_EVM_RECORDER_OUT_DIR` env var.
+///   4. Returns an error if none of the above is set (this recorder has
+///      no usable default since trace dirs typically need to live next
+///      to other CodeTracer artefacts; the convention default
+///      `./ct-traces/` would also be acceptable but the EVM recorder
+///      historically required an explicit path so we keep that contract).
+fn resolve_out_dir(
+    cli_out_dir: Option<PathBuf>,
+    cli_trace_dir: Option<PathBuf>,
+) -> Result<PathBuf> {
+    if let Some(path) = cli_out_dir {
+        return Ok(path);
+    }
+    if let Some(path) = cli_trace_dir {
+        eprintln!("warning: --trace-dir is deprecated, use --out-dir");
+        return Ok(path);
+    }
+    if let Some(value) = std::env::var_os(ENV_OUT_DIR) {
+        if !value.is_empty() {
+            return Ok(PathBuf::from(value));
+        }
+    }
+    Err(eyre::eyre!(
+        "no output directory specified: pass --out-dir <PATH> (or set {ENV_OUT_DIR})"
+    ))
+}
+
+/// Whether the recorder is disabled via env var.  When true, the CLI
+/// must execute in pass-through mode without emitting any trace
+/// artefacts.  The EVM recorder doesn't run a separate target subprocess
+/// (it spins up Anvil, deploys, and calls the contract itself), so
+/// "disabled" simply means "don't emit any trace artefacts and skip the
+/// Anvil round-trip".
+fn recording_disabled() -> bool {
+    match std::env::var(ENV_DISABLED) {
+        Ok(value) => {
+            let v = value.trim();
+            v == "1" || v.eq_ignore_ascii_case("true")
+        }
+        Err(_) => false,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -111,9 +218,17 @@ async fn record(args: RecordArgs) -> Result<()> {
         .canonicalize()
         .with_context(|| format!("source file not found: {}", args.solidity_file.display()))?;
 
-    let trace_dir = &args.trace_dir;
-    std::fs::create_dir_all(trace_dir)
-        .with_context(|| format!("cannot create trace dir: {}", trace_dir.display()))?;
+    if recording_disabled() {
+        eprintln!(
+            "{ENV_DISABLED} is set; skipping trace recording (no output written, Anvil not spawned)."
+        );
+        return Ok(());
+    }
+
+    let out_dir_path = resolve_out_dir(args.out_dir, args.trace_dir)?;
+    let out_dir = &out_dir_path;
+    std::fs::create_dir_all(out_dir)
+        .with_context(|| format!("cannot create output dir: {}", out_dir.display()))?;
 
     // -----------------------------------------------------------------------
     // 1. Compile the Solidity file with solc
@@ -342,13 +457,13 @@ async fn record(args: RecordArgs) -> Result<()> {
     //
     // The db-backend resolves source paths from trace_paths.json relative to
     // the trace workdir. By writing and copying the source file into
-    // trace_dir we ensure the path remains valid even when the caller moves
+    // out_dir we ensure the path remains valid even when the caller moves
     // the trace around.
     // -----------------------------------------------------------------------
     let source_filename = source_path
         .file_name()
         .ok_or_else(|| eyre::eyre!("source path has no filename component"))?;
-    let source_copy_path = trace_dir.join(source_filename);
+    let source_copy_path = out_dir.join(source_filename);
     std::fs::copy(&source_path, &source_copy_path).with_context(|| {
         format!(
             "failed to copy source file into trace dir: {} -> {}",
@@ -361,7 +476,7 @@ async fn record(args: RecordArgs) -> Result<()> {
     // 9. Process through the recorder and write trace output
     // -----------------------------------------------------------------------
     let mut recorder =
-        EvmRecorder::new(contract_name, trace_dir).context("failed to create EvmRecorder")?;
+        EvmRecorder::new(contract_name, out_dir).context("failed to create EvmRecorder")?;
     recorder
         .initialize()
         .context("failed to initialize EvmRecorder")?;
@@ -383,7 +498,7 @@ async fn record(args: RecordArgs) -> Result<()> {
         .finalize()
         .context("failed to finalize EvmRecorder")?;
 
-    eprintln!("Trace written to {}", trace_dir.display());
+    eprintln!("Trace written to {}", out_dir.display());
     eprintln!("  trace.json");
     eprintln!("  trace_metadata.json");
     eprintln!("  trace_paths.json");
