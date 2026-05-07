@@ -7,7 +7,9 @@ A recorder of EVM/Solidity smart contract executions that produces [CodeTracer](
 
 ### Overview
 
-codetracer-evm-recorder compiles Solidity programs with solc, deploys them to a local Anvil node, executes a target function, and captures `debug_traceTransaction` structlogs. It resolves source mappings and reconstructs variable values from the EVM stack, emitting structured trace files compatible with CodeTracer.
+codetracer-evm-recorder compiles Solidity programs with solc, deploys them to a local Anvil node, executes a target function, and captures `debug_traceTransaction` structlogs. It resolves source mappings and reconstructs variable values from the EVM stack, emitting a CodeTracer multi-stream CTFS bundle compatible with the rest of CodeTracer.
+
+The recorder is CTFS-only — see [`Recorder-CLI-Conventions.md`](https://github.com/metacraft-labs/codetracer-specs/blob/main/Recorder-CLI-Conventions.md) §4. To convert a recorded `.ct` bundle to JSON or text for inspection, use `ct print` from [`codetracer-trace-format-nim`](https://github.com/metacraft-labs/codetracer-trace-format-nim); the recorder itself never produces these forms.
 
 ### Building
 
@@ -23,21 +25,29 @@ cargo build
 Record a trace from a Solidity source file:
 
 ```bash
-codetracer-evm-recorder record <solidity-file> --trace-dir <dir> [--function <name>]
-# Produces trace files in <dir>.
-# --function selects the entry point to trace (defaults to the first public function).
+codetracer-evm-recorder record <solidity-file> --out-dir <dir> [--function <name>]
+# Produces a CTFS .ct bundle in <dir>.
+# --function selects the entry point to trace (defaults to `run`, or the first
+# non-constructor function if `run` is not present).
 ```
-
-> **Note:** This recorder currently uses `--trace-dir` (not `--out-dir`) and `--function`
-> (not `--format`). These flags may be harmonized with the other recorders in a future release.
 
 Replay an on-chain transaction:
 
 ```bash
-codetracer-evm-recorder replay <tx-hash> --trace-dir <dir>
+codetracer-evm-recorder replay <tx-hash> --out-dir <dir>
 ```
 
-However, you probably want to use it in combination with CodeTracer, which would be released soon.
+> **Deprecated:** `--trace-dir` is still accepted as a legacy alias for `--out-dir` so existing scripts keep working. It emits a one-line stderr deprecation note (`warning: --trace-dir is deprecated, use --out-dir`) and will be removed in a future release. New callers should use `--out-dir` / `-o`.
+
+### Inspecting a recorded trace
+
+The recorder writes a `.ct` CTFS bundle. To dump it as JSON for debugging or golden-snapshot tests:
+
+```bash
+ct print --json <dir>/<Contract>.ct
+```
+
+`ct print` is shipped with `codetracer-trace-format-nim` (sibling repository).
 
 ### Architecture
 
@@ -62,11 +72,21 @@ Test programs live in `test-programs/`. Run the test suite with:
 
 ```bash
 cargo test
+# or, via just:
+just test
 ```
+
+`just test` additionally runs `tests/verify-cli-convention-no-silent-skip.sh`, a bash-level guard that asserts the CLI continues to comply with `Recorder-CLI-Conventions.md` (no silent regressions of `--out-dir`, `--version`, `ct print` mention, or the `CODETRACER_EVM_RECORDER_*` env-var fallbacks).
 
 ### Environment variables
 
-* `RUST_LOG` — controls log verbosity (standard `env_logger` syntax, e.g. `RUST_LOG=debug`)
+Convention: `Recorder-CLI-Conventions.md` §5.
+
+| Variable                            | CLI equivalent | Description                                                                                                 |
+| ----------------------------------- | -------------- | ----------------------------------------------------------------------------------------------------------- |
+| `CODETRACER_EVM_RECORDER_OUT_DIR`   | `--out-dir`    | Output directory for traces. Falls back here when the CLI flag is omitted; the CLI flag always wins.        |
+| `CODETRACER_EVM_RECORDER_DISABLED`  | —              | Set to `1` or `true` to skip recording entirely. The recorder still validates inputs but does not spin up Anvil or write any trace artefacts. |
+| `RUST_LOG`                          | —              | Recorder log verbosity (standard `env_logger` syntax, e.g. `RUST_LOG=debug`).                               |
 
 ### Contributing
 
