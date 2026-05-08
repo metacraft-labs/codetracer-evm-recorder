@@ -270,20 +270,50 @@ fn test_trace_dir_alias_still_works_with_deprecation_note() {
 // ---------------------------------------------------------------------------
 
 /// Record `FlowTest.sol`, then convert the produced `.ct` container to
-/// JSON via `ct-print --json` and assert on the textual representation.
+/// JSON via `ct-print` and assert on:
 ///
-/// `ct-print`'s JSON output owns its schema (owned by
-/// `codetracer-trace-format-nim` and may evolve), and integer values
-/// produced by the EVM recorder don't always round-trip cleanly through
-/// `ct-print --json` today (same pre-existing limitation as Cardano
-/// 1.48 / Circom 1.49).  We therefore assert on **structural anchors**
-/// that the recorder must surface for any CodeTracer consumer:
-///   * the source filename (`FlowTest.sol`),
-///   * the program/contract name (`FlowTest`),
-///   * the entry-point function name (`compute`).
+/// 1. **Structural anchors** (legacy layer): `ct-print --json` output
+///    contains the source filename, contract program label, the `add`
+///    Solidity helper in the function table, and the storage variable
+///    names somewhere in the textual rendering.
+/// 2. **Exact decoded values** (the layer enabled by `ct-print --full`):
+///    the FlowTest.sol contract executes `compute()` with `a=10`,
+///    `b=20`, `storedA = a = 10`, `result = add(a, b) = 30`,
+///    `storedResult = result = 30`, where `add(x, y) = x + y`.  The
+///    recorder must surface stable byte-level snapshots of those
+///    storage / parameter values, decoded by `ct-print --full` to
+///    `{"kind":"Raw","r":"0x<hex>","type_id":N}`.
 ///
-/// This is the canonical workflow `Recorder-CLI-Conventions.md` §4
-/// prescribes for content-level test assertions.
+/// **EVM-specific note**: the EVM recorder writes every variable value
+/// as `ValueRecord::Raw{r:[bytes]}` (a stack/memory slice) rather than
+/// the typed `ValueRecord::Int{i,...}` variant the cairo / cardano /
+/// circom / aiken recorders use.  This is a pre-existing recorder
+/// limitation — the EVM has no source-level let-binding semantics on
+/// the stack, so the recorder snapshots raw stack words at every
+/// JUMP/PUSH transition, mixing in dispatcher noise (function
+/// selectors like `0x4b`, hashes like `0xb9`) with the source values.
+/// See `AUDIT-CTFS-2026-05.md` ("Internal-call `register_return`
+/// value", "Internal-call `Call.args` staged from the callee stack")
+/// for the open follow-ups around typed-value emission.
+///
+/// The test therefore asserts on **stable Raw-payload anchors** — the
+/// final post-storage values for `storedA` (= `0xa` = 10) and
+/// `storedResult` (= `0x1e` = 30), and the recovered `add(x, y)`
+/// callee parameters (`x = 0xa = 10`, `y = 0x14 = 20`, surfaced via
+/// the AST-aware stack-label seeding from
+/// `AUDIT-CTFS-2026-05.md` §4).  The strict `value.kind == "Raw"`
+/// invariant means: if a future EVM recorder upgrade emits
+/// `ValueRecord::Int` (or any other variant), this test fails loudly
+/// and the next maintainer extends the assertion to the new variant
+/// rather than silently accepting it.
+///
+/// Pre-2026-05-08 a similar assertion was made directly on a recorder-
+/// emitted `trace.json` file.  The convention now mandates CTFS-only
+/// output; `ct print` is the canonical conversion tool.  See
+/// `Recorder-CLI-Conventions.md` §4.  `ct-print --full` (added
+/// 2026-05 in `codetracer-trace-format-nim`) is what enables the
+/// exact-value layer — its output is a deterministic JSON document
+/// with every CBOR `ValueRecord` decoded to a structured form.
 #[test]
 fn test_recorded_trace_via_ct_print_json() {
     if !has_solc() || !has_anvil() {
@@ -330,7 +360,11 @@ fn test_recorded_trace_via_ct_print_json() {
         out_dir
     );
 
-    // ct-print --json <file.ct>
+    // -----------------------------------------------------------------
+    // Layer 1 (legacy): ct-print --json — substring presence checks.
+    // Kept as a safety net so a regression in the textual rendering
+    // is caught even if --full's JSON shape evolves.
+    // -----------------------------------------------------------------
     let print_out = Command::new(&ct_print)
         .args(["--json"])
         .arg(&ct_files[0])
@@ -339,48 +373,242 @@ fn test_recorded_trace_via_ct_print_json() {
 
     assert!(
         print_out.status.success(),
-        "ct-print should succeed; stderr: {}",
+        "ct-print --json should succeed; stderr: {}",
         String::from_utf8_lossy(&print_out.stderr)
     );
 
-    let stdout = String::from_utf8_lossy(&print_out.stdout);
-    assert!(!stdout.is_empty(), "ct-print --json produced empty output");
+    let stdout_json = String::from_utf8_lossy(&print_out.stdout);
+    assert!(
+        !stdout_json.is_empty(),
+        "ct-print --json produced empty output"
+    );
 
-    // Structural anchors that the recorder must surface for any
-    // CodeTracer consumer to function:
-    //   * the source filename (FlowTest.sol),
-    //   * the program/contract name in the metadata (FlowTest),
-    //   * at least one Solidity function name in the function table —
-    //     `add` (the internal helper called from compute()) — verifying
-    //     the AST-aware function-name resolution path lands in the .ct
-    //     bundle.
-    //   * the storage variable names (`storedA`, `storedResult`)
-    //     in the varname table — verifying value-side staging.
-    //
-    // Note: the EVM recorder's integer values (10, 20, 30, ...)
-    // currently don't round-trip through `ct-print --json` due to a
-    // pre-existing limitation in the EVM recorder's Variable record
-    // payload format (see AUDIT-CTFS-2026-05.md for the open
-    // follow-up).  This is the same fall-back-to-structural-anchors
-    // policy used by the Cardano (1.48) and Circom (1.49) audits.
     assert!(
-        stdout.contains("FlowTest.sol"),
-        "ct-print --json output should mention the source file; got:\n{stdout}"
+        stdout_json.contains("FlowTest.sol"),
+        "ct-print --json output should mention the source file; got:\n{stdout_json}"
     );
     assert!(
-        stdout.contains("\"FlowTest\""),
-        "ct-print --json output should mention the `FlowTest` contract / program; got:\n{stdout}"
+        stdout_json.contains("\"FlowTest\""),
+        "ct-print --json output should mention the `FlowTest` contract / program; got:\n{stdout_json}"
     );
     assert!(
-        stdout.contains("\"add\""),
+        stdout_json.contains("\"add\""),
         "ct-print --json output should mention the `add` Solidity helper \
-         in the function table; got:\n{stdout}"
+         in the function table; got:\n{stdout_json}"
     );
     for varname in ["storedA", "storedResult"] {
         assert!(
-            stdout.contains(&format!("\"{varname}\"")),
+            stdout_json.contains(&format!("\"{varname}\"")),
             "ct-print --json output should mention the `{varname}` storage \
-             variable in the varname table; got:\n{stdout}"
+             variable in the varname table; got:\n{stdout_json}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Layer 2 (the upgrade): ct-print --full — exact decoded values.
+    // -----------------------------------------------------------------
+    let full_output = Command::new(&ct_print)
+        .args(["--full", "--strip-paths"])
+        .arg(&ct_files[0])
+        .output()
+        .expect("failed to run ct-print --full");
+
+    assert!(
+        full_output.status.success(),
+        "ct-print --full should succeed; stderr: {}",
+        String::from_utf8_lossy(&full_output.stderr)
+    );
+
+    let doc: serde_json::Value = serde_json::from_slice(&full_output.stdout)
+        .expect("ct-print --full should emit valid JSON");
+
+    // ----- Function table: `add` must appear --------------------------
+    // The EVM recorder resolves internal Solidity calls' function names
+    // via the AST lookahead from `AUDIT-CTFS-2026-05.md` §3, so `add`
+    // (the only internal Solidity helper called from `compute()`) lands
+    // in the function table as a bare identifier.  The other two
+    // entries are solc-generated dispatcher / fallback frames whose
+    // names cannot be recovered today — they surface as
+    // `fn_at_pc_<offset>` placeholders.
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        functions.iter().any(|f| f.ends_with("add")),
+        "expected `add` in functions table; got {:?}",
+        functions
+    );
+
+    // ----- Path table: the canonical fixture path must appear ---------
+    let paths: Vec<&str> = doc["paths"]
+        .as_array()
+        .expect("paths array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        paths.iter().any(|p| p.ends_with("FlowTest.sol")),
+        "expected FlowTest.sol in paths table; got {:?}",
+        paths
+    );
+
+    // ----- Step / call counts ----------------------------------------
+    // The EVM recorder produces one step per source-line transition in
+    // `compute()` and `add()`, plus the dispatcher's prologue lines and
+    // a few post-call return-site steps.  3 call_entry events are
+    // emitted: the external `compute()` dispatcher frame
+    // (fn_at_pc_384), the internal `add` invocation (fn_at_pc_314),
+    // and a synthetic third frame for the post-call return path.
+    // These are stable properties of the canonical fixture under the
+    // current EVM recorder — if they change, that's a real regression
+    // to investigate, not a flake.
+    let counts = &doc["counts"];
+    assert_eq!(
+        counts["steps"].as_u64(),
+        Some(15),
+        "expected 15 step events for FlowTest.sol; counts={counts}",
+    );
+    assert_eq!(
+        counts["calls"].as_u64(),
+        Some(3),
+        "expected 3 call events (dispatcher + add + post-call frame); counts={counts}",
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+
+    // ----- Call sequence: 3 frames, at least the dispatcher labels --
+    // The recorder emits 3 call_entry events:
+    //   1. fn_at_pc_384 — solc dispatcher / external `compute()` frame
+    //   2. fn_at_pc_314 — solc internal jump (the AST-aware fix in
+    //      `AUDIT-CTFS-2026-05.md` §3 names this `add` in the function
+    //      table even though the call's resolved name on the call
+    //      record itself can lag); tracked there as a follow-up.
+    //   3. A synthetic post-call frame whose `function_id` indexes
+    //      past the function table — `function` field is therefore
+    //      absent in --full's output.  This is current EVM recorder
+    //      behaviour, not a bug in the test fixture.
+    let call_entries: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|e| e["kind"] == "call_entry")
+        .collect();
+    assert_eq!(
+        call_entries.len(),
+        3,
+        "expected exactly 3 call_entry events; got {:?}",
+        call_entries
+            .iter()
+            .map(|e| e["function"].as_str().unwrap_or("<unresolved>"))
+            .collect::<Vec<_>>()
+    );
+    // At least one of the resolved frames must be `fn_at_pc_*`
+    // (solc dispatcher) — verifies the lookahead path runs without
+    // crashing even if AST resolution doesn't kick in for the
+    // outermost frame.
+    let resolved_frames: Vec<&str> = call_entries
+        .iter()
+        .filter_map(|e| e["function"].as_str())
+        .collect();
+    assert!(
+        !resolved_frames.is_empty(),
+        "at least one call_entry must carry a resolvable function name; got 0"
+    );
+
+    // ----- Strict ValueRecord variant invariant -----------------------
+    // Every step var that surfaces must carry a `value.kind` field.
+    // For the EVM recorder today, every value decodes to
+    // `ValueRecord::Raw` (raw stack/memory bytes) — see the doc-comment
+    // above and `AUDIT-CTFS-2026-05.md`.  If a future recorder upgrade
+    // emits `Int` / `Sequence` / `Struct` / etc. instead, this assertion
+    // fails loudly so the test author can extend the exact-value layer
+    // to the new variant rather than silently weakening the invariant.
+    for ev in events {
+        if ev["kind"] != "step" {
+            continue;
+        }
+        let step_index = ev["step_index"].as_u64().unwrap_or_default();
+        let vars = ev["vars"].as_array().cloned().unwrap_or_default();
+        for v in vars {
+            let name = v["varname"].as_str().unwrap_or("<missing>");
+            let value = &v["value"];
+            let kind = value["kind"]
+                .as_str()
+                .unwrap_or_else(|| panic!(
+                    "step {step_index} var `{name}` is missing value.kind; got {value}"
+                ));
+            assert_eq!(
+                kind, "Raw",
+                "step {step_index} var `{name}` should decode as Raw, got {value}; \
+                 if a new ValueRecord variant has landed for the EVM recorder \
+                 (e.g. Int payloads now round-trip — see AUDIT-CTFS-2026-05.md), \
+                 extend this test to assert on it explicitly rather than \
+                 weakening the check"
+            );
+            // Raw values must carry a non-empty hex byte sequence.
+            let r = value["r"].as_str().unwrap_or_else(|| {
+                panic!(
+                    "step {step_index} var `{name}` Raw value missing `r` field; got {value}"
+                )
+            });
+            assert!(
+                r.starts_with("0x"),
+                "step {step_index} var `{name}` Raw `r` should be hex-prefixed; got {r}"
+            );
+        }
+    }
+
+    // ----- Exact decoded byte values (anchored on stable snapshots) ---
+    // Collect every (varname, raw_hex) pair surfaced by step events.
+    // The EVM recorder snapshots stack/memory at every JUMP/PUSH
+    // transition, so any single var name surfaces multiple values
+    // across a step (mixing source values with dispatcher noise).
+    // We assert that each canonical (var, value) pair appears at
+    // least once across the whole trace — these are the values that
+    // the source-level semantics of `compute()` guarantee:
+    //
+    //   * `storedA = a = 10`              → Raw `0xa`
+    //   * `storedResult = add(10, 20) = 30` → Raw `0x1e`
+    //   * `add(x = 10, y = 20)`           → Raw `0xa` and `0x14`
+    //
+    // The `x = 0xa` / `y = 0x14` pair specifically verifies the
+    // AST-aware stack-label seeding fix from
+    // `AUDIT-CTFS-2026-05.md` §4 — the recorder reads the concrete
+    // EVM stack at `JumpType::Into` to recover the callee parameters.
+    let observed_vars: Vec<(String, String)> = events
+        .iter()
+        .filter(|e| e["kind"] == "step")
+        .flat_map(|e| {
+            e["vars"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+        })
+        .filter_map(|v| {
+            let name = v["varname"].as_str()?.to_string();
+            let r = v["value"]["r"].as_str()?.to_string();
+            Some((name, r))
+        })
+        .collect();
+
+    // The canonical EVM byte-level snapshots: storedA = 10 (= 0xa),
+    // storedResult = add(10, 20) = 30 (= 0x1e), and the recovered add
+    // parameters x = 10, y = 20.
+    let expected: &[(&str, &str)] = &[
+        ("storedA", "0xa"),
+        ("storedResult", "0x1e"),
+        ("x", "0xa"),
+        ("y", "0x14"),
+    ];
+    for (name, value) in expected {
+        assert!(
+            observed_vars
+                .iter()
+                .any(|(n, v)| n == name && v == value),
+            "expected step variable `{name}` = Raw `{value}` in --full output; \
+             observed = {observed_vars:?}"
         );
     }
 }
