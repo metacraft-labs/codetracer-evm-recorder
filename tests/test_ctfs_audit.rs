@@ -351,8 +351,9 @@ async fn audit_ctfs_step_records_emitted() {
 ///
 /// If this fails, the EVM `Call.args` gap is in the linked writer archive or
 /// Rust wrapper, not EVM control-flow ordering.  If this passes while
-/// `audit_ctfs_call_args_writer_gap_known_empty` remains known-empty, the
-/// remaining boundary is the EVM recorder's call/step/return lifecycle.
+/// `audit_ctfs_call_args_writer_attaches_add_xy` (the post-FFI-fix positive
+/// readback) ever regresses to empty args, the remaining boundary is the
+/// EVM recorder's call/step/return lifecycle.
 #[test]
 fn audit_ctfs_linked_writer_staged_args_roundtrip() {
     let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -402,13 +403,26 @@ fn audit_ctfs_linked_writer_staged_args_roundtrip() {
     );
 }
 
-/// Audit (b) diagnostic: the recorder can now recover and stage Solidity
-/// internal-call parameters, but the current Nim writer dependency still
-/// reads the resulting CTFS `Call.args` back as empty.  Keep this guard until
-/// the writer-side `register_call_arg` attachment path is fixed, then replace
-/// it with a positive `add(x, y)` readback assertion.
+/// Audit (b) positive readback: the recorder stages Solidity internal-call
+/// parameters via `TraceWriter::arg(...)`, and after the May-12 FFI fix to
+/// `trace_writer_ensure_function_id` (key on name only — see
+/// `codetracer-trace-format-nim/src/codetracer_trace_writer_ffi.nim`) the
+/// staged `add(x, y)` arguments survive the round-trip and surface on the
+/// `add` call record produced by the multi-stream writer.
+///
+/// Before the FFI fix, the FFI keyed function IDs on `(name, path, line)`
+/// while the multi-stream writer's `registerFunction` keyed on `name` only.
+/// The two ID-spaces drifted apart for the EVM dispatcher repeats, so the
+/// `add` `register_call` consumed FFI-side ID space that didn't agree with
+/// the multi-stream call writer — the `add(x, y)` args ended up either
+/// attached to a different call record or read back as empty.  This was
+/// originally pinned as a "known-empty" diagnostic
+/// (`audit_ctfs_call_args_writer_gap_known_empty`) and the comment promised
+/// to replace the guard with a positive readback once the writer-side
+/// attachment path was fixed.  The May-12 FFI fix closes that gap, so this
+/// is now the strict positive assertion the original guard pointed at.
 #[tokio::test]
-async fn audit_ctfs_call_args_writer_gap_known_empty() {
+async fn audit_ctfs_call_args_writer_attaches_add_xy() {
     if !has_solc() || !has_anvil() {
         eprintln!("skipping: solc/anvil unavailable");
         return;
@@ -423,10 +437,9 @@ async fn audit_ctfs_call_args_writer_gap_known_empty() {
         fn_names.push(reader.function(i).expect("function name missing"));
     }
 
-    // Narrow the remaining gap: `TraceWriter::arg` registers the EVM
-    // parameters as varnames / step values, so source-level recovery and the
-    // variable side of the Nim writer FFI are both live.  The failure is the
-    // separate pending-call-arg attachment consumed by `register_call`.
+    // `TraceWriter::arg` registers the EVM parameters as varnames / step
+    // values, so source-level recovery and the variable side of the Nim
+    // writer FFI must surface them in the CTFS varname table.
     let mut varnames = Vec::new();
     for i in 0..reader.varname_count() {
         varnames.push(reader.varname(i).expect("varname missing"));
@@ -437,9 +450,10 @@ async fn audit_ctfs_call_args_writer_gap_known_empty() {
         varnames
     );
 
-    let mut add_call_key = None;
+    // Walk every Call record and look for an `add` frame that carries the
+    // staged x / y arguments end-to-end.
     let mut call_summaries = Vec::new();
-    let mut calls_with_args = Vec::new();
+    let mut add_call_with_args: Option<(u64, usize)> = None;
     for k in 0..reader.call_count() {
         let raw = reader.call_json(k).expect("call record JSON missing");
         let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
@@ -454,38 +468,37 @@ async fn audit_ctfs_call_args_writer_gap_known_empty() {
             .unwrap_or_else(|| format!("<unknown:{fid_raw}>"));
         let args_len = parsed["args"].as_array().map_or(0, Vec::len);
         call_summaries.push(format!("{k}:{function_name}:args={args_len}"));
-        if args_len > 0 {
-            calls_with_args.push(format!("{k}:{function_name}:args={args_len}"));
-        }
-        if function_name == "add" {
-            add_call_key = Some(k);
+        if function_name == "add" && args_len > 0 && add_call_with_args.is_none() {
+            add_call_with_args = Some((k, args_len));
         }
     }
 
-    let add_call_key = add_call_key.unwrap_or_else(|| {
+    let (add_call_key, add_args_len) = add_call_with_args.unwrap_or_else(|| {
         panic!(
-            "expected a Call record for internal `add`; call summaries: {:?}",
+            "expected at least one `add` Call record carrying the staged \
+             (x, y) args after the FFI key-on-name-only fix; call \
+             summaries: {:?}",
             call_summaries
         )
     });
-    assert_eq!(
-        add_call_key, 0,
-        "expected the first completed call record to be `add`; this rules \
-         out an earlier call consuming the staged add(x, y) args. Call \
-         summaries: {:?}",
+    // The Solidity `add(uint256 x, uint256 y)` signature has exactly two
+    // parameters, so the recovered arg list must surface both.  Using
+    // `>= 2` keeps the assertion robust if a future audit also surfaces
+    // a hidden `__return_value` slot — but it's still strictly stronger
+    // than the pre-fix guard which asserted `args == 0`.
+    assert!(
+        add_args_len >= 2,
+        "expected the `add` call (key={add_call_key}) to carry both x and y \
+         args after the FFI key-on-name-only fix; got {add_args_len} \
+         args. Call summaries: {:?}",
         call_summaries
     );
-    assert!(
-        calls_with_args.is_empty(),
-        "staged add(x, y) args were attached to a different call record: {:?}",
-        calls_with_args
-    );
     let arg_count = call_arg_count(&reader, add_call_key);
-    assert_eq!(
-        arg_count, 0,
-        "CTFS Call.args are now attached for add(x, y); replace this \
-         diagnostic with a positive readback assertion and close the \
-         writer-side follow-up in AUDIT-CTFS-2026-05.md. Call summaries: {:?}",
+    assert!(
+        arg_count >= 2,
+        "CTFS Call.args readback for `add` (key={add_call_key}) should \
+         surface at least 2 entries (x, y); got {arg_count}. Call \
+         summaries: {:?}",
         call_summaries
     );
 }

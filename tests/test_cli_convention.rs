@@ -471,10 +471,19 @@ fn test_recorded_trace_via_ct_print_json() {
     // ----- Step / call counts ----------------------------------------
     // The EVM recorder produces one step per source-line transition in
     // `compute()` and `add()`, plus the dispatcher's prologue lines and
-    // a few post-call return-site steps.  3 call_entry events are
+    // a few post-call return-site steps.  4 call_entry events are
     // emitted: the external `compute()` dispatcher frame
     // (fn_at_pc_384), the internal `add` invocation (fn_at_pc_314),
-    // and a synthetic third frame for the post-call return path.
+    // a second `fn_at_pc_314` frame for the post-call return path
+    // (same name → same interned function_id), and the absorbed
+    // `add` toplevel frame closed by `finalize()`.  Pre-2026-05 the
+    // FFI keyed function IDs on (name, path, line) while the
+    // multi-stream interning keyed on name alone, so the post-call
+    // frame above used a function_id past the end of the function
+    // table and surfaced as `<unresolved>`.  After the FFI fix
+    // (`codetracer-trace-format-nim/src/codetracer_trace_writer_ffi.nim::trace_writer_ensure_function_id`
+    // keys on name only), every emitted call resolves to a known
+    // function entry — the test pin is now strictly stronger.
     // These are stable properties of the canonical fixture under the
     // current EVM recorder — if they change, that's a real regression
     // to investigate, not a flake.
@@ -486,31 +495,55 @@ fn test_recorded_trace_via_ct_print_json() {
     );
     assert_eq!(
         counts["calls"].as_u64(),
-        Some(3),
-        "expected 3 call events (dispatcher + add + post-call frame); counts={counts}",
+        Some(4),
+        "expected 4 call events (dispatcher + add + repeated post-call \
+         dispatcher + absorbed add); counts={counts}",
     );
 
     let events = doc["events"].as_array().expect("events array");
 
-    // ----- Call sequence: 3 frames, at least the dispatcher labels --
-    // The recorder emits 3 call_entry events:
+    // ----- Call sequence: 4 frames, all must resolve ------------------
+    // The recorder emits 4 call_entry events:
     //   1. fn_at_pc_384 — solc dispatcher / external `compute()` frame
     //   2. fn_at_pc_314 — solc internal jump (the AST-aware fix in
     //      `AUDIT-CTFS-2026-05.md` §3 names this `add` in the function
     //      table even though the call's resolved name on the call
     //      record itself can lag); tracked there as a follow-up.
-    //   3. A synthetic post-call frame whose `function_id` indexes
-    //      past the function table — `function` field is therefore
-    //      absent in --full's output.  This is current EVM recorder
-    //      behaviour, not a bug in the test fixture.
+    //   3. A second fn_at_pc_314 frame for the post-call return path.
+    //      Pre-FFI-fix this surfaced as `<unresolved>` because the FFI
+    //      handed out a function_id past the function table; the May-12
+    //      fix to `trace_writer_ensure_function_id` (key on name only)
+    //      makes this resolve to the same `fn_at_pc_314` interned slot.
+    //   4. `add` — the absorbed-into-toplevel `add` invocation that the
+    //      recorder closes from `finalize()`.
     let call_entries: Vec<&serde_json::Value> = events
         .iter()
         .filter(|e| e["kind"] == "call_entry")
         .collect();
     assert_eq!(
         call_entries.len(),
-        3,
-        "expected exactly 3 call_entry events; got {:?}",
+        4,
+        "expected exactly 4 call_entry events; got {:?}",
+        call_entries
+            .iter()
+            .map(|e| e["function"].as_str().unwrap_or("<unresolved>"))
+            .collect::<Vec<_>>()
+    );
+    // After the May-12 FFI key-on-name-only fix, EVERY call_entry must
+    // carry a resolvable function name — there should be no
+    // `<unresolved>` frames left.  This is strictly stronger than the
+    // pre-fix pin which only required at least one resolved frame.
+    let unresolved: Vec<usize> = call_entries
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| if e.get("function").and_then(|v| v.as_str()).is_none() { Some(i) } else { None })
+        .collect();
+    assert!(
+        unresolved.is_empty(),
+        "every call_entry must resolve to a known function after the \
+         FFI key-on-name-only fix; unresolved frame indexes={:?} \
+         frames={:?}",
+        unresolved,
         call_entries
             .iter()
             .map(|e| e["function"].as_str().unwrap_or("<unresolved>"))
