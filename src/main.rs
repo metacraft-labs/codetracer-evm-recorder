@@ -474,9 +474,19 @@ async fn record(args: RecordArgs) -> Result<()> {
 
     // -----------------------------------------------------------------------
     // 9. Process through the recorder and write trace output
+    //
+    // `metadata.program` carries the source-file path the user passed in
+    // (per cross-recorder convention captured in
+    // `metacraft-specs/policies/recorder-test-requirements.md` §1), NOT
+    // the contract name.  Pre-2026-05 the EVM recorder labelled the
+    // trace with `contract_name` — that was an EVM-only deviation from
+    // the path-as-program convention used by the PHP / Ruby / Python /
+    // Cardano / TON recorders, and surfaced as the
+    // `test_control_flow_metadata_program_is_source_path` bug.
     // -----------------------------------------------------------------------
+    let program_label = source_path.to_string_lossy();
     let mut recorder =
-        EvmRecorder::new(contract_name, out_dir).context("failed to create EvmRecorder")?;
+        EvmRecorder::new(&program_label, out_dir).context("failed to create EvmRecorder")?;
     recorder
         .initialize()
         .context("failed to initialize EvmRecorder")?;
