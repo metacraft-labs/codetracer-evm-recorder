@@ -971,7 +971,7 @@ fn test_require_revert_happy_path_via_ct_print_full() {
         vec![
             "safe".to_string(),
             "fn_at_pc_458".to_string(),
-            "<unnamed>".to_string(),
+            "fn_at_pc_458".to_string(),
         ]
     );
 }
