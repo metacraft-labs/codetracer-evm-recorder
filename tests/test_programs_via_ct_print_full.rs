@@ -328,23 +328,32 @@ fn observed_step_var_pairs(doc: &serde_json::Value) -> Vec<(String, String)> {
     out
 }
 
-/// Assert `metadata.program` matches the recorder's contract-name
-/// label.  RECORDER BUG: the spec
-/// (`recorder-test-requirements.md` §1) wants `metadata.program` to
-/// be the source path the user passed in; the EVM recorder currently
-/// labels the trace with the contract name (`FlowTest`,
-/// `ControlFlow`, etc.) instead.  Tracked as a recorder bug — the
-/// per-test `_metadata_program_is_source_path` ignored sibling pins
-/// the spec-correct expectation so it surfaces when the recorder is
-/// fixed.
-fn assert_metadata_program_eq_contract_name(doc: &serde_json::Value, contract_name: &str) {
+/// Assert `metadata.program` is the canonical absolute path of the
+/// recorded Solidity source file (per the cross-recorder convention
+/// captured in `recorder-test-requirements.md` §1 — the EVM recorder
+/// honours this convention as of the
+/// `test_control_flow_metadata_program_is_source_path` fix).
+///
+/// We `assert_eq!` against the canonicalized `test-programs/<group>/<file>`
+/// path computed exactly the same way the recorder CLI canonicalizes
+/// its `solidity_file` argument, so the assertion is strict in the
+/// `assert_eq!` sense but stays stable across checkouts.
+fn assert_metadata_program_is_source_path(
+    doc: &serde_json::Value,
+    group: &str,
+    file: &str,
+) {
     let prog = doc["metadata"]["program"]
         .as_str()
         .expect("metadata.program str");
+    let expected = test_program(group, file)
+        .canonicalize()
+        .expect("test program must exist and be canonicalizable");
+    let expected_str = expected.to_string_lossy().to_string();
     assert_eq!(
-        prog, contract_name,
-        "metadata.program currently records the contract name; \
-         spec-correct value would be the source path"
+        prog, expected_str,
+        "metadata.program must be the canonical source-file path \
+         (spec: recorder-test-requirements.md §1)"
     );
 }
 
@@ -377,8 +386,8 @@ fn assert_paths_ends_with_source(doc: &serde_json::Value, source_filename: &str)
 ///
 /// The recorder's current behaviour:
 ///
-/// * `metadata.program` is the contract name (`ControlFlow`), not the
-///   source path — RECORDER BUG, see the ignored sibling.
+/// * `metadata.program` is the canonical absolute path of
+///   `ControlFlow.sol` (per recorder-test-requirements.md §1).
 /// * `functions` table contains only `fn_at_pc_<n>` placeholders —
 ///   none of the named Solidity functions land here because the
 ///   internal-call resolver only succeeds for argument-less calls
@@ -401,7 +410,7 @@ fn test_control_flow_via_ct_print_full() {
         return;
     };
 
-    assert_metadata_program_eq_contract_name(&doc, "ControlFlow");
+    assert_metadata_program_is_source_path(&doc, "control_flow", "ControlFlow.sol");
     assert_paths_ends_with_source(&doc, "ControlFlow.sol");
 
     // --- counts ---
@@ -492,9 +501,6 @@ fn test_control_flow_via_ct_print_full() {
 }
 
 #[test]
-#[ignore = "RECORDER BUG: metadata.program records the contract name, \
-            not the source-file path; spec (recorder-test-requirements §1) \
-            wants the source path."]
 fn test_control_flow_metadata_program_is_source_path() {
     let Some(doc) = record_and_dump_full(
         "test_control_flow_metadata_program_is_source_path",
@@ -564,7 +570,7 @@ fn test_nested_calls_via_ct_print_full() {
         return;
     };
 
-    assert_metadata_program_eq_contract_name(&doc, "NestedCalls");
+    assert_metadata_program_is_source_path(&doc, "nested_calls", "NestedCalls.sol");
     assert_paths_ends_with_source(&doc, "NestedCalls.sol");
 
     // --- counts ---
@@ -707,7 +713,7 @@ fn test_storage_ops_via_ct_print_full() {
         return;
     };
 
-    assert_metadata_program_eq_contract_name(&doc, "StorageOps");
+    assert_metadata_program_is_source_path(&doc, "storage_ops", "StorageOps.sol");
     assert_paths_ends_with_source(&doc, "StorageOps.sol");
 
     // --- counts ---
@@ -788,7 +794,7 @@ fn test_events_test_via_ct_print_full() {
         return;
     };
 
-    assert_metadata_program_eq_contract_name(&doc, "EventsTest");
+    assert_metadata_program_is_source_path(&doc, "events_test", "EventsTest.sol");
     assert_paths_ends_with_source(&doc, "EventsTest.sol");
 
     // --- counts ---
@@ -904,7 +910,7 @@ fn test_require_revert_happy_path_via_ct_print_full() {
         return;
     };
 
-    assert_metadata_program_eq_contract_name(&doc, "RequireRevert");
+    assert_metadata_program_is_source_path(&doc, "require_revert", "RequireRevert.sol");
     assert_paths_ends_with_source(&doc, "RequireRevert.sol");
 
     // --- counts ---
@@ -1015,7 +1021,7 @@ fn test_map_struct_arr_via_ct_print_full() {
         return;
     };
 
-    assert_metadata_program_eq_contract_name(&doc, "MapStructArr");
+    assert_metadata_program_is_source_path(&doc, "map_struct_arr", "MapStructArr.sol");
     assert_paths_ends_with_source(&doc, "MapStructArr.sol");
 
     // --- counts ---

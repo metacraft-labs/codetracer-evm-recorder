@@ -387,9 +387,22 @@ fn test_recorded_trace_via_ct_print_json() {
         stdout_json.contains("FlowTest.sol"),
         "ct-print --json output should mention the source file; got:\n{stdout_json}"
     );
+    // `metadata.program` carries the canonical absolute path of the
+    // source file (recorder-test-requirements.md §1).  Pre-2026-05 the
+    // EVM recorder labelled the trace with the bare contract name
+    // (`"FlowTest"`); the spec-correct label is the source path, which
+    // contains the source filename — already asserted above.  Assert
+    // the canonical-path label is the exact substring emitted.
+    let expected_program = flow_test_source()
+        .canonicalize()
+        .expect("FlowTest.sol must be canonicalizable")
+        .to_string_lossy()
+        .to_string();
     assert!(
-        stdout_json.contains("\"FlowTest\""),
-        "ct-print --json output should mention the `FlowTest` contract / program; got:\n{stdout_json}"
+        stdout_json.contains(&expected_program),
+        "ct-print --json output should mention the canonical source path \
+         (`metadata.program` per recorder-test-requirements §1); \
+         expected to find `{expected_program}` in:\n{stdout_json}"
     );
     assert!(
         stdout_json.contains("\"add\""),
