@@ -784,40 +784,21 @@ impl EvmRecorder {
             // `Write` records produced by other recorders.
             //
             // metadata carries the opcode mnemonic (`LOG0`..`LOG4`); the
-            // content carries the indexed topics.  This matches the
-            // Stylus recorder's convention of `metadata = hook name,
-            // content = payload` (see codetracer-native-backend stylus
-            // tracer + db-backend `tests/stylus_flow_integration.rs`).
-            if log.op.as_ref().starts_with("LOG") {
-                let log_num = log
-                    .op
-                    .as_ref()
-                    .strip_prefix("LOG")
-                    .and_then(|n| n.parse::<u32>().ok())
-                    .unwrap_or(0);
-
-                if let Some(ref stack) = log.stack {
-                    // LOGn pops: offset, size, topic0..topicN
-                    // We capture the topics as event content.
-                    let min_stack = 2 + log_num as usize;
-                    if stack.len() >= min_stack {
-                        let mut topics = Vec::new();
-                        for t in 0..log_num as usize {
-                            let topic_idx = stack.len() - 3 - t;
-                            if topic_idx < stack.len() {
-                                topics.push(format!("0x{:x}", stack[topic_idx]));
-                            }
-                        }
-                        let metadata = format!("LOG{}", log_num);
-                        let content = topics.join(", ");
-                        TraceWriter::register_special_event(
-                            &mut *self.writer,
-                            EventLogKind::EvmEvent,
-                            &metadata,
-                            &content,
-                        );
-                    }
-                }
+            // content carries the indexed topics followed by the
+            // ABI-decoded non-indexed `data` segment (read out of
+            // EVM memory at the [offset, offset+size) range that
+            // LOG{n} pops off the stack).  This is the M10 LOG{n}
+            // ABI-decoding pin — see `IndexedEvents.sol`.
+            if let Some(content) =
+                build_log_event_content(log.op.as_ref(), log.stack.as_deref(), log.memory.as_ref())
+            {
+                let metadata = log.op.as_ref().to_string();
+                TraceWriter::register_special_event(
+                    &mut *self.writer,
+                    EventLogKind::EvmEvent,
+                    &metadata,
+                    &content,
+                );
             }
 
             prev_depth = log.depth;
@@ -1414,36 +1395,21 @@ impl EvmRecorder {
             // LOG0..LOG4: emit Solidity events as EvmEvent
             //
             // See the equivalent block in `record_from_structlog` for
-            // rationale on `EventLogKind::EvmEvent`.
+            // rationale on `EventLogKind::EvmEvent`.  The content
+            // includes both the indexed topics and the non-indexed
+            // `data` segment (read out of memory) per the M10 LOG{n}
+            // ABI-decoding pin.
             // ------------------------------------------------------------------
-            if log.op.as_ref().starts_with("LOG") {
-                let log_num = log
-                    .op
-                    .as_ref()
-                    .strip_prefix("LOG")
-                    .and_then(|n| n.parse::<u32>().ok())
-                    .unwrap_or(0);
-
-                if let Some(ref stack) = log.stack {
-                    let min_stack = 2 + log_num as usize;
-                    if stack.len() >= min_stack {
-                        let mut topics = Vec::new();
-                        for t in 0..log_num as usize {
-                            let topic_idx = stack.len() - 3 - t;
-                            if topic_idx < stack.len() {
-                                topics.push(format!("0x{:x}", stack[topic_idx]));
-                            }
-                        }
-                        let metadata = format!("LOG{}", log_num);
-                        let content = topics.join(", ");
-                        TraceWriter::register_special_event(
-                            &mut *self.writer,
-                            EventLogKind::EvmEvent,
-                            &metadata,
-                            &content,
-                        );
-                    }
-                }
+            if let Some(content) =
+                build_log_event_content(log.op.as_ref(), log.stack.as_deref(), log.memory.as_ref())
+            {
+                let metadata = log.op.as_ref().to_string();
+                TraceWriter::register_special_event(
+                    &mut *self.writer,
+                    EventLogKind::EvmEvent,
+                    &metadata,
+                    &content,
+                );
             }
 
             prev_depth = log.depth;
@@ -1515,6 +1481,75 @@ fn decode_struct_log_memory(memory: Option<&Vec<String>>) -> Vec<u8> {
         out.extend_from_slice(&buf);
     }
     out
+}
+
+/// Build the EvmEvent content payload for a LOG{n} opcode.
+///
+/// Returns `None` when the opcode is not a LOG{0..4} mnemonic.
+///
+/// The payload format is `topic0, topic1, ..., 0xDATA` — the indexed
+/// topics (popped off the stack between offset/size and the bottom of
+/// the LOG argument span) are joined with `", "`, and the non-indexed
+/// `data` segment (read out of EVM memory at the `[offset, offset+size)`
+/// range that LOG{n} pops) is appended as a single 0x-prefixed hex
+/// blob when `size > 0`.  When `size == 0` the trailing comma is
+/// omitted.
+///
+/// This is the M10 LOG{n} ABI-decoding pin (`IndexedEvents.sol`): the
+/// payload now carries the full ABI shape (indexed topics +
+/// non-indexed data) rather than just the topics list.
+fn build_log_event_content(
+    op: &str,
+    stack: Option<&[alloy::primitives::U256]>,
+    memory: Option<&Vec<String>>,
+) -> Option<String> {
+    let log_num: u32 = op.strip_prefix("LOG").and_then(|n| n.parse().ok())?;
+    if log_num > 4 {
+        return None;
+    }
+    let stack = stack?;
+    let min_stack = 2 + log_num as usize;
+    if stack.len() < min_stack {
+        return None;
+    }
+
+    // LOGn argument layout (top of stack first):
+    //   [offset, size, topic0, topic1, ..., topic_{n-1}]
+    // i.e. stack[len-1] = offset, stack[len-2] = size, then topics
+    // descend toward the deeper stack positions.
+    let offset = stack[stack.len() - 1];
+    let size = stack[stack.len() - 2];
+
+    let mut topics = Vec::with_capacity(log_num as usize);
+    for t in 0..log_num as usize {
+        let topic_idx = stack.len() - 3 - t;
+        topics.push(format!("0x{:x}", stack[topic_idx]));
+    }
+
+    let mut content = topics.join(", ");
+
+    // Append the non-indexed `data` segment when present.
+    let size_usize = u64::try_from(size).ok().and_then(|x| usize::try_from(x).ok());
+    let offset_usize = u64::try_from(offset).ok().and_then(|x| usize::try_from(x).ok());
+    if let (Some(size), Some(offset)) = (size_usize, offset_usize) {
+        if size > 0 {
+            let memory_bytes = decode_struct_log_memory(memory);
+            let end = offset.saturating_add(size);
+            if end <= memory_bytes.len() {
+                let data = &memory_bytes[offset..end];
+                if !content.is_empty() {
+                    content.push_str(", ");
+                }
+                content.push_str("0x");
+                for byte in data {
+                    use std::fmt::Write as _;
+                    let _ = write!(content, "{:02x}", byte);
+                }
+            }
+        }
+    }
+
+    Some(content)
 }
 
 /// Convert a structLog `op` string (e.g. `"PUSH1"`, `"ADD"`) to its raw
