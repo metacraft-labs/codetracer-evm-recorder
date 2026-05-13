@@ -1396,6 +1396,26 @@ impl EvmRecorder {
         Ok(call_tree)
     }
 
+    /// Emit an `EventLogKind::Error` io_event carrying the decoded
+    /// revert reason for a transaction that ended in `REVERT` (or a
+    /// `Panic`).  Multi-stream consumers surface this as `ioError`
+    /// (see `toIOEventKind` in `codetracer_trace_writer_ffi.nim`),
+    /// which is what the recorder-test-requirements `revert path`
+    /// case asserts on.
+    ///
+    /// `metadata` is a short tag (`"Revert"` / `"Panic"` / `"RevertRaw"`)
+    /// and `reason` is the human-readable body (the decoded
+    /// `Error(string)` argument, the panic-code mnemonic, or a hex
+    /// dump of the raw output bytes for unrecognised payloads).
+    pub fn register_revert(&mut self, metadata: &str, reason: &str) {
+        TraceWriter::register_special_event(
+            &mut *self.writer,
+            EventLogKind::Error,
+            metadata,
+            reason,
+        );
+    }
+
     /// Finalize the trace output, flushing all buffered data.
     pub fn finalize(&mut self) -> eyre::Result<()> {
         // Close the <toplevel> call that start() opened.

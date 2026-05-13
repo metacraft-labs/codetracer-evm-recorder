@@ -3,6 +3,7 @@ pub mod contract_registry;
 pub mod inspector;
 pub mod recorder;
 pub mod replay;
+pub mod revert_decode;
 pub mod solidity_ast;
 pub mod source_fetcher;
 pub mod source_map;
