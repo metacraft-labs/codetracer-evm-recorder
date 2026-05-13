@@ -1,6 +1,7 @@
 pub mod call_tree;
 pub mod contract_registry;
 pub mod inspector;
+pub mod memory_tracker;
 pub mod recorder;
 pub mod replay;
 pub mod revert_decode;

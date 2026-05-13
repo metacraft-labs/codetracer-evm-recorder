@@ -9,6 +9,7 @@ use crate::call_tree::{CallTree, CallType};
 use crate::contract_registry::ContractRegistry;
 use crate::solidity_ast::{FunctionDef, SolidityAst};
 use crate::source_map::{self, JumpType, SourceMap};
+use crate::memory_tracker::MemoryTracker;
 use crate::stack_tracker::StackTracker;
 use crate::storage_layout::StorageLayout;
 use crate::structlog::StructLog;
@@ -368,6 +369,10 @@ impl EvmRecorder {
         // by depth (depth 1 = index 0).  Resetting on depth changes keeps the
         // symbolic stack consistent with the real EVM stack.
         let mut stack_trackers: Vec<StackTracker> = Vec::new();
+        // Parallel memory trackers for memory-escalated locals (struct,
+        // dynamic array, string, bytes, ...).  Indexed by depth identical
+        // to `stack_trackers`.
+        let mut memory_trackers: Vec<MemoryTracker> = Vec::new();
 
         // --- Storage variable carry-forward ---
         // SSTORE opcodes only fire once per slot write.  To make storage
@@ -410,6 +415,9 @@ impl EvmRecorder {
                 while stack_trackers.len() < log.depth as usize {
                     stack_trackers.push(StackTracker::new());
                 }
+                while memory_trackers.len() < log.depth as usize {
+                    memory_trackers.push(MemoryTracker::new());
+                }
             } else if log.depth < prev_depth {
                 // Returning from an external call
                 let depth_diff = prev_depth - log.depth;
@@ -421,12 +429,16 @@ impl EvmRecorder {
                     TraceWriter::register_return(&mut *self.writer, ret_val);
                     // Pop the tracker for the exited depth.
                     stack_trackers.pop();
+                    memory_trackers.pop();
                 }
             }
 
             // Ensure we always have a tracker for the current depth.
             while stack_trackers.len() < log.depth as usize {
                 stack_trackers.push(StackTracker::new());
+            }
+            while memory_trackers.len() < log.depth as usize {
+                memory_trackers.push(MemoryTracker::new());
             }
             let tracker_idx = (log.depth as usize).saturating_sub(1);
             let tracker = &mut stack_trackers[tracker_idx];
@@ -482,6 +494,24 @@ impl EvmRecorder {
                             let in_scope = func.vars_in_scope_at(src_off);
                             // Update the symbolic tracker with in-scope variable info.
                             let _ = tracker.process_step(op, pc, Some(src_off), &in_scope);
+
+                            // Drive the parallel memory tracker for memory-
+                            // escalated locals (struct, dynamic arrays, ...).
+                            // Only the MSTORE / MLOAD opcodes affect it; we
+                            // pay the structLog memory-decode cost only then.
+                            let mtracker = &mut memory_trackers[tracker_idx];
+                            if matches!(op, 0x51 | 0x52 | 0x53) {
+                                let pre_stack = log.stack.as_deref().unwrap_or(&[]);
+                                let pre_memory = decode_struct_log_memory(log.memory.as_ref());
+                                let _ = mtracker.process_step(
+                                    op,
+                                    pc as u64,
+                                    Some(src_off),
+                                    &in_scope,
+                                    pre_stack,
+                                    &pre_memory,
+                                );
+                            }
 
                             // Use the next step's stack for value lookup (post-execution).
                             let post_stack =
@@ -901,6 +931,8 @@ impl EvmRecorder {
         let mut prev_depth: u64 = 1;
         let mut prev_line: Option<(i32, u32)> = None;
         let mut stack_trackers: Vec<StackTracker> = Vec::new();
+        // Parallel memory trackers, indexed identically to `stack_trackers`.
+        let mut memory_trackers: Vec<MemoryTracker> = Vec::new();
 
         // Storage variable carry-forward per call frame.  Each entry in the
         // Vec corresponds to an EVM call depth (depth 1 = index 0).  When a
@@ -1014,6 +1046,9 @@ impl EvmRecorder {
                 while stack_trackers.len() < log.depth as usize {
                     stack_trackers.push(StackTracker::new());
                 }
+                while memory_trackers.len() < log.depth as usize {
+                    memory_trackers.push(MemoryTracker::new());
+                }
                 // Fresh storage state for the new call frame.
                 while storage_states.len() < log.depth as usize {
                     storage_states.push(std::collections::HashMap::new());
@@ -1030,6 +1065,7 @@ impl EvmRecorder {
                     };
                     TraceWriter::register_return(&mut *self.writer, ret_val);
                     stack_trackers.pop();
+                    memory_trackers.pop();
                     // Pop the exited frame's storage state (keep root frame).
                     if storage_states.len() > 1 {
                         storage_states.pop();
@@ -1051,6 +1087,9 @@ impl EvmRecorder {
             // Ensure trackers are sized for current depth.
             while stack_trackers.len() < log.depth as usize {
                 stack_trackers.push(StackTracker::new());
+            }
+            while memory_trackers.len() < log.depth as usize {
+                memory_trackers.push(MemoryTracker::new());
             }
             let tracker_idx = (log.depth as usize).saturating_sub(1);
             let tracker = &mut stack_trackers[tracker_idx];
@@ -1174,6 +1213,23 @@ impl EvmRecorder {
                         if let Some(func) = ast.function_at(src_off, file_idx) {
                             let in_scope = func.vars_in_scope_at(src_off);
                             let _ = tracker.process_step(op, pc, Some(src_off), &in_scope);
+
+                            // Drive the parallel memory tracker for memory-
+                            // escalated locals.  Decoded memory is only
+                            // needed for MSTORE / MLOAD.
+                            let mtracker = &mut memory_trackers[tracker_idx];
+                            if matches!(op, 0x51 | 0x52 | 0x53) {
+                                let pre_stack = log.stack.as_deref().unwrap_or(&[]);
+                                let pre_memory = decode_struct_log_memory(log.memory.as_ref());
+                                let _ = mtracker.process_step(
+                                    op,
+                                    pc as u64,
+                                    Some(src_off),
+                                    &in_scope,
+                                    pre_stack,
+                                    &pre_memory,
+                                );
+                            }
 
                             if let Some(ref concrete_stack) = log.stack {
                                 for var in &in_scope {
@@ -1435,6 +1491,31 @@ impl EvmRecorder {
 // ---------------------------------------------------------------------------
 // Helper: map opcode mnemonic string to opcode byte
 // ---------------------------------------------------------------------------
+
+/// Flatten a structLog `memory` field — a `Vec<String>` of 32-byte hex words
+/// — into a contiguous byte buffer.  Returns an empty buffer when no memory
+/// snapshot is present.  Tolerates `0x` prefixes and odd-length words by
+/// padding with zeros.
+fn decode_struct_log_memory(memory: Option<&Vec<String>>) -> Vec<u8> {
+    let Some(words) = memory else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(words.len() * 32);
+    for w in words {
+        let trimmed = w.strip_prefix("0x").unwrap_or(w.as_str());
+        let mut buf = [0u8; 32];
+        // Each word should be 64 hex chars; tolerate shorter values.
+        let bytes_count = trimmed.len() / 2;
+        for i in 0..bytes_count.min(32) {
+            let lo = i * 2;
+            if let Ok(b) = u8::from_str_radix(&trimmed[lo..lo + 2], 16) {
+                buf[i] = b;
+            }
+        }
+        out.extend_from_slice(&buf);
+    }
+    out
+}
 
 /// Convert a structLog `op` string (e.g. `"PUSH1"`, `"ADD"`) to its raw
 /// opcode byte.  Returns `None` for unknown mnemonics.
