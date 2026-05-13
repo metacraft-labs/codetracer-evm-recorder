@@ -564,12 +564,19 @@ fn test_recorded_trace_via_ct_print_json() {
 
     // ----- Strict ValueRecord variant invariant -----------------------
     // Every step var that surfaces must carry a `value.kind` field.
-    // For the EVM recorder today, every value decodes to
-    // `ValueRecord::Raw` (raw stack/memory bytes) — see the doc-comment
-    // above and `AUDIT-CTFS-2026-05.md`.  If a future recorder upgrade
-    // emits `Int` / `Sequence` / `Struct` / etc. instead, this assertion
-    // fails loudly so the test author can extend the exact-value layer
-    // to the new variant rather than silently weakening the invariant.
+    //
+    // The EVM recorder emits two variants today (the upgrade landed
+    // when the `_decodes_loop_sums` ignored test was promoted):
+    //   * `ValueRecord::Raw` — storage carry-forward and the raw
+    //     stack-snapshot path used for internal call args.
+    //   * `ValueRecord::Int` — small uint256 / int256 / bool stack
+    //     values that fit in i64, surfaced for AST-resolved locals.
+    //
+    // Each variant is checked strictly: Raw must carry a `0x`-prefixed
+    // hex `r` field; Int must carry a numeric `i` field.  Any *other*
+    // kind (Sequence / Struct / ...) is a hard error so a future
+    // recorder upgrade has to extend this assertion explicitly rather
+    // than silently weakening it.
     for ev in events {
         if ev["kind"] != "step" {
             continue;
@@ -584,24 +591,32 @@ fn test_recorded_trace_via_ct_print_json() {
                 .unwrap_or_else(|| panic!(
                     "step {step_index} var `{name}` is missing value.kind; got {value}"
                 ));
-            assert_eq!(
-                kind, "Raw",
-                "step {step_index} var `{name}` should decode as Raw, got {value}; \
-                 if a new ValueRecord variant has landed for the EVM recorder \
-                 (e.g. Int payloads now round-trip — see AUDIT-CTFS-2026-05.md), \
-                 extend this test to assert on it explicitly rather than \
-                 weakening the check"
-            );
-            // Raw values must carry a non-empty hex byte sequence.
-            let r = value["r"].as_str().unwrap_or_else(|| {
-                panic!(
-                    "step {step_index} var `{name}` Raw value missing `r` field; got {value}"
-                )
-            });
-            assert!(
-                r.starts_with("0x"),
-                "step {step_index} var `{name}` Raw `r` should be hex-prefixed; got {r}"
-            );
+            match kind {
+                "Raw" => {
+                    let r = value["r"].as_str().unwrap_or_else(|| {
+                        panic!(
+                            "step {step_index} var `{name}` Raw value missing `r` field; got {value}"
+                        )
+                    });
+                    assert!(
+                        r.starts_with("0x"),
+                        "step {step_index} var `{name}` Raw `r` should be hex-prefixed; got {r}"
+                    );
+                }
+                "Int" => {
+                    let _i = value["i"].as_i64().unwrap_or_else(|| {
+                        panic!(
+                            "step {step_index} var `{name}` Int value missing `i` field; got {value}"
+                        )
+                    });
+                }
+                other => panic!(
+                    "step {step_index} var `{name}` decoded as unexpected kind `{other}`; \
+                     got {value}; if a new ValueRecord variant has landed for the EVM \
+                     recorder, extend this test to assert on it explicitly rather than \
+                     silently accepting it"
+                ),
+            }
         }
     }
 

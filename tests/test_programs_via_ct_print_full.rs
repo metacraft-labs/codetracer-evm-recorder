@@ -266,19 +266,23 @@ fn observed_io_events(doc: &serde_json::Value) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Walk every `vars[]` entry in every `step` event and assert the
-/// `value.kind` is `"Raw"` (the only variant the EVM recorder
-/// currently emits — every value comes from a 256-bit EVM stack
-/// slot or storage word and is encoded as `ValueRecord::Raw`).
+/// Walk every `vars[]` entry in every `step` event and assert that
+/// the *set of distinct* `value.kind`s observed is **exactly**
+/// `expected`.
 ///
-/// Any other variant is a hard error: the test author must extend
-/// this helper (and the per-test assertions) rather than weakening
-/// the check.  See the recorder-test-requirements §1
-/// "Maximum assertion strength" — a future ValueRecord::Int /
-/// Sequence / Struct emission for SSTORE-decoded values is desired
-/// (see the per-program `_value_kinds_present` ignored siblings) and
-/// must surface as a loud failure here, not be silently absorbed.
-fn assert_all_step_values_are_raw(doc: &serde_json::Value) {
+/// Strictness: any kind seen in the trace but absent from
+/// `expected` is a hard error (the test author must extend the
+/// per-test expectations); conversely, every kind in `expected`
+/// MUST appear at least once in the trace, otherwise the test author
+/// is asserting against a richer set than the recorder actually
+/// emits and the assertion is silently weaker than intended.
+///
+/// See the recorder-test-requirements §1 "Maximum assertion
+/// strength" — the per-program `_value_kinds_present` siblings rely
+/// on this helper to surface the exact ValueRecord shape the
+/// recorder produces today.
+fn assert_step_value_kinds_eq(doc: &serde_json::Value, expected: &[&str]) {
+    let mut found: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for ev in doc["events"].as_array().expect("events array") {
         if ev["kind"] != "step" {
             continue;
@@ -288,17 +292,17 @@ fn assert_all_step_values_are_raw(doc: &serde_json::Value) {
         };
         for v in vars {
             let kind = v["value"]["kind"].as_str().unwrap_or("");
-            assert_eq!(
-                kind, "Raw",
-                "every step variable value must currently decode as Raw \
-                 (EVM stack slots are 256-bit u256s); got {} for varname `{}` \
-                 — if a richer ValueRecord variant has landed, extend the \
-                 per-test expectations rather than weakening this check",
-                v["value"],
-                v["varname"].as_str().unwrap_or("?"),
-            );
+            found.insert(kind.to_string());
         }
     }
+    let expected_set: std::collections::BTreeSet<String> =
+        expected.iter().map(|s| s.to_string()).collect();
+    assert_eq!(
+        found, expected_set,
+        "step value kinds mismatch — extend the per-test expected set \
+         rather than weakening the check (see \
+         recorder-test-requirements §1)"
+    );
 }
 
 /// Decode every observed `(varname, value_hex)` pair from step events,
@@ -416,7 +420,9 @@ fn test_control_flow_via_ct_print_full() {
     // --- counts ---
     let counts = &doc["counts"];
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
-    assert_eq!(counts["functions"].as_u64(), Some(3), "functions count");
+    // 4 = `run` (registered when the dispatcher → entry-point JUMP is
+    // absorbed) + 3 dispatcher-orphan `fn_at_pc_*` placeholders.
+    assert_eq!(counts["functions"].as_u64(), Some(4), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(37), "steps count");
     assert_eq!(counts["calls"].as_u64(), Some(2), "calls count");
     assert_eq!(counts["values"].as_u64(), Some(37), "values count");
@@ -462,7 +468,12 @@ fn test_control_flow_via_ct_print_full() {
     );
 
     // --- value variants ---
-    assert_all_step_values_are_raw(&doc);
+    // Locals (`flag`, `branchVal`, `whileSum`, `counter`, `forSum`,
+    // `i`, `total`) are u256 stack values that fit in i64 → emitted
+    // as `ValueRecord::Int`.  Storage `result` and the carried-
+    // forward storage cache stay `ValueRecord::Raw` (keeps the
+    // `observed_step_var_pairs` storage-hex check honest).
+    assert_step_value_kinds_eq(&doc, &["Int", "Raw"]);
 
     // --- io / event emission ---
     // Exactly one Done(uint256) event → one ioStderr line in the
@@ -518,10 +529,6 @@ fn test_control_flow_metadata_program_is_source_path() {
 }
 
 #[test]
-#[ignore = "RECORDER BUG: ValueRecord::Int is not yet emitted for \
-            unsigned integer variables; every value surfaces as \
-            ValueRecord::Raw because the recorder treats EVM stack \
-            words as opaque 256-bit blobs.  Spec wants {kind:Int,i:42}."]
 fn test_control_flow_decodes_loop_sums() {
     let Some(doc) = record_and_dump_full(
         "test_control_flow_decodes_loop_sums",
@@ -576,7 +583,11 @@ fn test_nested_calls_via_ct_print_full() {
     // --- counts ---
     let counts = &doc["counts"];
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
-    assert_eq!(counts["functions"].as_u64(), Some(5), "functions count");
+    // 6 = `run` (registered when the dispatcher → entry-point JUMP is
+    // absorbed) + the 3 AST-resolved internal calls (`outer`,
+    // `middle`, `inner`) + 2 dispatcher-orphan `fn_at_pc_*`
+    // placeholders.
+    assert_eq!(counts["functions"].as_u64(), Some(6), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(26), "steps count");
     // 3 internal-call entries that surface in the call_entry
     // sequence + 2 more orphan entries from the dispatcher
@@ -585,12 +596,11 @@ fn test_nested_calls_via_ct_print_full() {
     assert_eq!(counts["io_events"].as_u64(), Some(1), "io_events count");
 
     // --- function table ---
-    // The first three are AST-resolved (zero-arg internals).
-    // RECORDER BUG: `inner` is missing from the function table —
-    // the resolver places its first-step into `<toplevel>` because
-    // the lookahead window misses the `inner()` body.  The two
-    // `fn_at_pc_*` entries are placeholders for the lookahead-
-    // failed call frames.
+    // `run` lands first because the recorder registers it eagerly
+    // when it absorbs the dispatcher → entry-point JUMP into
+    // <toplevel> (so step-over works).  The next three are
+    // AST-resolved internals (`outer`, `middle`, `inner`); the last
+    // two `fn_at_pc_*` entries are dispatcher-orphan placeholders.
     let functions: Vec<&str> = doc["functions"]
         .as_array()
         .expect("functions array")
@@ -599,9 +609,10 @@ fn test_nested_calls_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec!["outer", "middle", "inner", "fn_at_pc_410", "fn_at_pc_340"],
+        vec!["run", "outer", "middle", "inner", "fn_at_pc_410", "fn_at_pc_340"],
         "function table — order is writer-assignment order; \
-         AST-resolved names first, lookahead-fallback placeholders last"
+         entry-point first, then AST-resolved internals, then \
+         lookahead-fallback placeholders"
     );
 
     // --- exact step-line sequence ---
@@ -628,7 +639,11 @@ fn test_nested_calls_via_ct_print_full() {
     );
 
     // --- value variants ---
-    assert_all_step_values_are_raw(&doc);
+    // Locals (`seed`, `v`, `r`, `m`, `i`, `a`, `b`) and the storage
+    // `stored` carry-forward all surface in step events: locals as
+    // `Int` (small u256 values that fit in i64), storage carry-
+    // forward as `Raw`.
+    assert_step_value_kinds_eq(&doc, &["Int", "Raw"]);
 
     // --- io / event emission ---
     let ios = observed_io_events(&doc);
@@ -668,10 +683,6 @@ fn test_nested_calls_via_ct_print_full() {
 }
 
 #[test]
-#[ignore = "RECORDER BUG: internal-call name resolution misses `outer`, \
-            `middle`, and `inner` — they should land in the function \
-            table by their Solidity names, not as `fn_at_pc_<n>`. \
-            Tracking expectation: ['run', 'outer', 'middle', 'inner']."]
 fn test_nested_calls_function_names_resolved() {
     let Some(doc) = record_and_dump_full(
         "test_nested_calls_function_names_resolved",
@@ -719,7 +730,9 @@ fn test_storage_ops_via_ct_print_full() {
     // --- counts ---
     let counts = &doc["counts"];
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
-    assert_eq!(counts["functions"].as_u64(), Some(3), "functions count");
+    // 4 = `run` (eagerly registered for the absorbed entry-point JUMP)
+    // + 3 dispatcher-orphan `fn_at_pc_*` placeholders.
+    assert_eq!(counts["functions"].as_u64(), Some(4), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(12), "steps count");
     assert_eq!(counts["calls"].as_u64(), Some(2), "calls count");
     assert_eq!(counts["io_events"].as_u64(), Some(1), "io_events count");
@@ -754,7 +767,10 @@ fn test_storage_ops_via_ct_print_full() {
     );
 
     // --- value variants ---
-    assert_all_step_values_are_raw(&doc);
+    // Locals (`ra`, `rb`, `rc`) and the storage carry-forward of
+    // `a`, `b`, `c` all surface in step events: locals as `Int`
+    // (small u256 values), storage carry-forward as `Raw`.
+    assert_step_value_kinds_eq(&doc, &["Int", "Raw"]);
 
     // --- decoded storage values ---
     // After the three SSTOREs the storage variables `a`, `b`, `c`
@@ -800,7 +816,9 @@ fn test_events_test_via_ct_print_full() {
     // --- counts ---
     let counts = &doc["counts"];
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
-    assert_eq!(counts["functions"].as_u64(), Some(2), "functions count");
+    // 3 = `run` (eagerly registered for the absorbed entry-point JUMP)
+    // + 2 dispatcher-orphan `fn_at_pc_*` placeholders.
+    assert_eq!(counts["functions"].as_u64(), Some(3), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(9), "steps count");
     assert_eq!(counts["calls"].as_u64(), Some(2), "calls count");
     // EXACT three io_events — one per `emit` statement.  This is
@@ -825,7 +843,10 @@ fn test_events_test_via_ct_print_full() {
     );
 
     // --- value variants ---
-    assert_all_step_values_are_raw(&doc);
+    // EventsTest.run() declares no parameters or named locals, so
+    // the only values surfaced in step events are the storage
+    // carry-forward of `stored` (Raw u256).
+    assert_step_value_kinds_eq(&doc, &["Raw"]);
 
     // --- io events ---
     let ios = observed_io_events(&doc);
@@ -862,10 +883,6 @@ fn test_events_test_via_ct_print_full() {
 }
 
 #[test]
-#[ignore = "RECORDER BUG: io payload only carries the topic0 (event \
-            signature hash); indexed args + ABI-encoded data segment \
-            are dropped.  Spec-compliant trace should surface the \
-            full LOG{n} payload (topics + data)."]
 fn test_events_test_io_payload_includes_topics_and_data() {
     let Some(doc) = record_and_dump_full(
         "test_events_test_io_payload_includes_topics_and_data",
@@ -916,16 +933,20 @@ fn test_require_revert_happy_path_via_ct_print_full() {
     // --- counts ---
     let counts = &doc["counts"];
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
-    assert_eq!(counts["functions"].as_u64(), Some(2), "functions count");
+    // 3 = `run` (eagerly registered for the absorbed entry-point JUMP)
+    // + `safe` + 1 dispatcher-orphan `fn_at_pc_*` placeholder.
+    assert_eq!(counts["functions"].as_u64(), Some(3), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(13), "steps count");
     assert_eq!(counts["calls"].as_u64(), Some(3), "calls count");
     assert_eq!(counts["io_events"].as_u64(), Some(1), "io_events count");
 
     // --- function table ---
-    // `safe` is AST-resolved (single bool argument; the recorder's
-    // resolver succeeds for it because the lookahead window catches
-    // the body offset).  The other entry is a placeholder for the
-    // dispatcher-orphan call.
+    // `run` is registered first (the recorder eagerly registers the
+    // entry-point name when it absorbs the dispatcher → `run` JUMP
+    // into <toplevel>).  `safe` is AST-resolved (single bool
+    // argument; the recorder's resolver succeeds for it because the
+    // lookahead window catches the body offset).  The trailing entry
+    // is a placeholder for the dispatcher-orphan call.
     let functions: Vec<&str> = doc["functions"]
         .as_array()
         .expect("functions array")
@@ -934,8 +955,8 @@ fn test_require_revert_happy_path_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec!["safe", "fn_at_pc_458"],
-        "function table — `safe` resolved by AST + dispatcher orphan placeholder"
+        vec!["run", "safe", "fn_at_pc_458"],
+        "function table — entry-point `run` first, then `safe` resolved by AST, then dispatcher orphan placeholder"
     );
 
     // --- exact step-line sequence ---
@@ -955,7 +976,11 @@ fn test_require_revert_happy_path_via_ct_print_full() {
     );
 
     // --- value variants ---
-    assert_all_step_values_are_raw(&doc);
+    // The local `v` (uint256, value 7) and the `safe(bool flag)`
+    // parameter `flag` (bool, value 1) both surface as `Int` (small
+    // u256 values fitting in i64); the storage carry-forward of
+    // `stored` stays `Raw`.
+    assert_step_value_kinds_eq(&doc, &["Int", "Raw"]);
 
     // --- io ---
     let ios = observed_io_events(&doc);
@@ -1027,7 +1052,9 @@ fn test_map_struct_arr_via_ct_print_full() {
     // --- counts ---
     let counts = &doc["counts"];
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
-    assert_eq!(counts["functions"].as_u64(), Some(2), "functions count");
+    // 3 = `run` (eagerly registered for the absorbed entry-point JUMP)
+    // + 2 dispatcher-orphan `fn_at_pc_*` placeholders.
+    assert_eq!(counts["functions"].as_u64(), Some(3), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(11), "steps count");
     assert_eq!(counts["calls"].as_u64(), Some(2), "calls count");
     assert_eq!(counts["io_events"].as_u64(), Some(1), "io_events count");
@@ -1080,8 +1107,17 @@ fn test_map_struct_arr_via_ct_print_full() {
         ],
     );
 
-    // --- value variants (current behaviour) ---
-    assert_all_step_values_are_raw(&doc);
+    // --- value variants ---
+    // - `Raw` for individual storage slot writes (the synthetic
+    //   `storage[<slot>]` entries) and the storage carry-forward.
+    // - `Sequence` for the `slots` fixed-size array snapshot
+    //   (assembled from layout-resolved slots 1..4).
+    // - `Struct` for the `record` struct snapshot (assembled from
+    //   layout-resolved member slots 4..7).
+    //
+    // run() returns the sum `slots[0]+slots[1]+slots[2]+record.value`
+    // but does not bind it to a named local, so no `Int` kind appears.
+    assert_step_value_kinds_eq(&doc, &["Raw", "Sequence", "Struct"]);
 
     // --- io ---
     let ios = observed_io_events(&doc);
@@ -1090,10 +1126,6 @@ fn test_map_struct_arr_via_ct_print_full() {
 }
 
 #[test]
-#[ignore = "RECORDER BUG: collection types (mapping, fixed-size array, \
-            struct) all surface as ValueRecord::Raw u256 storage slots \
-            today.  Spec-compliant trace should expose `slots` as \
-            ValueRecord::Sequence and `record` as ValueRecord::Struct."]
 fn test_map_struct_arr_value_kinds_present() {
     let Some(doc) = record_and_dump_full(
         "test_map_struct_arr_value_kinds_present",
