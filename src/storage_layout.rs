@@ -78,6 +78,47 @@ impl StorageLayout {
     pub fn type_info(&self, entry: &StorageEntry) -> Option<&StorageTypeInfo> {
         self.types.get(&entry.type_name)
     }
+
+    /// Look up the *containing* compound storage entry (a fixed-size
+    /// array or an `inplace`-encoded struct) whose slot range covers
+    /// `slot`.
+    ///
+    /// Returns `Some((entry, type_info, slot_count))` when `slot` falls
+    /// inside the contiguous slot range owned by an array or struct
+    /// declared in the storage layout.  `slot_count` is the number of
+    /// 32-byte slots the compound occupies (`length` for an array,
+    /// `members.len()` for a struct).
+    ///
+    /// Mappings are NOT covered: their entries live at hashed slots
+    /// derived from the key, not in a contiguous range, so we cannot
+    /// reconstruct a `Sequence`/`Struct` value from the layout alone.
+    pub fn containing_compound(&self, slot: u64) -> Option<(&StorageEntry, &StorageTypeInfo, u64)> {
+        for entry in &self.storage {
+            let base_slot: u64 = entry.slot.parse().ok()?;
+            let ti = self.type_info(entry)?;
+            let total_bytes: u64 = ti.number_of_bytes.parse().ok()?;
+            // Solidity packs primitives smaller than 32 bytes into a
+            // single slot, but for arrays of 32-byte elements and for
+            // `inplace`-encoded structs each member starts at its own
+            // slot.  We round up to whole slots.
+            let slot_count = total_bytes.div_ceil(32);
+            if slot_count <= 1 {
+                continue;
+            }
+            if ti.encoding != "inplace" {
+                continue;
+            }
+            // Only arrays or structs are interesting (must have members
+            // or a base element type).
+            if ti.members.is_none() && ti.base.is_none() {
+                continue;
+            }
+            if slot >= base_slot && slot < base_slot + slot_count {
+                return Some((entry, ti, slot_count));
+            }
+        }
+        None
+    }
 }
 
 #[cfg(test)]

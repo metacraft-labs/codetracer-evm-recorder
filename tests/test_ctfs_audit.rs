@@ -450,8 +450,20 @@ async fn audit_ctfs_call_args_writer_attaches_add_xy() {
         varnames
     );
 
-    // Walk every Call record and look for an `add` frame that carries the
-    // staged x / y arguments end-to-end.
+    // Walk every Call record and look for the frame that carries the
+    // staged `x` / `y` arguments end-to-end.
+    //
+    // We deliberately key on the *argument varnames* rather than the
+    // function-id-to-name mapping: the raw CTFS call record's
+    // `function_id` field uses the multi-stream interning ID space,
+    // which is *not* an offset into the FFI's `function()` table once
+    // the entry-point function (e.g. `compute`/`run`) is also
+    // registered eagerly via `ensure_function_id` so it appears in the
+    // function table.  Pinning on the staged (`x`, `y`) varnames lets
+    // the test stay invariant under that registration-order change
+    // while still asserting the headline behaviour: the recorder
+    // staged the `add(x, y)` parameters and the FFI key-on-name fix
+    // landed them on a Call record's `args` field.
     let mut call_summaries = Vec::new();
     let mut add_call_with_args: Option<(u64, usize)> = None;
     for k in 0..reader.call_count() {
@@ -461,24 +473,35 @@ async fn audit_ctfs_call_args_writer_attaches_add_xy() {
             .as_u64()
             .or_else(|| parsed["functionId"].as_u64())
             .unwrap_or(u64::MAX);
-        let fid = fid_raw.saturating_sub(1);
-        let function_name = fn_names
-            .get(fid as usize)
-            .cloned()
-            .unwrap_or_else(|| format!("<unknown:{fid_raw}>"));
-        let args_len = parsed["args"].as_array().map_or(0, Vec::len);
-        call_summaries.push(format!("{k}:{function_name}:args={args_len}"));
-        if function_name == "add" && args_len > 0 && add_call_with_args.is_none() {
+        let args = parsed["args"].as_array().cloned().unwrap_or_default();
+        let args_len = args.len();
+        let arg_varnames: Vec<String> = args
+            .iter()
+            .filter_map(|a| {
+                a.get("varname_id")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|id| reader.varname(id).ok())
+            })
+            .collect();
+        call_summaries.push(format!(
+            "{k}:fid={fid_raw}:args={args_len}:varnames={arg_varnames:?}"
+        ));
+        let carries_xy = arg_varnames.iter().any(|n| n == "x")
+            && arg_varnames.iter().any(|n| n == "y");
+        if carries_xy && add_call_with_args.is_none() {
             add_call_with_args = Some((k, args_len));
         }
     }
+    // `fn_names` is referenced below in the assertion-failure message
+    // so the developer sees both the staged-args view and the
+    // function-table view side by side when triaging.
 
     let (add_call_key, add_args_len) = add_call_with_args.unwrap_or_else(|| {
         panic!(
-            "expected at least one `add` Call record carrying the staged \
-             (x, y) args after the FFI key-on-name-only fix; call \
-             summaries: {:?}",
-            call_summaries
+            "expected at least one Call record carrying the staged \
+             (x, y) args from `add(x, y)` after the FFI key-on-name-only \
+             fix; fn_names = {:?}; call summaries: {:?}",
+            fn_names, call_summaries
         )
     });
     // The Solidity `add(uint256 x, uint256 y)` signature has exactly two

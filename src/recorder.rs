@@ -36,6 +36,111 @@ fn type_kind_for_solidity_type(type_name: &str) -> TypeKind {
     }
 }
 
+/// Assemble a `ValueRecord::Sequence` (for fixed-size arrays) or
+/// `ValueRecord::Struct` (for `inplace`-encoded structs) snapshot of
+/// the compound storage variable described by `parent` / `parent_ti`,
+/// drawing per-slot values from `slot_values`.
+///
+/// Returns `None` for compounds we can't reliably reconstruct from
+/// the storage layout alone (e.g. mappings, dynamic arrays).
+fn build_compound_value(
+    writer: &mut dyn TraceWriter,
+    layout: &crate::storage_layout::StorageLayout,
+    _parent: &crate::storage_layout::StorageEntry,
+    parent_ti: &crate::storage_layout::StorageTypeInfo,
+    base_slot: u64,
+    slot_count: u64,
+    slot_values: &std::collections::HashMap<u64, alloy::primitives::U256>,
+) -> Option<ValueRecord> {
+    let element_type_id =
+        TraceWriter::ensure_type_id(writer, TypeKind::Int, "uint256");
+
+    if let Some(members) = parent_ti.members.as_ref() {
+        // Struct: one element per member, in declared order.  Each
+        // member's `slot` field is relative to the struct base slot
+        // (per Solidity storage layout encoding).
+        let parent_type_id =
+            TraceWriter::ensure_type_id(writer, TypeKind::Struct, &parent_ti.label);
+        let mut field_values: Vec<ValueRecord> = Vec::with_capacity(members.len());
+        for member in members {
+            let member_offset: u64 = member.slot.parse().ok()?;
+            let abs_slot = base_slot + member_offset;
+            let raw = slot_values
+                .get(&abs_slot)
+                .copied()
+                .unwrap_or(alloy::primitives::U256::ZERO);
+            field_values.push(ValueRecord::Raw {
+                r: format!("0x{:x}", raw),
+                type_id: element_type_id,
+            });
+        }
+        Some(ValueRecord::Struct {
+            field_values,
+            type_id: parent_type_id,
+        })
+    } else if parent_ti.base.is_some() {
+        // Fixed-size array: one element per slot in the contiguous range.
+        let parent_type_id =
+            TraceWriter::ensure_type_id(writer, TypeKind::Array, &parent_ti.label);
+        let mut elements: Vec<ValueRecord> = Vec::with_capacity(slot_count as usize);
+        for offset in 0..slot_count {
+            let abs_slot = base_slot + offset;
+            let raw = slot_values
+                .get(&abs_slot)
+                .copied()
+                .unwrap_or(alloy::primitives::U256::ZERO);
+            elements.push(ValueRecord::Raw {
+                r: format!("0x{:x}", raw),
+                type_id: element_type_id,
+            });
+        }
+        let _ = layout; // currently unused; kept for symmetry/future use
+        Some(ValueRecord::Sequence {
+            elements,
+            is_slice: false,
+            type_id: parent_type_id,
+        })
+    } else {
+        None
+    }
+}
+
+/// Build a `ValueRecord` for a 256-bit EVM stack word that backs a
+/// Solidity local variable of `type_name`.
+///
+/// When the value fits in `i64` and the type is integer-shaped
+/// (`uint*` / `int*` / `enum`) we surface it as `ValueRecord::Int`,
+/// matching the CodeTracer `TypeKind::Int` registration used for
+/// `uint256` and friends.  Larger integers and non-integer types fall
+/// back to `ValueRecord::Raw` (lossless 0x-prefixed hex), which keeps
+/// `address`, `bytes32`, mappings/arrays/structs (whose stack
+/// representation is a 32-byte pointer or storage slot) untouched.
+///
+/// The integer-only narrowing is what makes the
+/// `_decodes_loop_sums` test in `tests/test_programs_via_ct_print_full.rs`
+/// observe at least one `ValueRecord::Int` in the trace without
+/// silently downcasting larger storage slot keys (e.g.
+/// `keccak256` of a mapping key) into a lossy `i64`.
+fn value_record_for_local(
+    value: alloy::primitives::U256,
+    type_name: &str,
+    type_id: TypeId,
+) -> ValueRecord {
+    let is_int_type = matches!(type_kind_for_solidity_type(type_name), TypeKind::Int);
+    if is_int_type && value.bit_len() <= 63 {
+        // Safe narrowing: the high three limbs are zero, the low limb's
+        // top bit is zero too (bit_len() <= 63), so casting to i64 is
+        // both lossless and non-negative.
+        let i = value.as_limbs()[0] as i64;
+        ValueRecord::Int { i, type_id }
+    } else {
+        ValueRecord::Raw {
+            r: format!("0x{:x}", value),
+            type_id,
+        }
+    }
+}
+
 /// Resolve the Solidity function entered by an internal EVM jump.
 ///
 /// The first few instructions after a Solidity internal-function JUMP often
@@ -272,6 +377,16 @@ impl EvmRecorder {
         let mut storage_state: std::collections::HashMap<String, ValueRecord> =
             std::collections::HashMap::new();
 
+        // Raw-slot index keyed by storage slot number, used to assemble
+        // compound `ValueRecord::Sequence` / `Struct` snapshots for
+        // fixed-size arrays and `inplace`-encoded structs declared in
+        // the storage layout.  Mappings are intentionally excluded —
+        // their slots are derived from `keccak256(key . slot)` and do
+        // not live in a contiguous range, so we cannot reconstruct the
+        // full collection from the layout alone.
+        let mut slot_values: std::collections::HashMap<u64, alloy::primitives::U256> =
+            std::collections::HashMap::new();
+
         for (i, log) in struct_logs.iter().enumerate() {
             let pc = log.pc as usize;
 
@@ -383,11 +498,8 @@ impl EvmRecorder {
                                             type_kind,
                                             &var.type_name,
                                         );
-                                        let value_hex = format!("0x{:x}", val);
-                                        let val_record = ValueRecord::Raw {
-                                            r: value_hex,
-                                            type_id,
-                                        };
+                                        let val_record =
+                                            value_record_for_local(val, &var.type_name, type_id);
                                         TraceWriter::register_variable_with_full_value(
                                             &mut *self.writer,
                                             &var.name,
@@ -420,6 +532,34 @@ impl EvmRecorder {
                                 absorbed_call_nesting = 1;
                                 // Still reset the tracker for a clean start.
                                 tracker.reset();
+
+                                // Even though we don't emit a `register_call`
+                                // for the absorbed dispatcher → entry-point
+                                // jump, we still want the entry-point function
+                                // (e.g. `run`) to appear in the trace's
+                                // `functions` table.  This is what the
+                                // recorder-test-requirements §1 strict
+                                // assertion "function table includes the
+                                // entry-point name" expects (see
+                                // `test_nested_calls_function_names_resolved`).
+                                if let Some(target_fn) = resolve_internal_call_target(
+                                    struct_logs,
+                                    i,
+                                    source_map,
+                                    &pc_to_idx,
+                                    solidity_ast,
+                                ) {
+                                    let fn_path = source_paths
+                                        .get(file_idx as usize)
+                                        .copied()
+                                        .unwrap_or(main_path);
+                                    let _ = TraceWriter::ensure_function_id(
+                                        &mut *self.writer,
+                                        &target_fn.name,
+                                        fn_path,
+                                        Line(line as i64),
+                                    );
+                                }
                             } else {
                                 // Track nesting within the absorbed scope.
                                 if absorbed_call_nesting > 0 {
@@ -563,7 +703,45 @@ impl EvmRecorder {
                 };
                 // Cache the storage variable for carry-forward to subsequent steps.
                 storage_state.insert(var_name.clone(), val.clone());
-                TraceWriter::register_variable_with_full_value(&mut *self.writer, &var_name, val);
+                TraceWriter::register_variable_with_full_value(
+                    &mut *self.writer,
+                    &var_name,
+                    val,
+                );
+
+                // --- Compound (Sequence / Struct) snapshot ---
+                // If the slot belongs to a fixed-size array or an
+                // inplace-encoded struct, emit a snapshot of the whole
+                // compound under the parent label.  This unlocks the
+                // `_value_kinds_present` test by surfacing
+                // `ValueRecord::Sequence` / `Struct` for the parent
+                // variable in addition to the per-slot `Raw` writes.
+                if let (Ok(slot_u64), Some(layout)) =
+                    (slot_decimal.parse::<u64>(), storage_layout)
+                {
+                    slot_values.insert(slot_u64, value);
+                    if let Some((parent, parent_ti, slot_count)) =
+                        layout.containing_compound(slot_u64)
+                    {
+                        let base_slot: u64 = parent.slot.parse().unwrap_or(0);
+                        if let Some(compound) = build_compound_value(
+                            &mut *self.writer,
+                            layout,
+                            parent,
+                            parent_ti,
+                            base_slot,
+                            slot_count,
+                            &slot_values,
+                        ) {
+                            storage_state.insert(parent.label.clone(), compound.clone());
+                            TraceWriter::register_variable_with_full_value(
+                                &mut *self.writer,
+                                &parent.label,
+                                compound,
+                            );
+                        }
+                    }
+                }
             }
 
             // --- LOG0..LOG4: emit Solidity events as EvmEvent ---
@@ -731,6 +909,14 @@ impl EvmRecorder {
         let mut storage_states: Vec<std::collections::HashMap<String, ValueRecord>> =
             vec![std::collections::HashMap::new()];
 
+        // Raw-slot index per call frame (mirror of `storage_states` but
+        // keyed by storage slot number) so we can assemble compound
+        // `Sequence`/`Struct` snapshots after each SSTORE — see the
+        // single-contract path for rationale.
+        let mut slot_values_per_frame: Vec<
+            std::collections::HashMap<u64, alloy::primitives::U256>,
+        > = vec![std::collections::HashMap::new()];
+
         for (i, log) in struct_logs.iter().enumerate() {
             let pc = log.pc as usize;
 
@@ -832,6 +1018,9 @@ impl EvmRecorder {
                 while storage_states.len() < log.depth as usize {
                     storage_states.push(std::collections::HashMap::new());
                 }
+                while slot_values_per_frame.len() < log.depth as usize {
+                    slot_values_per_frame.push(std::collections::HashMap::new());
+                }
             } else if log.depth < prev_depth {
                 let depth_diff = prev_depth - log.depth;
                 for _ in 0..depth_diff {
@@ -844,6 +1033,9 @@ impl EvmRecorder {
                     // Pop the exited frame's storage state (keep root frame).
                     if storage_states.len() > 1 {
                         storage_states.pop();
+                    }
+                    if slot_values_per_frame.len() > 1 {
+                        slot_values_per_frame.pop();
                     }
                     call_tree.exit_call(i);
                     if frame_stack.len() > 1 {
@@ -988,16 +1180,15 @@ impl EvmRecorder {
                                     if let Some(val) =
                                         tracker.get_variable_value(&var.name, concrete_stack)
                                     {
+                                        let type_kind =
+                                            type_kind_for_solidity_type(&var.type_name);
                                         let type_id = TraceWriter::ensure_type_id(
                                             &mut *self.writer,
-                                            TypeKind::Int,
+                                            type_kind,
                                             &var.type_name,
                                         );
-                                        let value_hex = format!("0x{:x}", val);
-                                        let val_record = ValueRecord::Raw {
-                                            r: value_hex,
-                                            type_id,
-                                        };
+                                        let val_record =
+                                            value_record_for_local(val, &var.type_name, type_id);
                                         TraceWriter::register_variable_with_full_value(
                                             &mut *self.writer,
                                             &var.name,
@@ -1124,8 +1315,43 @@ impl EvmRecorder {
                 while storage_states.len() <= ss_idx {
                     storage_states.push(std::collections::HashMap::new());
                 }
+                while slot_values_per_frame.len() <= ss_idx {
+                    slot_values_per_frame.push(std::collections::HashMap::new());
+                }
                 storage_states[ss_idx].insert(var_name.clone(), val.clone());
-                TraceWriter::register_variable_with_full_value(&mut *self.writer, &var_name, val);
+                TraceWriter::register_variable_with_full_value(
+                    &mut *self.writer,
+                    &var_name,
+                    val,
+                );
+
+                // --- Compound (Sequence / Struct) snapshot ---
+                if let (Ok(slot_u64), Some(layout)) =
+                    (slot_decimal.parse::<u64>(), cur_storage_layout)
+                {
+                    slot_values_per_frame[ss_idx].insert(slot_u64, value);
+                    if let Some((parent, parent_ti, slot_count)) =
+                        layout.containing_compound(slot_u64)
+                    {
+                        let base_slot: u64 = parent.slot.parse().unwrap_or(0);
+                        if let Some(compound) = build_compound_value(
+                            &mut *self.writer,
+                            layout,
+                            parent,
+                            parent_ti,
+                            base_slot,
+                            slot_count,
+                            &slot_values_per_frame[ss_idx],
+                        ) {
+                            storage_states[ss_idx].insert(parent.label.clone(), compound.clone());
+                            TraceWriter::register_variable_with_full_value(
+                                &mut *self.writer,
+                                &parent.label,
+                                compound,
+                            );
+                        }
+                    }
+                }
             }
 
             // ------------------------------------------------------------------
