@@ -54,6 +54,7 @@ use clap::{Parser, Subcommand};
 use eyre::{Context, Result};
 
 use codetracer_evm_recorder::recorder::EvmRecorder;
+use codetracer_evm_recorder::revert_decode;
 use codetracer_evm_recorder::solidity_ast::SolidityAst;
 use codetracer_evm_recorder::source_map::SourceMap;
 use codetracer_evm_recorder::storage_layout::StorageLayout;
@@ -416,11 +417,29 @@ async fn record(args: RecordArgs) -> Result<()> {
 
     // -----------------------------------------------------------------------
     // 6. Call the target function
+    //
+    // We deliberately set an explicit `gas_limit` so anvil mines the
+    // transaction even when it reverts.  Without `gas` set, alloy's
+    // `send_transaction` runs `eth_estimateGas` first; on a reverting
+    // call (`require(false, "...")`, `revert("...")`, panics)
+    // estimation fails and the JSON-RPC call returns an error before
+    // the transaction is ever included in a block — so no
+    // `debug_traceTransaction` data is available, and the recorder
+    // cannot capture the structlog up to the REVERT opcode.
+    //
+    // By pinning `gas_limit` to the block gas limit we let anvil
+    // include the transaction; the receipt comes back with
+    // `status == false`, but the structlog is fully populated and we
+    // can surface the revert reason as an `EventLogKind::Error`
+    // io_event (see step 7 / 9 below).  This matches the cross-recorder
+    // expectation captured in the
+    // `test_require_revert_failing_path_emits_error_event` test.
     // -----------------------------------------------------------------------
     let call_tx = alloy::rpc::types::TransactionRequest::default()
         .from(from)
         .to(contract_address)
-        .with_input(alloy::primitives::Bytes::copy_from_slice(selector));
+        .with_input(alloy::primitives::Bytes::copy_from_slice(selector))
+        .gas_limit(30_000_000);
 
     let call_pending = provider
         .send_transaction(call_tx)
@@ -431,8 +450,13 @@ async fn record(args: RecordArgs) -> Result<()> {
         .await
         .context("failed to get function call receipt")?;
     let tx_hash = call_receipt.transaction_hash;
+    let tx_succeeded = call_receipt.status();
 
-    eprintln!("Transaction: {:?}", tx_hash);
+    eprintln!(
+        "Transaction: {:?} (status={})",
+        tx_hash,
+        if tx_succeeded { "ok" } else { "reverted" }
+    );
 
     // -----------------------------------------------------------------------
     // 7. Fetch debug_traceTransaction structlogs
@@ -503,6 +527,32 @@ async fn record(args: RecordArgs) -> Result<()> {
             Some(&solidity_ast),
         )
         .context("recorder failed to process structlogs")?;
+
+    // -----------------------------------------------------------------------
+    // 9b. Surface revert reason for failed transactions
+    //
+    // For a reverting tx (`require(false, "msg")`, `revert("msg")`,
+    // `Panic(uint256)`, custom errors, ...) `frame.failed` is true and
+    // `frame.return_value` carries the ABI-encoded revert payload.  We
+    // decode the payload and emit an `EventLogKind::Error` io_event so
+    // consumers see the reason alongside the partial structlog (the
+    // structlog is already faithfully captured up to the REVERT
+    // opcode by step 9 above).
+    //
+    // Without this step the .ct bundle would still be produced but the
+    // user would have no way to tell *why* the transaction reverted —
+    // they'd only see execution stop mid-function.  The
+    // `test_require_revert_failing_path_emits_error_event` test pins
+    // this contract.
+    // -----------------------------------------------------------------------
+    if frame.failed || !tx_succeeded {
+        let decoded = revert_decode::decode_revert(&frame.return_value);
+        eprintln!(
+            "Transaction reverted: {} ({})",
+            decoded.message, decoded.kind
+        );
+        recorder.register_revert(decoded.kind, &decoded.message);
+    }
 
     recorder
         .finalize()

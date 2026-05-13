@@ -1001,21 +1001,23 @@ fn test_require_revert_happy_path_via_ct_print_full() {
     );
 }
 
+/// Records `RequireRevert.sol::failingRequire()` — a function whose
+/// body is `require(false, "always fails")`.  The recorder must still
+/// produce a `.ct` bundle (the structlog is captured up to the REVERT
+/// opcode) and surface the revert reason as an `EventLogKind::Error`
+/// io_event (multi-stream `ioError`) so consumers can tell *why* the
+/// transaction reverted.
+///
+/// Implementation note: `main.rs` pins an explicit `gas_limit` on the
+/// call so anvil mines the failing transaction instead of pre-validating
+/// it with `eth_estimateGas`; the post-trace pass decodes
+/// `frame.return_value` via `revert_decode::decode_revert` and emits
+/// the `EventLogKind::Error` io_event.  Selector handling lives in
+/// `src/revert_decode.rs` (with unit tests covering `Error(string)`,
+/// `Panic(uint256)`, and unrecognised payloads).
 #[test]
-#[ignore = "RECORDER BUG: failing transactions (revert / require fail) cannot \
-            be recorded today — the alloy provider raises before \
-            `debug_traceTransaction` is fetched, so the recorder CLI exits \
-            non-zero with no trace produced.  Spec wants the recorder to \
-            still capture the structlog up to the REVERT opcode and surface \
-            an EventLogKind::Error io event carrying the revert reason."]
 fn test_require_revert_failing_path_emits_error_event() {
-    // This test is intentionally incomplete: the path to record a
-    // reverted transaction needs a provider that doesn't error on
-    // revert.  Tracking the spec-correct expectation: the recorder
-    // should produce a .ct bundle containing at least one io event
-    // of kind `ioError` whose text includes the revert reason
-    // ("always fails").
-    let Some(_) = record_and_dump_full(
+    let Some(doc) = record_and_dump_full(
         "test_require_revert_failing_path_emits_error_event",
         "require_revert",
         "RequireRevert.sol",
@@ -1023,7 +1025,28 @@ fn test_require_revert_failing_path_emits_error_event() {
     ) else {
         return;
     };
-    panic!("recorder should produce a trace for a reverting tx");
+
+    // The .ct bundle must exist and be parseable (already enforced by
+    // `record_and_dump_full` — the recorder CLI succeeded and ct-print
+    // produced a JSON document).
+
+    // The reverted transaction must surface as exactly one `ioError`
+    // io_event whose text carries the revert reason ("always fails").
+    let ios = observed_io_events(&doc);
+    let errors: Vec<&(String, String)> = ios
+        .iter()
+        .filter(|(kind, _)| kind == "ioError")
+        .collect();
+    assert_eq!(
+        errors.len(),
+        1,
+        "expected exactly one ioError io_event for a reverting tx; got {ios:?}"
+    );
+    assert!(
+        errors[0].1.contains("always fails"),
+        "ioError text must include the decoded revert reason \"always fails\"; got {:?}",
+        errors[0].1
+    );
 }
 
 // ===========================================================================
