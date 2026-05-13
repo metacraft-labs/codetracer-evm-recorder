@@ -21,6 +21,72 @@ pub struct SourceRange {
     pub file_index: i32,
 }
 
+/// Classification of a Solidity type with respect to its storage location
+/// for local variables.
+///
+/// Solidity locals fall into two categories at runtime:
+///
+/// - **Stack**: value types that fit in a 32-byte word (`uint*`, `int*`,
+///   `bool`, `address`, `bytes1..32`, enums, function pointers).  These live
+///   in a single EVM stack slot.
+/// - **Memory**: reference / composite types (`bytes`, `string`, dynamic
+///   arrays `T[]`, fixed-size arrays `T[N]`, `struct`s, and `mapping` value
+///   references for memory locals).  These are allocated in EVM memory by
+///   bumping the free-memory pointer at `memory[0x40]`; the stack only holds
+///   the pointer to their base offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VarStorageKind {
+    /// The variable lives in a single EVM stack slot.
+    Stack,
+    /// The variable is allocated in EVM memory; the stack only holds a
+    /// pointer to its base offset.
+    Memory,
+}
+
+/// Classify a Solidity type name string as stack- or memory-resident.
+///
+/// This is intentionally string-based because the AST extractor stores
+/// `type_name` as a plain string (often the `typeString` from
+/// `typeDescriptions`, e.g. `"uint256"`, `"struct S memory"`,
+/// `"uint256[] memory"`).
+pub fn classify_type_name(type_name: &str) -> VarStorageKind {
+    let t = type_name.trim();
+
+    // Empty / unknown: fall back to stack (existing tracker handles that).
+    if t.is_empty() {
+        return VarStorageKind::Stack;
+    }
+
+    // Explicit data-location markers — only memory-resident locals are
+    // material for the memory tracker.  `storage` references go through
+    // SLOAD/SSTORE and are tracked elsewhere; `calldata` is read-only and
+    // not handled here.
+    if t.contains(" memory") {
+        return VarStorageKind::Memory;
+    }
+    if t.contains(" storage") || t.contains(" calldata") {
+        // storage references / calldata pointers live on the stack as
+        // pointers but their *targets* are not allocated in memory.
+        return VarStorageKind::Stack;
+    }
+
+    // Composite types without an explicit location string (common in test
+    // fixtures that hand-construct ASTs from `typeName.name`).
+    if t.starts_with("struct ")
+        || t.starts_with("mapping")
+        || t == "bytes"
+        || t == "string"
+        || t.ends_with("[]")
+        || (t.contains('[') && t.ends_with(']'))
+    {
+        return VarStorageKind::Memory;
+    }
+
+    // Everything else (uint*, int*, bool, address, address payable,
+    // bytes1..32, enums, function pointers) is a stack-resident value type.
+    VarStorageKind::Stack
+}
+
 impl SourceRange {
     /// Try to parse a `"s:l:f"` src string (e.g. `"100:20:0"`).
     pub fn parse(src: &str) -> Option<Self> {
@@ -62,6 +128,24 @@ pub struct VarDecl {
     /// point PUSH instructions to the initializer expression rather than
     /// the declaration itself.
     pub statement_range: Option<SourceRange>,
+}
+
+impl VarDecl {
+    /// Storage classification of this declaration's type.
+    pub fn storage_kind(&self) -> VarStorageKind {
+        classify_type_name(&self.type_name)
+    }
+
+    /// Convenience: `true` for value types tracked by the stack tracker.
+    pub fn is_stack_resident(&self) -> bool {
+        matches!(self.storage_kind(), VarStorageKind::Stack)
+    }
+
+    /// Convenience: `true` for reference / composite types tracked by the
+    /// memory tracker.
+    pub fn is_memory_resident(&self) -> bool {
+        matches!(self.storage_kind(), VarStorageKind::Memory)
+    }
 }
 
 /// A function (or constructor / fallback) extracted from the AST.

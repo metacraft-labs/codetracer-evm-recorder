@@ -4,6 +4,9 @@
 //! hardcoded so they run in any CI environment.
 
 use alloy::primitives::U256;
+use codetracer_evm_recorder::memory_tracker::{
+    FREE_MEMORY_POINTER_OFFSET, INITIAL_FREE_MEMORY_POINTER, MemoryTracker,
+};
 use codetracer_evm_recorder::solidity_ast::{SolidityAst, SourceRange, VarDecl};
 use codetracer_evm_recorder::stack_tracker::StackTracker;
 
@@ -380,13 +383,242 @@ fn test_ast_function_with_params_scope() {
     assert_eq!(after_result.len(), 3);
 }
 
-/// Test #[ignore]d: memory-escalated variables (structs, arrays).
-/// Left as a placeholder for a future implementation.
+// ---------------------------------------------------------------------------
+// test_evm_local_vars_memory  —  memory-escalated variables
+// ---------------------------------------------------------------------------
+
+/// Helper: build a flat EVM memory snapshot of `size` bytes with the free
+/// memory pointer word at `0x40` set to `fmp`.
+fn mem_with_fmp(size: usize, fmp: u64) -> Vec<u8> {
+    let mut m = vec![0u8; size.max(0x60)];
+    let off = FREE_MEMORY_POINTER_OFFSET as usize;
+    m[off..off + 32].copy_from_slice(&U256::from(fmp).to_be_bytes::<32>());
+    m
+}
+
+/// Helper: write a 32-byte word into a memory buffer, growing it if needed.
+fn write_word(mem: &mut Vec<u8>, at: u64, value: U256) {
+    let end = at as usize + 32;
+    if mem.len() < end {
+        mem.resize(end, 0);
+    }
+    mem[at as usize..end].copy_from_slice(&value.to_be_bytes::<32>());
+}
+
+/// Memory-escalated locals: a struct with two `uint256` fields is allocated
+/// in memory via a free-memory-pointer bump, both fields are written via
+/// MSTORE, and the first field is read back via MLOAD.
+///
+/// The test mirrors the contract:
+///
+/// ```solidity
+/// contract MemoryVars {
+///   struct Pair { uint256 a; uint256 b; }
+///   function compute() public {
+///     Pair memory p;       // declared at offset 100
+///     p.a = 42;            // at offset 200
+///     p.b = 100;           // at offset 240
+///     uint256 x = p.a;     // at offset 280
+///   }
+/// }
+/// ```
+///
+/// We feed the [`MemoryTracker`] a synthetic structLog-style trace covering
+/// the relevant opcodes — no solc / anvil required.
 #[test]
-#[ignore = "memory-escalated variable tracking not yet implemented"]
 fn test_evm_local_vars_memory() {
-    // TODO: test struct and array locals that get stored in memory
-    // rather than on the stack.
+    // -------------------------------------------------------------------
+    // 1) AST: a memory-resident local `p` of type "struct Pair memory".
+    // -------------------------------------------------------------------
+    let var_p = VarDecl {
+        name: "p".to_string(),
+        type_name: "struct MemoryVars.Pair memory".to_string(),
+        src: SourceRange {
+            offset: 100,
+            length: 20,
+            file_index: 0,
+        },
+        declaration_offset: 100,
+        statement_range: Some(SourceRange {
+            offset: 100,
+            length: 200, // covers all field-assignment statements below
+            file_index: 0,
+        }),
+    };
+
+    // The classifier should recognise this as memory-resident.
+    assert!(var_p.is_memory_resident(), "struct memory local must be flagged");
+
+    let scope: Vec<&VarDecl> = vec![&var_p];
+
+    // -------------------------------------------------------------------
+    // 2) Build the synthetic memory buffer and drive the MemoryTracker.
+    // -------------------------------------------------------------------
+    let mut tracker = MemoryTracker::new();
+
+    // Pre-allocation memory: FMP = 0x80, nothing else written.
+    let mut memory = mem_with_fmp(0x100, INITIAL_FREE_MEMORY_POINTER);
+
+    // ---- Step A: MSTORE bumps the free-memory pointer ----
+    //
+    // Solidity emits `MSTORE 0x40, 0xC0` to reserve 0x40 bytes
+    // (= sizeof(struct Pair)) starting at the old FMP (0x80).
+    //
+    // structLog convention: `stack` is bottom-to-top, so the pre-step
+    // stack for MSTORE is [..., value, dest].  Top of stack is `dest=0x40`,
+    // one below is `value=0xC0` (the new FMP).
+    let bump_stack = vec![
+        U256::from(0xC0u64), // value: new FMP
+        U256::from(FREE_MEMORY_POINTER_OFFSET), // dest: 0x40
+    ];
+    let asgn_a = tracker.process_step(
+        0x52, // MSTORE
+        /*pc*/ 100,
+        /*source_offset*/ Some(100),
+        &scope,
+        &bump_stack,
+        &memory,
+    );
+    assert!(
+        asgn_a.is_empty(),
+        "the FMP bump itself emits no field-level assignment"
+    );
+    assert_eq!(tracker.region_count(), 1, "one region registered");
+    let region = tracker.region("p").expect("p region registered");
+    assert_eq!(region.base_offset, INITIAL_FREE_MEMORY_POINTER);
+    assert_eq!(region.size_in_bytes, 0x40);
+
+    // Update memory: FMP word at 0x40 is now 0xC0.
+    write_word(&mut memory, FREE_MEMORY_POINTER_OFFSET, U256::from(0xC0u64));
+
+    // ---- Step B: MSTORE 0x80, 42 (writes p.a = 42) ----
+    let store_a_stack = vec![U256::from(42u64), U256::from(0x80u64)];
+    let asgn_b = tracker.process_step(0x52, 110, Some(200), &scope, &store_a_stack, &memory);
+    assert_eq!(asgn_b.len(), 1, "MSTORE inside region emits an assignment");
+    assert_eq!(asgn_b[0].name, "p");
+    assert_eq!(asgn_b[0].memory_offset, 0x80);
+    assert_eq!(asgn_b[0].size, 32);
+
+    // Reflect the write in the memory snapshot.
+    write_word(&mut memory, 0x80, U256::from(42u64));
+
+    // ---- Step C: MSTORE 0xA0, 100 (writes p.b = 100) ----
+    let store_b_stack = vec![U256::from(100u64), U256::from(0xA0u64)];
+    let asgn_c = tracker.process_step(0x52, 120, Some(240), &scope, &store_b_stack, &memory);
+    assert_eq!(asgn_c.len(), 1);
+    assert_eq!(asgn_c[0].name, "p");
+    assert_eq!(asgn_c[0].memory_offset, 0xA0);
+    assert_eq!(asgn_c[0].size, 32);
+
+    write_word(&mut memory, 0xA0, U256::from(100u64));
+
+    // ---- Step D: MLOAD 0x80 (reads p.a) ----
+    //
+    // MLOAD's only effect on the tracker is to observe the memory
+    // snapshot; the value surfaces via get_field_value / get_variable_value.
+    let mload_stack = vec![U256::from(0x80u64)];
+    let asgn_d = tracker.process_step(0x51, 130, Some(280), &scope, &mload_stack, &memory);
+    assert!(asgn_d.is_empty(), "MLOAD never produces an assignment");
+
+    // -------------------------------------------------------------------
+    // 3) Surface the variable values from the memory snapshot.
+    // -------------------------------------------------------------------
+    // Header word (field "a") matches the first MSTORE.
+    assert_eq!(
+        tracker.get_variable_value("p", &memory),
+        Some(U256::from(42u64)),
+        "p.a should be 42 (header word of the region)"
+    );
+
+    // Field at offset 0 within p == field "a"
+    assert_eq!(
+        tracker.get_field_value("p", 0, &memory),
+        Some(U256::from(42u64)),
+    );
+
+    // Field at offset 0x20 (32) within p == field "b"
+    assert_eq!(
+        tracker.get_field_value("p", 0x20, &memory),
+        Some(U256::from(100u64)),
+    );
+
+    // Field offset past the region's allocated size must return None.
+    assert_eq!(tracker.get_field_value("p", 0x40, &memory), None);
+
+    // all_variable_values reports the one tracked region with its header.
+    let all = tracker.all_variable_values(&memory);
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].0, "p");
+    assert_eq!(all[0].1, U256::from(42u64));
+
+    // -------------------------------------------------------------------
+    // 4) Sanity: looking up a variable that was never tracked returns None.
+    // -------------------------------------------------------------------
+    assert_eq!(tracker.get_variable_value("does_not_exist", &memory), None);
+    assert_eq!(tracker.region("does_not_exist").is_none(), true);
+
+    eprintln!("test_evm_local_vars_memory passed");
+}
+
+/// A dynamic `uint256[] memory` local is also a memory-escalated variable.
+/// Verify the type classifier and tracker handle the array-of-words pattern.
+#[test]
+fn test_evm_local_vars_memory_dynamic_array() {
+    // `uint256[] memory arr` declared at source offset 50, statement-span
+    // covering all field writes below.
+    let var_arr = VarDecl {
+        name: "arr".to_string(),
+        type_name: "uint256[] memory".to_string(),
+        src: SourceRange {
+            offset: 50,
+            length: 20,
+            file_index: 0,
+        },
+        declaration_offset: 50,
+        statement_range: Some(SourceRange {
+            offset: 50,
+            length: 300,
+            file_index: 0,
+        }),
+    };
+    assert!(var_arr.is_memory_resident());
+
+    let scope: Vec<&VarDecl> = vec![&var_arr];
+
+    let mut tracker = MemoryTracker::new();
+    let mut memory = mem_with_fmp(0x200, INITIAL_FREE_MEMORY_POINTER);
+
+    // Allocate 3 words: 1 for length + 2 for elements ⇒ 0x60 bytes.
+    let new_fmp = INITIAL_FREE_MEMORY_POINTER + 0x60;
+    let bump_stack = vec![U256::from(new_fmp), U256::from(FREE_MEMORY_POINTER_OFFSET)];
+    let _ = tracker.process_step(0x52, 0, Some(50), &scope, &bump_stack, &memory);
+    write_word(&mut memory, FREE_MEMORY_POINTER_OFFSET, U256::from(new_fmp));
+
+    // Write length = 2 at base.
+    let store_len = vec![U256::from(2u64), U256::from(INITIAL_FREE_MEMORY_POINTER)];
+    let asgn_len = tracker.process_step(0x52, 4, Some(60), &scope, &store_len, &memory);
+    assert_eq!(asgn_len.len(), 1);
+    assert_eq!(asgn_len[0].name, "arr");
+    write_word(&mut memory, INITIAL_FREE_MEMORY_POINTER, U256::from(2u64));
+
+    // Write element 0 = 777 at base + 0x20.
+    let elem0_off = INITIAL_FREE_MEMORY_POINTER + 0x20;
+    let store_elem0 = vec![U256::from(777u64), U256::from(elem0_off)];
+    let asgn0 = tracker.process_step(0x52, 8, Some(70), &scope, &store_elem0, &memory);
+    assert_eq!(asgn0.len(), 1);
+    write_word(&mut memory, elem0_off, U256::from(777u64));
+
+    // Surface the length and element 0 from the snapshot.
+    assert_eq!(
+        tracker.get_variable_value("arr", &memory),
+        Some(U256::from(2u64)),
+        "header word = array length"
+    );
+    assert_eq!(
+        tracker.get_field_value("arr", 0x20, &memory),
+        Some(U256::from(777u64)),
+        "element 0"
+    );
 }
 
 // ---------------------------------------------------------------------------
