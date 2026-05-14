@@ -31,6 +31,10 @@
             capnproto
             pkg-config
             openssl
+
+            # Required by libcodetracer_trace_writer (Nim FFI static lib).
+            # Without it, link fails with `ld: cannot find -lzstd`.
+            zstd
           ];
 
           shellHook = ''
