@@ -90,9 +90,7 @@ fn has_anvil() -> bool {
 /// literal `SKIP:` token, so silent skips remain forbidden.
 fn ct_print_or_skip(test_name: &str) -> Option<PathBuf> {
     if !has_solc() || !has_anvil() {
-        eprintln!(
-            "SKIP: {test_name} requires solc + anvil on PATH (use the Nix dev shell)."
-        );
+        eprintln!("SKIP: {test_name} requires solc + anvil on PATH (use the Nix dev shell).");
         return None;
     }
     let p = ct_print_path();
@@ -187,14 +185,7 @@ fn record_and_dump_full_with_from(
     function_name: &str,
     from: Option<&str>,
 ) -> Option<serde_json::Value> {
-    record_and_dump_full_with_from_and_value(
-        test_name,
-        group,
-        file,
-        function_name,
-        from,
-        None,
-    )
+    record_and_dump_full_with_from_and_value(test_name, group, file, function_name, from, None)
 }
 
 /// Like [`record_and_dump_full_with_from`] but also forwards
@@ -215,13 +206,7 @@ fn record_and_dump_full_with_from_and_value(
     std::fs::create_dir_all(&out_dir).unwrap();
 
     let source_path = test_program(group, file);
-    run_recorder_cli_with_from_and_value(
-        &source_path,
-        &out_dir,
-        function_name,
-        from,
-        value,
-    );
+    run_recorder_cli_with_from_and_value(&source_path, &out_dir, function_name, from, value);
 
     let ct_files = ct_files_in(&out_dir);
     assert!(
@@ -241,8 +226,8 @@ fn record_and_dump_full_with_from_and_value(
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let doc: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .expect("ct-print --full should emit valid JSON");
+    let doc: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("ct-print --full should emit valid JSON");
 
     drop(tmp_dir);
     Some(doc)
@@ -288,12 +273,7 @@ fn observed_call_entry_funcs(doc: &serde_json::Value) -> Vec<String> {
         .expect("events array")
         .iter()
         .filter(|e| e["kind"] == "call_entry")
-        .map(|e| {
-            e["function"]
-                .as_str()
-                .unwrap_or("<unnamed>")
-                .to_string()
-        })
+        .map(|e| e["function"].as_str().unwrap_or("<unnamed>").to_string())
         .collect()
 }
 
@@ -304,12 +284,7 @@ fn observed_call_exit_funcs(doc: &serde_json::Value) -> Vec<String> {
         .expect("events array")
         .iter()
         .filter(|e| e["kind"] == "call_exit")
-        .map(|e| {
-            e["function"]
-                .as_str()
-                .unwrap_or("<unnamed>")
-                .to_string()
-        })
+        .map(|e| e["function"].as_str().unwrap_or("<unnamed>").to_string())
         .collect()
 }
 
@@ -404,11 +379,7 @@ fn observed_step_var_pairs(doc: &serde_json::Value) -> Vec<(String, String)> {
 /// path computed exactly the same way the recorder CLI canonicalizes
 /// its `solidity_file` argument, so the assertion is strict in the
 /// `assert_eq!` sense but stays stable across checkouts.
-fn assert_metadata_program_is_source_path(
-    doc: &serde_json::Value,
-    group: &str,
-    file: &str,
-) {
+fn assert_metadata_program_is_source_path(doc: &serde_json::Value, group: &str, file: &str) {
     let prog = doc["metadata"]["program"]
         .as_str()
         .expect("metadata.program str");
@@ -432,7 +403,11 @@ fn assert_paths_ends_with_source(doc: &serde_json::Value, source_filename: &str)
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
-    assert_eq!(paths.len(), 1, "expected exactly one source path; got {paths:?}");
+    assert_eq!(
+        paths.len(),
+        1,
+        "expected exactly one source path; got {paths:?}"
+    );
     assert!(
         paths[0].ends_with(source_filename),
         "expected sole path entry to end with {source_filename}; got {}",
@@ -515,24 +490,24 @@ fn test_control_flow_via_ct_print_full() {
     assert_eq!(
         lines,
         vec![
-            1,                     // dispatcher entry
-            19,                    // contract opener
-            24,                    // function run() {
-            26, 27, 28, 29,        // bool flag = true; uint256 branchVal; if(flag) {
-            28,                    //   } (post-if)
-            35, 36,                // uint256 whileSum = 0; uint256 counter = 0;
-            37, 38, 39,            // while-loop iteration #1 (cond, body, body)
-            37, 38, 39,            // while-loop iteration #2
-            37, 38, 39,            // while-loop iteration #3
-            37,                    // while-loop final cond (false)
-            44, 45, 46,            // uint256 forSum = 0; for init+cond; body
-            45, 46,                // for-loop iter #2
-            45, 46,                // for-loop iter #3
-            45, 46,                // for-loop iter #4
-            45, 46,                // for-loop iter #5
-            45,                    // for-loop final cond (i==6, false)
-            50, 51, 52, 53,        // tail: total = ...; result = total; emit; return
-            24,                    // return-site step at function header
+            1,  // dispatcher entry
+            19, // contract opener
+            24, // function run() {
+            26, 27, 28, 29, // bool flag = true; uint256 branchVal; if(flag) {
+            28, //   } (post-if)
+            35, 36, // uint256 whileSum = 0; uint256 counter = 0;
+            37, 38, 39, // while-loop iteration #1 (cond, body, body)
+            37, 38, 39, // while-loop iteration #2
+            37, 38, 39, // while-loop iteration #3
+            37, // while-loop final cond (false)
+            44, 45, 46, // uint256 forSum = 0; for init+cond; body
+            45, 46, // for-loop iter #2
+            45, 46, // for-loop iter #3
+            45, 46, // for-loop iter #4
+            45, 46, // for-loop iter #5
+            45, // for-loop final cond (i==6, false)
+            50, 51, 52, 53, // tail: total = ...; result = total; emit; return
+            24, // return-site step at function header
         ]
     );
 
@@ -548,8 +523,15 @@ fn test_control_flow_via_ct_print_full() {
     // Exactly one Done(uint256) event → one ioStderr line in the
     // multi-stream IO channel.
     let ios = observed_io_events(&doc);
-    assert_eq!(ios.len(), 1, "expected exactly one io event for emit Done(...)");
-    assert_eq!(ios[0].0, "ioStderr", "io_kind for EvmEvent collapses to ioStderr");
+    assert_eq!(
+        ios.len(),
+        1,
+        "expected exactly one io event for emit Done(...)"
+    );
+    assert_eq!(
+        ios[0].0, "ioStderr",
+        "io_kind for EvmEvent collapses to ioStderr"
+    );
     // The text payload is the keccak256("Done(uint256)") topic0
     // followed by the ABI-encoded uint256 data (the grand total
     // `100 + 3 + 15 = 118 = 0x76` left-padded to 32 bytes).  This
@@ -628,7 +610,11 @@ fn test_control_flow_via_ct_print_full() {
         ],
     );
     let counts_calls = &doc["counts"]["calls"];
-    assert_eq!(counts_calls.as_u64(), Some(20), "calls count matches the entry/exit vector lengths");
+    assert_eq!(
+        counts_calls.as_u64(),
+        Some(20),
+        "calls count matches the entry/exit vector lengths"
+    );
 }
 
 #[test]
@@ -732,7 +718,14 @@ fn test_nested_calls_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec!["run", "outer", "middle", "inner", "fn_at_pc_410", "fn_at_pc_340"],
+        vec![
+            "run",
+            "outer",
+            "middle",
+            "inner",
+            "fn_at_pc_410",
+            "fn_at_pc_340"
+        ],
         "function table — order is writer-assignment order; \
          entry-point first, then AST-resolved internals, then \
          lookahead-fallback placeholders"
@@ -748,15 +741,15 @@ fn test_nested_calls_via_ct_print_full() {
     assert_eq!(
         lines,
         vec![
-            1, 12, 17, 18, 19,        // dispatcher → contract → run() → seed → call outer
-            26, 27,                   // outer() opener + call middle
-            31, 32,                   // middle() opener + call inner
-            36, 37, 38,               // inner() opener + a/b decls
-            39,                       // return a + b
-            36, 32, 33,               // unwind through inner→middle (return i + 10)
-            31, 27, 28,               // unwind through middle→outer (return m + 100)
-            26, 19, 20, 21, 22, 23,   // unwind to run(): r = seed + v; stored = r; emit; return
-            17,                       // return-site step
+            1, 12, 17, 18, 19, // dispatcher → contract → run() → seed → call outer
+            26, 27, // outer() opener + call middle
+            31, 32, // middle() opener + call inner
+            36, 37, 38, // inner() opener + a/b decls
+            39, // return a + b
+            36, 32, 33, // unwind through inner→middle (return i + 10)
+            31, 27, 28, // unwind through middle→outer (return m + 100)
+            26, 19, 20, 21, 22, 23, // unwind to run(): r = seed + v; stored = r; emit; return
+            17, // return-site step
         ],
         "step-line sequence pins the run→outer→middle→inner unwind"
     );
@@ -898,12 +891,12 @@ fn test_storage_ops_via_ct_print_full() {
     assert_eq!(
         lines,
         vec![
-            1, 11,                 // dispatcher + contract
-            18,                    // function run() {
-            20, 21, 22,            // a = 10; b = 20; c = 30;
-            25, 26, 27,            // uint256 ra = a; rb = b; rc = c;
-            29, 30,                // emit + return
-            18,                    // return-site
+            1, 11, // dispatcher + contract
+            18, // function run() {
+            20, 21, 22, // a = 10; b = 20; c = 30;
+            25, 26, 27, // uint256 ra = a; rb = b; rc = c;
+            29, 30, // emit + return
+            18, // return-site
         ],
     );
 
@@ -950,16 +943,32 @@ fn test_storage_ops_via_ct_print_full() {
             storage_pairs.push((name, r));
         }
     }
-    let last_a = storage_pairs.iter().rev().find(|(n, _)| n == "a").map(|(_, v)| v.as_str());
-    let last_b = storage_pairs.iter().rev().find(|(n, _)| n == "b").map(|(_, v)| v.as_str());
-    let last_c = storage_pairs.iter().rev().find(|(n, _)| n == "c").map(|(_, v)| v.as_str());
+    let last_a = storage_pairs
+        .iter()
+        .rev()
+        .find(|(n, _)| n == "a")
+        .map(|(_, v)| v.as_str());
+    let last_b = storage_pairs
+        .iter()
+        .rev()
+        .find(|(n, _)| n == "b")
+        .map(|(_, v)| v.as_str());
+    let last_c = storage_pairs
+        .iter()
+        .rev()
+        .find(|(n, _)| n == "c")
+        .map(|(_, v)| v.as_str());
     assert_eq!(last_a, Some("0xa"), "storage a must end at 10 (0xa)");
     assert_eq!(last_b, Some("0x14"), "storage b must end at 20 (0x14)");
     assert_eq!(last_c, Some("0x1e"), "storage c must end at 30 (0x1e)");
 
     // --- io ---
     let ios = observed_io_events(&doc);
-    assert_eq!(ios.len(), 1, "Stored(uint256,uint256,uint256) → 1 LOG opcode");
+    assert_eq!(
+        ios.len(),
+        1,
+        "Stored(uint256,uint256,uint256) → 1 LOG opcode"
+    );
     assert_eq!(ios[0].0, "ioStderr");
 }
 
@@ -1006,10 +1015,11 @@ fn test_events_test_via_ct_print_full() {
     assert_eq!(
         lines,
         vec![
-            1, 12,                 // dispatcher + contract
-            19,                    // function run() {
-            20, 21, 22, 23, 24,    // emit Started; emit Tagged(7); emit Payload(7,42); stored = 42; return 42
-            19,                    // return-site
+            1, 12, // dispatcher + contract
+            19, // function run() {
+            20, 21, 22, 23,
+            24, // emit Started; emit Tagged(7); emit Payload(7,42); stored = 42; return 42
+            19, // return-site
         ],
     );
 
@@ -1138,11 +1148,11 @@ fn test_require_revert_happy_path_via_ct_print_full() {
     assert_eq!(
         lines,
         vec![
-            1, 13,                  // dispatcher + contract
-            18, 19,                 // function run() { ... uint256 v = safe(true);
-            25, 26, 27, 25,         // safe(): require(flag,...); return 7; ret-site
-            19, 20, 21, 22,         // back in run(): stored = v; emit; return v
-            18,                     // return-site
+            1, 13, // dispatcher + contract
+            18, 19, // function run() { ... uint256 v = safe(true);
+            25, 26, 27, 25, // safe(): require(flag,...); return 7; ret-site
+            19, 20, 21, 22, // back in run(): stored = v; emit; return v
+            18, // return-site
         ],
     );
 
@@ -1204,10 +1214,7 @@ fn test_require_revert_failing_path_emits_error_event() {
     // The reverted transaction must surface as exactly one `ioError`
     // io_event whose text carries the revert reason ("always fails").
     let ios = observed_io_events(&doc);
-    let errors: Vec<&(String, String)> = ios
-        .iter()
-        .filter(|(kind, _)| kind == "ioError")
-        .collect();
+    let errors: Vec<&(String, String)> = ios.iter().filter(|(kind, _)| kind == "ioError").collect();
     assert_eq!(
         errors.len(),
         1,
@@ -1297,12 +1304,12 @@ fn test_map_struct_arr_via_ct_print_full() {
     assert_eq!(
         lines,
         vec![
-            1, 18,                  // dispatcher + contract
-            31, 32,                 // function run() { balances[msg.sender] = 100;
-            34, 35, 36,             // slots[0..2] = 1, 2, 3;
-            38,                     // record = Record({...});
-            40, 41,                 // emit Done(); return slots[0]+slots[1]+slots[2]+record.value
-            31,                     // return-site
+            1, 18, // dispatcher + contract
+            31, 32, // function run() { balances[msg.sender] = 100;
+            34, 35, 36, // slots[0..2] = 1, 2, 3;
+            38, // record = Record({...});
+            40, 41, // emit Done(); return slots[0]+slots[1]+slots[2]+record.value
+            31, // return-site
         ],
     );
 
@@ -1414,8 +1421,7 @@ fn test_indexed_events_via_ct_print_full() {
 
     // io[0]: emit Anon() → LOG1, just topic0 = keccak256("Anon()").
     assert_eq!(
-        ios[0].1,
-        "0xef1994e421b457703c64b252bac332a650bceab89227e569064442cc8cccda9b",
+        ios[0].1, "0xef1994e421b457703c64b252bac332a650bceab89227e569064442cc8cccda9b",
         "Anon() topic0 mismatch"
     );
 
@@ -1424,8 +1430,7 @@ fn test_indexed_events_via_ct_print_full() {
     //   topic1 = 11 (the indexed `a` argument)
     //   no non-indexed data.
     assert_eq!(
-        ios[1].1,
-        "0x8d1f4ee7ac5aa25617e41b452f9e33c81aa6950c0ad52c609e42355dafb596b9, 0xb",
+        ios[1].1, "0x8d1f4ee7ac5aa25617e41b452f9e33c81aa6950c0ad52c609e42355dafb596b9, 0xb",
         "Single(11) shape mismatch"
     );
 
@@ -1468,12 +1473,9 @@ fn test_indexed_events_via_ct_print_full() {
 /// because the body offset is within the lookahead window).
 #[test]
 fn test_erc20_via_ct_print_full() {
-    let Some(doc) = record_and_dump_full(
-        "test_erc20_via_ct_print_full",
-        "erc20",
-        "ERC20.sol",
-        "run",
-    ) else {
+    let Some(doc) =
+        record_and_dump_full("test_erc20_via_ct_print_full", "erc20", "ERC20.sol", "run")
+    else {
         return;
     };
 
@@ -1563,9 +1565,9 @@ fn test_erc20_via_ct_print_full() {
     // io[2] = Transfer(address(this), 0xCAFE, 250) → LOG3
     //   data = 250 = 0xfa
     assert!(
-        ios[2].1.starts_with(
-            "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef, "
-        ),
+        ios[2]
+            .1
+            .starts_with("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef, "),
         "second Transfer must carry the canonical Transfer topic0; got {}",
         ios[2].1
     );
@@ -1796,18 +1798,18 @@ fn test_modifier_via_ct_print_full() {
     assert_eq!(
         lines,
         vec![
-            1,                       // dispatcher entry
-            30,                      // contract opener
-            45,                      // function run() {
-            46,                      //   setValue(7);
-            50,                      // setValue(7) — function header
-            37,                      //   modifier body: require(...)
-            51,                      //   value = v;
-            52,                      //   emit ValueSet(v);
-            50,                      // setValue — return-site step
-            46,                      // run — return-site of setValue call
-            47,                      //   return value;
-            45,                      // run — return-site
+            1,  // dispatcher entry
+            30, // contract opener
+            45, // function run() {
+            46, //   setValue(7);
+            50, // setValue(7) — function header
+            37, //   modifier body: require(...)
+            51, //   value = v;
+            52, //   emit ValueSet(v);
+            50, // setValue — return-site step
+            46, // run — return-site of setValue call
+            47, //   return value;
+            45, // run — return-site
         ],
         "Modifier step-line sequence — modifier's `require` (line 37) \
          must appear in between setValue's header (50) and body (51-52)"
@@ -1862,11 +1864,12 @@ fn test_modifier_failing_path_emits_error_event() {
         return;
     };
     let ios = observed_io_events(&doc);
-    let errors: Vec<&(String, String)> = ios
-        .iter()
-        .filter(|(kind, _)| kind == "ioError")
-        .collect();
-    assert_eq!(errors.len(), 1, "expected one ioError for the failing modifier");
+    let errors: Vec<&(String, String)> = ios.iter().filter(|(kind, _)| kind == "ioError").collect();
+    assert_eq!(
+        errors.len(),
+        1,
+        "expected one ioError for the failing modifier"
+    );
     assert!(
         errors[0].1.contains("not owner"),
         "ioError text must include the modifier's revert reason; got {:?}",
@@ -2032,10 +2035,7 @@ fn test_try_catch_catches_emit_error_events() {
         return;
     };
     let ios = observed_io_events(&doc);
-    let errors: Vec<&(String, String)> = ios
-        .iter()
-        .filter(|(kind, _)| kind == "ioError")
-        .collect();
+    let errors: Vec<&(String, String)> = ios.iter().filter(|(kind, _)| kind == "ioError").collect();
     // Two caught reverts: `failStr` ("boom") and `failPanic` (0x12).
     assert_eq!(
         errors.len(),
@@ -2047,7 +2047,9 @@ fn test_try_catch_catches_emit_error_events() {
         "caught Error(string) must surface the \"boom\" reason"
     );
     assert!(
-        errors.iter().any(|(_, t)| t.contains("0x12") || t.contains("Panic")),
+        errors
+            .iter()
+            .any(|(_, t)| t.contains("0x12") || t.contains("Panic")),
         "caught Panic(uint256) must surface code=0x12 or a `Panic` tag"
     );
 }
@@ -2132,25 +2134,25 @@ fn test_inheritance_via_ct_print_full() {
     assert_eq!(
         lines,
         vec![
-            1,                       // dispatcher entry
-            39,                      // contract opener (`contract Inheritance is Mid {`)
-            46,                      // function run() {
-            47,                      //   uint256 v = foo();
-            42,                      // Leaf.foo() header
-            43,                      //   return super.foo() + 100;
-            32,                      // Mid.foo() header
-            33,                      //   return super.foo() + 10;
-            26,                      // Base.foo() header
-            27,                      //   return 1;
-            26,                      // Base.foo — return-site
-            33,                      // Mid.foo — return-site
-            32,                      // Mid.foo — return-site header
-            43,                      // Leaf.foo — return-site
-            42,                      // Leaf.foo — return-site header
-            47,                      // back in run — return-site of foo()
-            48,                      //   emit Result(v);
-            49,                      //   return v;
-            46,                      // run — return-site
+            1,  // dispatcher entry
+            39, // contract opener (`contract Inheritance is Mid {`)
+            46, // function run() {
+            47, //   uint256 v = foo();
+            42, // Leaf.foo() header
+            43, //   return super.foo() + 100;
+            32, // Mid.foo() header
+            33, //   return super.foo() + 10;
+            26, // Base.foo() header
+            27, //   return 1;
+            26, // Base.foo — return-site
+            33, // Mid.foo — return-site
+            32, // Mid.foo — return-site header
+            43, // Leaf.foo — return-site
+            42, // Leaf.foo — return-site header
+            47, // back in run — return-site of foo()
+            48, //   emit Result(v);
+            49, //   return v;
+            46, // run — return-site
         ],
         "step-line sequence pins the run → Leaf.foo → Mid.foo → Base.foo \
          super-chain unwind"
@@ -2285,11 +2287,17 @@ fn test_custom_errors_insufficient_via_ct_print_full() {
     // ABI-encoded args into `InsufficientBalance(available=50,
     // required=100)` (named arguments rendered in canonical form).
     let ios = observed_io_events(&doc);
-    assert_eq!(ios.len(), 1, "expected one ioError for the typed custom revert");
-    assert_eq!(ios[0].0, "ioError", "custom-error reverts surface as ioError");
     assert_eq!(
-        ios[0].1,
-        "InsufficientBalance(available=50, required=100)",
+        ios.len(),
+        1,
+        "expected one ioError for the typed custom revert"
+    );
+    assert_eq!(
+        ios[0].0, "ioError",
+        "custom-error reverts surface as ioError"
+    );
+    assert_eq!(
+        ios[0].1, "InsufficientBalance(available=50, required=100)",
         "custom-error payload must be ABI-decoded with named arguments"
     );
 }
@@ -2336,11 +2344,17 @@ fn test_custom_errors_unauthorized_via_ct_print_full() {
     // decoder must still spell out the canonical name `Unauthorized()`
     // (with empty parens) instead of dumping the bare selector hex.
     let ios = observed_io_events(&doc);
-    assert_eq!(ios.len(), 1, "expected one ioError for the unauthorized revert");
-    assert_eq!(ios[0].0, "ioError", "custom-error reverts surface as ioError");
     assert_eq!(
-        ios[0].1,
-        "Unauthorized()",
+        ios.len(),
+        1,
+        "expected one ioError for the unauthorized revert"
+    );
+    assert_eq!(
+        ios[0].0, "ioError",
+        "custom-error reverts surface as ioError"
+    );
+    assert_eq!(
+        ios[0].1, "Unauthorized()",
         "selector-only custom error must be decoded to `Unauthorized()`"
     );
 }
@@ -2489,11 +2503,7 @@ fn test_block_tx_context_via_ct_print_full() {
         return;
     };
 
-    assert_metadata_program_is_source_path(
-        &doc,
-        "block_tx_context",
-        "BlockTxContext.sol",
-    );
+    assert_metadata_program_is_source_path(&doc, "block_tx_context", "BlockTxContext.sol");
     assert_paths_ends_with_source(&doc, "BlockTxContext.sol");
 
     // --- counts ---
@@ -2559,10 +2569,13 @@ fn test_block_tx_context_via_ct_print_full() {
     // followed by `, 0x` then 6 × 64 hex chars (192 bytes hex = 6×32
     // bytes binary) of non-indexed data.
     let parts: Vec<&str> = ios[0].1.splitn(2, ", 0x").collect();
-    assert_eq!(parts.len(), 2, "Context payload must split into topic0 + data");
     assert_eq!(
-        parts[0],
-        "0x1cf910137b07edf2bae8eb42ec4da0d993a73234ec88c7ee0fae69c9e3e3a213",
+        parts.len(),
+        2,
+        "Context payload must split into topic0 + data"
+    );
+    assert_eq!(
+        parts[0], "0x1cf910137b07edf2bae8eb42ec4da0d993a73234ec88c7ee0fae69c9e3e3a213",
         "topic0 = keccak256(\"Context(address,uint256,uint256,uint256,address,uint256)\")"
     );
     // The trailing data is 6×32 bytes = 192 bytes binary = 384 hex chars.
@@ -2588,18 +2601,15 @@ fn test_block_tx_context_via_ct_print_full() {
     let data = parts[1];
     let slots: Vec<&str> = (0..6).map(|i| &data[i * 64..(i + 1) * 64]).collect();
     assert_ne!(
-        slots[0],
-        "0000000000000000000000000000000000000000000000000000000000000000",
+        slots[0], "0000000000000000000000000000000000000000000000000000000000000000",
         "slot 0 (msg.sender) must be non-zero"
     );
     assert_eq!(
-        slots[1],
-        "0000000000000000000000000000000000000000000000000000000000000000",
+        slots[1], "0000000000000000000000000000000000000000000000000000000000000000",
         "slot 1 (msg.value) must be zero — recorder default --value 0"
     );
     assert_ne!(
-        slots[4],
-        "0000000000000000000000000000000000000000000000000000000000000000",
+        slots[4], "0000000000000000000000000000000000000000000000000000000000000000",
         "slot 4 (tx.origin) must be non-zero"
     );
     // For an EOA call (no contract caller), msg.sender == tx.origin.
@@ -2724,12 +2734,959 @@ fn test_payable_withdraw_value_rejected_via_ct_print_full() {
     // empty.  The sentinel "no decoded reason" distinguishes this
     // dispatcher-level revert from a user-level `revert(string)`.
     let ios = observed_io_events(&doc);
-    assert_eq!(ios.len(), 1, "expected exactly one ioError for the dispatcher revert");
+    assert_eq!(
+        ios.len(),
+        1,
+        "expected exactly one ioError for the dispatcher revert"
+    );
     assert_eq!(ios[0].0, "ioError");
     assert_eq!(
         ios[0].1, "",
         "dispatcher CALLVALUE revert carries no payload (RevertEmpty); \
          decoded text must be empty to distinguish it from a user-level \
          `revert(string)`"
+    );
+}
+
+// ===========================================================================
+// visibility/Visibility.sol  (M10 round-3 #1)
+// ===========================================================================
+
+/// Records `Visibility.sol::caller()` — a single contract carrying one
+/// function per visibility level (`public` / `external` / `internal` /
+/// `private`) plus a parameterless `caller()` that invokes each.
+///
+/// The strict pin documents the canonical EXTERNAL-vs-INTERNAL split:
+///
+///   * `this.publicFn()` and `this.externalFn()` go through the
+///     dispatcher as ordinary EXTERNAL calls (CALL opcode →
+///     depth +1) and surface as `external_call_depth_2` placeholder
+///     frames in the trace,
+///   * `internalFn()` and `privateFn()` are reached via JUMP at the
+///     same call depth (solc inlines `internal` / `private` calls
+///     into the caller's bytecode) and surface as ordinary
+///     AST-resolved internal call frames at the same depth as
+///     `caller`.
+///
+/// The function table contains all five visibility-bearing names
+/// (`caller`, `publicFn`, `externalFn`, `internalFn`, `privateFn`)
+/// plus the dispatcher orphan placeholders.  The IO event payload
+/// encodes the cumulative accumulator `1 + 2 + 4 + 8 = 15 = 0xf`.
+#[test]
+fn test_visibility_via_ct_print_full() {
+    let Some(doc) = record_and_dump_full(
+        "test_visibility_via_ct_print_full",
+        "visibility",
+        "Visibility.sol",
+        "caller",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_is_source_path(&doc, "visibility", "Visibility.sol");
+    assert_paths_ends_with_source(&doc, "Visibility.sol");
+
+    // --- counts ---
+    let counts = &doc["counts"];
+    assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
+    // 9 = `caller` (entry-point) + `external_call_depth_2` (the
+    // EXTERNAL-call placeholder used for both `this.publicFn()` and
+    // `this.externalFn()` — registered once and reused) + 4 user
+    // functions (`publicFn`, `externalFn`, `internalFn`, `privateFn`)
+    // + 3 dispatcher-orphan `fn_at_pc_*` placeholders.
+    assert_eq!(counts["functions"].as_u64(), Some(9), "functions count");
+    assert_eq!(counts["steps"].as_u64(), Some(29), "steps count");
+    // 15 = 2 `external_call_depth_2` frames (one per `this.*`) + 4
+    // AST-resolved user-function frames + 9 dispatcher-orphan frames.
+    assert_eq!(counts["calls"].as_u64(), Some(15), "calls count");
+    // EXACTLY 5 varnames: a, b, c, d, total — one local per
+    // visibility-bearing call plus the accumulator.
+    assert_eq!(
+        counts["varnames"].as_u64(),
+        Some(5),
+        "varnames count — 4 per-call locals + the accumulator"
+    );
+    assert_eq!(counts["io_events"].as_u64(), Some(1), "io_events count");
+
+    // --- function table ---
+    // All four visibility-bearing functions are AST-resolved (each is
+    // a single-statement `pure` returning a literal — the resolver
+    // catches them via the lookahead window).
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        functions,
+        vec![
+            "caller",
+            "external_call_depth_2",
+            "publicFn",
+            "fn_at_pc_563",
+            "fn_at_pc_634",
+            "externalFn",
+            "internalFn",
+            "privateFn",
+            "fn_at_pc_722",
+        ],
+        "function table — entry-point first, then the EXTERNAL-call \
+         placeholder, then all four visibility-bearing functions \
+         interleaved with dispatcher-orphan placeholders"
+    );
+
+    // --- varnames: one local per visibility-bearing call + accumulator ---
+    let varnames: Vec<&str> = doc["varnames"]
+        .as_array()
+        .expect("varnames array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        varnames,
+        vec!["a", "b", "c", "d", "total"],
+        "varname table — one local per visibility-bearing return value"
+    );
+
+    // --- exact step-line sequence ---
+    // The shape:
+    //   * dispatcher (line 1) → contract opener (27) → caller() body
+    //     header (46) → `uint256 a = this.publicFn();` (47),
+    //   * dispatcher re-entry into the EXTERNAL `publicFn()` frame
+    //     (27 → 30/31 body → 30 return-site),
+    //   * back in caller (47 return-site → 48),
+    //   * dispatcher re-entry for the EXTERNAL `externalFn()`
+    //     (27 → 34/35 body → 34 return-site),
+    //   * back in caller (48 return-site → 49 → 38/39 body of the
+    //     INTERNAL `internalFn()` (no depth change!) → 38 return),
+    //   * caller (49 → 50 → 42/43 body of the PRIVATE `privateFn()`
+    //     (no depth change!) → 42 return),
+    //   * caller (50 → 51 → 52 → 53 → 46 return-site).
+    let lines = observed_step_lines(&doc);
+    assert_eq!(
+        lines,
+        vec![
+            1, 27, // dispatcher + contract opener
+            46, 47, // caller() header + uint256 a = this.publicFn();
+            27, 30, 31, 30, // EXTERNAL publicFn dispatch + body + return-site
+            47, 48, // back in caller; uint256 b = this.externalFn();
+            27, 34, 35, 34, // EXTERNAL externalFn dispatch + body + return-site
+            48, 49, // back in caller; uint256 c = internalFn();
+            38, 39, 38, // INTERNAL internalFn (same depth, no dispatcher)
+            49, 50, // caller; uint256 d = privateFn();
+            42, 43, 42, // PRIVATE privateFn (same depth, no dispatcher)
+            50, 51, 52, 53, // caller; total = a+b+c+d; emit; return total
+            46, // caller — return-site
+        ],
+        "step-line sequence pins the EXTERNAL (this.*) vs INTERNAL \
+         (no-dispatcher) split: lines 27/30..31 and 27/34..35 are the \
+         dispatcher re-entries into publicFn/externalFn; lines 38..39 \
+         and 42..43 are reached via JUMP at the same depth as caller"
+    );
+
+    // --- value variants ---
+    // Locals (`a`, `b`, `c`, `d`, `total`) decode to `Int`; storage
+    // carry-forward (none in this fixture, but the recorder still
+    // emits `Raw` placeholders for the storage-state cache) shows up
+    // as `Raw`.
+    assert_step_value_kinds_eq(&doc, &["Int", "Raw"]);
+
+    // --- call sequence: pin EXTERNAL-vs-INTERNAL placement ---
+    // The first two `external_call_depth_2` entries are the dispatcher
+    // re-entries for `this.publicFn()` / `this.externalFn()`.  The
+    // four visibility-bearing user-function entries come in the
+    // canonical interleaved order documented in the function table.
+    let entries = observed_call_entry_funcs(&doc);
+    assert_eq!(
+        entries,
+        vec![
+            "external_call_depth_2".to_string(),
+            "publicFn".to_string(),
+            "fn_at_pc_563".to_string(),
+            "fn_at_pc_634".to_string(),
+            "external_call_depth_2".to_string(),
+            "externalFn".to_string(),
+            "fn_at_pc_563".to_string(),
+            "fn_at_pc_634".to_string(),
+            "internalFn".to_string(),
+            "privateFn".to_string(),
+            "fn_at_pc_722".to_string(),
+            "fn_at_pc_722".to_string(),
+            "fn_at_pc_722".to_string(),
+            "fn_at_pc_563".to_string(),
+            "fn_at_pc_563".to_string(),
+        ],
+        "call_entry sequence: both this.* invocations land as \
+         external_call_depth_2 placeholders BEFORE their resolved \
+         user-function entry; internalFn/privateFn appear with NO \
+         preceding external_call_* (same-depth JUMP)"
+    );
+
+    // --- io / event emission: Result(15) ---
+    let ios = observed_io_events(&doc);
+    assert_eq!(ios.len(), 1, "expected one Result(uint256) event");
+    assert_eq!(ios[0].0, "ioStderr", "EvmEvents collapse to ioStderr");
+    // topic0 = keccak256("Result(uint256)"); data = 0xf (1+2+4+8).
+    assert_eq!(
+        ios[0].1,
+        "0xa9bb0fa194e939eadb11be8d62dd4a16e0f5e89f37fb73fa7f0f8446f1abba61, \
+         0x000000000000000000000000000000000000000000000000000000000000000f",
+        "Result(15) must encode the cumulative 1+2+4+8 accumulator"
+    );
+}
+
+// ===========================================================================
+// receive_fallback/ReceiveFallback.sol  (M10 round-3 #2)
+// ===========================================================================
+
+/// Records `ReceiveFallback.sol::triggerReceive()` — a parameterless
+/// public function that does `address(this).call{value: 0}("")` to
+/// route through the contract's `receive() external payable` entry
+/// point.  The strict pin asserts:
+///
+///   * the inner CALL surfaces as exactly one `external_call_depth_2`
+///     placeholder frame,
+///   * inside that frame the source-line steps land on the
+///     `receive()` body (lines 38-40, NOT the fallback body at
+///     44-46),
+///   * the `receivedCount` storage carry-forward ends at 1 (0x1) and
+///     the `ReceiveHit(value=0, totalCount=1)` event is emitted with
+///     the canonical topic0 + 64-byte payload.
+#[test]
+fn test_receive_fallback_receive_path_via_ct_print_full() {
+    let Some(doc) = record_and_dump_full(
+        "test_receive_fallback_receive_path_via_ct_print_full",
+        "receive_fallback",
+        "ReceiveFallback.sol",
+        "triggerReceive",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_is_source_path(&doc, "receive_fallback", "ReceiveFallback.sol");
+    assert_paths_ends_with_source(&doc, "ReceiveFallback.sol");
+
+    // --- counts ---
+    let counts = &doc["counts"];
+    assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
+    // 6 = `triggerReceive` (entry-point) + `external_call_depth_2`
+    // (the inner CALL placeholder for `address(this).call`) + 4
+    // dispatcher-orphan `fn_at_pc_*` placeholders (one for the
+    // `receive()` selector-zero dispatcher target plus three for the
+    // post-return walking).
+    assert_eq!(counts["functions"].as_u64(), Some(6), "functions count");
+    assert_eq!(counts["steps"].as_u64(), Some(13), "steps count");
+    // 5 = 1 external_call_depth_2 + 4 dispatcher-orphan frames.
+    assert_eq!(counts["calls"].as_u64(), Some(5), "calls count");
+    assert_eq!(
+        counts["varnames"].as_u64(),
+        Some(3),
+        "varnames — `ok` (call success bool) + `receivedCount` and \
+         `lastValue` (storage carry-forward)"
+    );
+    // EXACTLY one io_event: the `ReceiveHit(value, totalCount)` LOG.
+    // The `triggerReceive` body emits no event itself; the inner CALL
+    // routes through `receive()` which emits the LOG.
+    assert_eq!(counts["io_events"].as_u64(), Some(1), "io_events count");
+
+    // --- function table ---
+    // The recorder doesn't AST-resolve `receive` (no name in the AST
+    // body resolver — special-form function); it surfaces as a
+    // dispatcher-orphan `fn_at_pc_*` placeholder.
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        functions,
+        vec![
+            "triggerReceive",
+            "fn_at_pc_1353",
+            "external_call_depth_2",
+            "fn_at_pc_964",
+            "fn_at_pc_1030",
+            "fn_at_pc_1069",
+        ],
+        "function table — entry-point first, then a dispatcher-orphan \
+         placeholder for the `receive()` selector-zero target, then the \
+         EXTERNAL-call placeholder, then post-return dispatcher orphans"
+    );
+
+    // --- varnames: just the `ok` bool + the touched storage slots ---
+    let varnames: Vec<&str> = doc["varnames"]
+        .as_array()
+        .expect("varnames array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        varnames,
+        vec!["ok", "receivedCount", "lastValue"],
+        "varnames — call-result bool + the two storage slots `receive()` writes"
+    );
+
+    // --- exact step-line sequence ---
+    // The shape:
+    //   * dispatcher (1) → contract opener (28) → `triggerReceive`
+    //     header (49) → `(bool ok, ) = address(this).call{...}("")` (50),
+    //   * inner CALL re-enters dispatcher (28) → `receive()` body
+    //     (38 = `receivedCount += 1;`, 39 = `lastValue = msg.value;`,
+    //     40 = `emit ReceiveHit(...)` — the body lines lying between
+    //     `receive() external payable {` (37) and `}` (41)),
+    //   * back at outer dispatcher (28), then `triggerReceive`
+    //     return-site (50 → 51 = `require(ok, ...);` → 52 = `return
+    //     receivedCount;`),
+    //   * `triggerReceive` return-site (49).
+    //
+    // Crucially the inner-frame body lines are 38..40 — the `receive()`
+    // body — NOT 44..46 (the fallback body).  This is the canonical
+    // proof that the empty-calldata path routed through `receive()`.
+    let lines = observed_step_lines(&doc);
+    assert_eq!(
+        lines,
+        vec![
+            1, 28, // dispatcher + contract opener
+            49, 50, // triggerReceive header + inner CALL site
+            28, 38, 39, 40, // inner-dispatcher + receive() body lines
+            28, 50, // back at outer dispatcher + return-site
+            51, 52, // require(ok) + return receivedCount
+            49, // triggerReceive return-site
+        ],
+        "step-line sequence pins that the inner CALL routed through \
+         `receive()` (body lines 38..40), NOT through `fallback()` \
+         (body lines 44..46)"
+    );
+
+    // --- value variants ---
+    // No `Int` here: the only locals are `(bool ok, )` (decoded as
+    // `Raw` because the recorder treats the destructuring-tuple slot
+    // as raw bytes) and storage carry-forward for `receivedCount` /
+    // `lastValue`.
+    assert_step_value_kinds_eq(&doc, &["Raw"]);
+
+    // --- call sequence: exactly one external CALL ---
+    let entries = observed_call_entry_funcs(&doc);
+    let external_entries = entries
+        .iter()
+        .filter(|n| n.starts_with("external_call_depth_"))
+        .count();
+    assert_eq!(
+        external_entries, 1,
+        "expected exactly one EXTERNAL CALL (the address(this).call → receive)"
+    );
+
+    // --- decoded `receivedCount` ends at 1 ---
+    let pairs = observed_step_var_pairs(&doc);
+    let last_count = pairs
+        .iter()
+        .rev()
+        .find(|(n, _)| n == "receivedCount")
+        .map(|(_, v)| v.as_str());
+    assert_eq!(
+        last_count,
+        Some("0x1"),
+        "receivedCount must be incremented to 1 by the receive() handler"
+    );
+
+    // --- io: ReceiveHit(value=0, totalCount=1) ---
+    let ios = observed_io_events(&doc);
+    assert_eq!(ios.len(), 1, "expected one ReceiveHit event");
+    assert_eq!(ios[0].0, "ioStderr");
+    // topic0 = keccak256("ReceiveHit(uint256,uint256)"); data = 64
+    // bytes (value=0 + totalCount=1).
+    assert_eq!(
+        ios[0].1,
+        "0xc1fce797776afce9264d99d07c4a092b7a73d702b434f716fdb2f4a93d925bf8, \
+         0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+        "ReceiveHit(value=0, totalCount=1) must encode value (msg.value=0) \
+         and totalCount=1 each as a 32-byte slot in the data segment"
+    );
+}
+
+/// Records `ReceiveFallback.sol::triggerFallback()` — a parameterless
+/// public function that does `address(this).call(hex"deadbeef")` to
+/// route through the contract's `fallback() external payable` entry
+/// point (selector `0xdeadbeef` is not in the ABI).  The strict pin
+/// mirrors the `_receive_path` sibling but asserts the trace landed in
+/// the FALLBACK body (lines 44-46) rather than the RECEIVE body
+/// (38-40), and the `fallbackCount` storage slot was incremented.
+#[test]
+fn test_receive_fallback_fallback_path_via_ct_print_full() {
+    let Some(doc) = record_and_dump_full(
+        "test_receive_fallback_fallback_path_via_ct_print_full",
+        "receive_fallback",
+        "ReceiveFallback.sol",
+        "triggerFallback",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_is_source_path(&doc, "receive_fallback", "ReceiveFallback.sol");
+    assert_paths_ends_with_source(&doc, "ReceiveFallback.sol");
+
+    // --- counts ---
+    let counts = &doc["counts"];
+    assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
+    assert_eq!(counts["functions"].as_u64(), Some(6), "functions count");
+    assert_eq!(counts["steps"].as_u64(), Some(13), "steps count");
+    assert_eq!(counts["calls"].as_u64(), Some(5), "calls count");
+    assert_eq!(
+        counts["varnames"].as_u64(),
+        Some(3),
+        "varnames — `ok` + `fallbackCount` + `lastDataLen`"
+    );
+    assert_eq!(counts["io_events"].as_u64(), Some(1), "io_events count");
+
+    // --- function table ---
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        functions,
+        vec![
+            "triggerFallback",
+            "fn_at_pc_1178",
+            "external_call_depth_2",
+            "fn_at_pc_964",
+            "fn_at_pc_1030",
+            "fn_at_pc_1069",
+        ],
+        "function table — entry-point first, then a dispatcher-orphan \
+         placeholder for the `fallback()` no-match target, then the \
+         EXTERNAL-call placeholder, then post-return dispatcher orphans"
+    );
+
+    // --- varnames ---
+    let varnames: Vec<&str> = doc["varnames"]
+        .as_array()
+        .expect("varnames array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        varnames,
+        vec!["ok", "fallbackCount", "lastDataLen"],
+        "varnames — `ok` + the two storage slots fallback() writes"
+    );
+
+    // --- exact step-line sequence: inner frame visits 44..46 (fallback body) ---
+    let lines = observed_step_lines(&doc);
+    assert_eq!(
+        lines,
+        vec![
+            1, 28, // dispatcher + contract opener
+            55, 56, // triggerFallback header + inner CALL site
+            28, 44, 45, 46, // inner-dispatcher + fallback() body lines
+            28, 56, // back at outer dispatcher + return-site
+            57, 58, // require(ok) + return fallbackCount
+            55, // triggerFallback return-site
+        ],
+        "step-line sequence pins that the inner CALL routed through \
+         `fallback()` (body lines 44..46), NOT through `receive()` \
+         (body lines 38..40)"
+    );
+
+    // --- decoded `fallbackCount` ends at 1 ---
+    let pairs = observed_step_var_pairs(&doc);
+    let last_count = pairs
+        .iter()
+        .rev()
+        .find(|(n, _)| n == "fallbackCount")
+        .map(|(_, v)| v.as_str());
+    assert_eq!(
+        last_count,
+        Some("0x1"),
+        "fallbackCount must be incremented to 1 by the fallback() handler"
+    );
+
+    // --- io: FallbackHit(dataLen=4, totalCount=1) ---
+    // The calldata `hex"deadbeef"` is exactly 4 bytes long, so
+    // `msg.data.length == 4`.
+    let ios = observed_io_events(&doc);
+    assert_eq!(ios.len(), 1, "expected one FallbackHit event");
+    assert_eq!(ios[0].0, "ioStderr");
+    // topic0 = keccak256("FallbackHit(uint256,uint256)"); data =
+    // dataLen=4 (0x04) + totalCount=1 each as 32-byte slot.
+    assert_eq!(
+        ios[0].1,
+        "0x86215a36253d3b6fc1716e5a1cf3ab55e78e4bf50eda0c4032634f9bd8a5aa69, \
+         0x00000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000001",
+        "FallbackHit(dataLen=4, totalCount=1) must encode the calldata \
+         length (4 bytes from hex\"deadbeef\") and totalCount=1"
+    );
+}
+
+// ===========================================================================
+// selfdestruct/SelfDestruct.sol  (M10 round-3 #3)
+// ===========================================================================
+
+/// Records `SelfDestruct.sol::run()` — the parameterless wrapper that
+/// invokes `destroy(payable(msg.sender))`, which emits a marker
+/// `BeforeDestroy` event and then runs the SELFDESTRUCT opcode with
+/// `msg.sender` (anvil's deterministic deployer account) as the
+/// beneficiary.
+///
+/// The SELFDESTRUCT opcode is silently absorbed by the EVM after
+/// transferring the remaining balance — without dedicated recorder
+/// support the trace would simply end after `BeforeDestroy`.  The
+/// recorder now (this round) detects the SELFDESTRUCT opcode and
+/// emits a tagged `EventLogKind::EvmEvent` io_event whose `metadata`
+/// is `"SELFDESTRUCT"` and whose text is the 20-byte beneficiary
+/// address — see `build_selfdestruct_event_content` in
+/// `src/recorder.rs`.
+///
+/// The strict pin asserts both events surface in order:
+///   1. the `BeforeDestroy(address)` LOG → `ioStderr` carrying
+///      topic0 + the 32-byte beneficiary address,
+///   2. the `SELFDESTRUCT` opcode → `ioStderr` carrying just the
+///      20-byte beneficiary address (no topics, no padding).
+#[test]
+fn test_selfdestruct_via_ct_print_full() {
+    let Some(doc) = record_and_dump_full(
+        "test_selfdestruct_via_ct_print_full",
+        "selfdestruct",
+        "SelfDestruct.sol",
+        "run",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_is_source_path(&doc, "selfdestruct", "SelfDestruct.sol");
+    assert_paths_ends_with_source(&doc, "SelfDestruct.sol");
+
+    // Anvil's deterministic accounts[0] (the deployer == msg.sender ==
+    // beneficiary).  Lower-cased to match the recorder's hex output.
+    const ANVIL_ACCOUNT_0_LOWER: &str = "f39fd6e51aad88f6f4ce6ab8827279cfffb92266";
+
+    // --- counts ---
+    let counts = &doc["counts"];
+    assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
+    // 3 = `run` (entry-point) + AST-resolved `destroy` (single
+    // address-payable arg) + 1 dispatcher-orphan placeholder.
+    assert_eq!(counts["functions"].as_u64(), Some(3), "functions count");
+    assert_eq!(counts["steps"].as_u64(), Some(7), "steps count");
+    assert_eq!(counts["calls"].as_u64(), Some(2), "calls count");
+    assert_eq!(
+        counts["varnames"].as_u64(),
+        Some(1),
+        "varnames — just `beneficiary` (the destroy() argument)"
+    );
+    // EXACTLY two io_events: the `BeforeDestroy` LOG event AND the
+    // SELFDESTRUCT-opcode tagged event.  Without the recorder's
+    // SELFDESTRUCT detection this would be 1 (only the LOG).
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(2),
+        "io_events count — BeforeDestroy LOG + SELFDESTRUCT opcode"
+    );
+
+    // --- function table ---
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        functions,
+        vec!["run", "destroy", "fn_at_pc_412"],
+        "function table — entry-point, AST-resolved `destroy` internal, dispatcher orphan"
+    );
+
+    // --- exact step-line sequence ---
+    // run() at lines 30-31 invokes destroy() at lines 25-27.
+    // SELFDESTRUCT halts execution so there's no return-site walking.
+    let lines = observed_step_lines(&doc);
+    assert_eq!(
+        lines,
+        vec![
+            1, 22, // dispatcher + contract opener
+            30, 31, // run() header + destroy(payable(msg.sender))
+            25, 26, 27, // destroy() header + emit + selfdestruct(...)
+        ],
+        "step-line sequence ends at line 27 (the selfdestruct call) — \
+         SELFDESTRUCT halts execution so no post-return walking happens"
+    );
+
+    // --- call_entry sequence ---
+    let entries = observed_call_entry_funcs(&doc);
+    assert_eq!(
+        entries,
+        vec!["destroy".to_string(), "fn_at_pc_412".to_string()],
+        "call_entry sequence: destroy() resolved internal + dispatcher orphan"
+    );
+
+    // --- io events: BeforeDestroy LOG + SELFDESTRUCT opcode ---
+    let ios = observed_io_events(&doc);
+    assert_eq!(ios.len(), 2, "expected exactly two io events");
+    // Both surface as ioStderr (the multi-stream layout collapses
+    // EvmEvent → ioStderr — see `toIOEventKind` in
+    // `codetracer_trace_writer_ffi.nim`).
+    assert_eq!(
+        ios[0].0, "ioStderr",
+        "BeforeDestroy event collapses to ioStderr"
+    );
+    assert_eq!(
+        ios[1].0, "ioStderr",
+        "SELFDESTRUCT opcode collapses to ioStderr"
+    );
+
+    // io[0] = BeforeDestroy(beneficiary) — LOG1, topic0 +
+    // 32-byte data slot carrying the address (left-padded to 32 bytes).
+    //   topic0 = keccak256("BeforeDestroy(address)")
+    let expected_before_destroy = format!(
+        "0x30458e35b661aed36c06d3c0980cc20045262bf8522b5de5da496c7fb3d117cf, \
+         0x000000000000000000000000{}",
+        ANVIL_ACCOUNT_0_LOWER
+    );
+    assert_eq!(
+        ios[0].1, expected_before_destroy,
+        "BeforeDestroy(beneficiary) must encode the deployer address \
+         (anvil accounts[0]) in the data segment as a 32-byte slot \
+         (12 zero bytes + 20-byte address)"
+    );
+
+    // io[1] = SELFDESTRUCT — the recorder's tagged opcode event.
+    // The text is the bare 20-byte beneficiary address (no topic,
+    // no zero padding).  This is the canonical proof that the
+    // recorder detected the SELFDESTRUCT opcode and surfaced it
+    // alongside the LOG.
+    let expected_selfdestruct = format!("0x{}", ANVIL_ACCOUNT_0_LOWER);
+    assert_eq!(
+        ios[1].1, expected_selfdestruct,
+        "SELFDESTRUCT event text must be the bare 20-byte beneficiary \
+         address (no topic, no padding) — the recorder pops the \
+         beneficiary from the top of the EVM stack"
+    );
+
+    // --- assert the SELFDESTRUCT event carries the canonical metadata ---
+    // The (kind, text) helper drops `metadata`; we re-walk the events
+    // array to verify the recorder set `metadata = "SELFDESTRUCT"`
+    // (the canonical opcode mnemonic).  The `ct-print --full` output
+    // exposes metadata under the io event's adjacent fields — for
+    // EvmEvents the multi-stream writer collapses them to ioStderr
+    // but the metadata round-trips through `EventLogKind`.
+    //
+    // Spec invariant: the second io event's text is exactly the
+    // 20-byte address — which is impossible to produce via the
+    // LOG{n} path (those carry a 32-byte topic prefix).  Asserting on
+    // the text-shape alone is a sufficient strict pin without
+    // depending on `ct-print` exposing `metadata`.
+    assert_eq!(
+        ios[1].1.len(),
+        42,
+        "SELFDESTRUCT event text must be exactly 42 chars (`0x` + 40 \
+         hex chars = 20-byte address); got {:?}",
+        ios[1].1
+    );
+}
+
+// ===========================================================================
+// interface/Interface.sol  (M10 round-3 #4)
+// ===========================================================================
+
+/// Records `Interface.sol::run()` — the consumer contract that deploys
+/// a `Token` (via `new Token()`), holds it under an `IERC20`
+/// interface reference, and calls through that reference
+/// (`t.transfer(0xBEEF, 7)` and `t.balanceOf(0xBEEF)`).
+///
+/// Three inner CALLs from `Interface.run()`: `new Token()` (CREATE),
+/// `token.transfer(...)` (CALL), `token.balanceOf(...)` (STATICCALL).
+/// Each surfaces as one `external_call_depth_2` placeholder frame.
+/// The strict pin asserts:
+///
+///   * exactly three `external_call_depth_2` placeholder frames,
+///   * the canonical ERC-20 `Transfer(from=Token, to=0xBEEF,
+///     value=7)` event surfaces from the implementing `Token`
+///     contract — proof that the dispatch landed on Token's
+///     bytecode, NOT on the IERC20 interface's empty-body
+///     declarations (which produce no bytecode at all),
+///   * the consumer's `Done(bal)` event surfaces with `bal=7`
+///     (the value transferred to 0xBEEF).
+#[test]
+fn test_interface_via_ct_print_full() {
+    let Some(doc) = record_and_dump_full(
+        "test_interface_via_ct_print_full",
+        "interface",
+        "Interface.sol",
+        "run",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_is_source_path(&doc, "interface", "Interface.sol");
+    assert_paths_ends_with_source(&doc, "Interface.sol");
+
+    // --- counts ---
+    let counts = &doc["counts"];
+    assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
+    // 8 = `run` + `external_call_depth_2` (registered once, reused
+    // for all three inner CALLs) + 6 dispatcher-orphan `fn_at_pc_*`
+    // placeholders (one for the CREATE-time entry plus five for the
+    // two CALL re-entries' dispatcher-walk frames).
+    assert_eq!(counts["functions"].as_u64(), Some(8), "functions count");
+    assert_eq!(counts["steps"].as_u64(), Some(24), "steps count");
+    // 13 = 3 external_call_depth_2 frames (one per `new Token()` /
+    // `t.transfer(...)` / `t.balanceOf(...)`) + 7 dispatcher orphans
+    // + 3 nested `run` re-entry frames (the call-tree treats each
+    // inner CALL as recursive into the run() frame because the
+    // source map is single-contract).
+    assert_eq!(counts["calls"].as_u64(), Some(13), "calls count");
+    // EXACTLY two io_events: the `Transfer(from, to, 7)` event from
+    // the inner `token.transfer(...)` call AND the consumer's own
+    // `Done(7)` event.
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(2),
+        "io_events — one Transfer (from inner Token.transfer) + one Done"
+    );
+
+    // --- function table ---
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        functions,
+        vec![
+            "run",
+            "fn_at_pc_698",
+            "external_call_depth_2",
+            "fn_at_pc_996",
+            "fn_at_pc_1092",
+            "fn_at_pc_1255",
+            "fn_at_pc_1322",
+            "fn_at_pc_735",
+        ],
+        "function table — entry-point first, then dispatcher orphans \
+         interleaved with the EXTERNAL-call placeholder"
+    );
+
+    // --- exactly three external_call_depth_2 entries ---
+    // The structural invariant: `new Token()`, `t.transfer(...)`,
+    // `t.balanceOf(...)` each produce one EXTERNAL CALL placeholder.
+    let entries = observed_call_entry_funcs(&doc);
+    let external_entries = entries
+        .iter()
+        .filter(|n| n.starts_with("external_call_depth_"))
+        .count();
+    assert_eq!(
+        external_entries, 3,
+        "expected exactly three EXTERNAL CALL placeholder frames \
+         (new Token, t.transfer, t.balanceOf); got entries {entries:?}"
+    );
+
+    // --- io: Transfer(0x5fbd…, 0xBEEF, 7) + Done(7) ---
+    // The Token contract is deployed at the deterministic anvil
+    // address `0x5FbDB2315678afecb367f032d93F642f64180aa3` (the
+    // first contract created by the deployer for this run() —
+    // anvil's deterministic CREATE address derivation).
+    const TOKEN_ADDR_LOWER: &str = "5fbdb2315678afecb367f032d93f642f64180aa3";
+    let ios = observed_io_events(&doc);
+    assert_eq!(ios.len(), 2, "expected exactly two io events");
+    assert_eq!(ios[0].0, "ioStderr", "Transfer event collapses to ioStderr");
+    assert_eq!(ios[1].0, "ioStderr", "Done event collapses to ioStderr");
+
+    // io[0] = Transfer(from=Token, to=0xBEEF, value=7) — LOG3 with
+    // canonical ERC-20 Transfer signature.  The fact that the
+    // Transfer event's `from` is the Token contract address (NOT
+    // the deployer) is the canonical proof that the inner CALL
+    // landed on Token's bytecode — the Token's `transfer` body
+    // does `balances[msg.sender] -= amount;`, where msg.sender is
+    // the calling contract (Interface).  But the `Transfer(from, to,
+    // value)` event is emitted as `emit Transfer(msg.sender, ...)`,
+    // so `from` == the Interface contract address (the deployer of
+    // Token, hence the holder of the initial 1000 tokens).
+    let expected_transfer = format!(
+        "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef, \
+         0x{}, 0xbeef, \
+         0x0000000000000000000000000000000000000000000000000000000000000007",
+        TOKEN_ADDR_LOWER
+    );
+    assert_eq!(
+        ios[0].1, expected_transfer,
+        "Transfer(Token, 0xBEEF, 7) must surface from Token's \
+         emit-statement, with `from` being the Interface contract \
+         (the constructor-time recipient of the initial 1000 tokens) \
+         and value=7 in the data segment"
+    );
+
+    // io[1] = Done(7) — Interface.run() emits Done(bal), and after
+    // the Token.transfer(0xBEEF, 7) the BEEF balance is 7.
+    assert_eq!(
+        ios[1].1,
+        "0x6bb841348c5a71169a2db8779d29699afa576c107c1bf7c33c3193ae1e980ba2, \
+         0x0000000000000000000000000000000000000000000000000000000000000007",
+        "Done(bal) must encode bal=7 (the BEEF balance after the \
+         interface-dispatched transfer)"
+    );
+}
+
+// ===========================================================================
+// ecrecover/EcRecover.sol  (M10 round-3 #5)
+// ===========================================================================
+
+/// Records `EcRecover.sol::run()` — `ecrecover(hash, v, r, s)` over a
+/// fixed (deterministic) ECDSA signature.  Solidity's
+/// `ecrecover(...)` builtin compiles to a STATICCALL targeting the
+/// EVM precompile at address `0x01`; the recovered signer address is
+/// then captured into a local and emitted as `Recovered(address)`.
+///
+/// Anvil's `debug_traceTransaction` does NOT increment depth for
+/// precompile calls (the precompile executes natively without
+/// entering its own EVM frame), so without dedicated recorder
+/// support the trace would be silent about the `ecrecover`
+/// invocation — the only signal would be the `Recovered` event.
+///
+/// The recorder now (this round) detects CALL / STATICCALL /
+/// DELEGATECALL targeting addresses 0x01..=0x09 and tags the opcode
+/// site with an `EventLogKind::EvmEvent` whose text is
+/// `"<canonical name>:0x<20-byte address>"` — see
+/// `build_precompile_event_content` in `src/recorder.rs`.
+///
+/// The strict pin asserts both events surface in order:
+///   1. the precompile-tagged event with text
+///      `"ecrecover:0x0000000000000000000000000000000000000001"`,
+///   2. the `Recovered(address)` LOG → `ioStderr` carrying topic0 +
+///      the 32-byte signer address (recovered to the deterministic
+///      `0x8581d5e99e70c941f1e415dcaf58d2c81238b19a`).
+#[test]
+fn test_ecrecover_via_ct_print_full() {
+    let Some(doc) = record_and_dump_full(
+        "test_ecrecover_via_ct_print_full",
+        "ecrecover",
+        "EcRecover.sol",
+        "run",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_is_source_path(&doc, "ecrecover", "EcRecover.sol");
+    assert_paths_ends_with_source(&doc, "EcRecover.sol");
+
+    // --- counts ---
+    let counts = &doc["counts"];
+    assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
+    // 3 = `run` (entry-point) + 2 dispatcher-orphan placeholders.
+    assert_eq!(counts["functions"].as_u64(), Some(3), "functions count");
+    assert_eq!(counts["steps"].as_u64(), Some(11), "steps count");
+    assert_eq!(counts["calls"].as_u64(), Some(3), "calls count");
+    assert_eq!(
+        counts["varnames"].as_u64(),
+        Some(5),
+        "varnames — `hash`, `v`, `r`, `s` (the four ecrecover args) + `signer` (recovered local)"
+    );
+    // EXACTLY two io_events: the precompile-tagged event AND the
+    // `Recovered(address)` LOG.  Without the recorder's precompile
+    // detection this would be 1 (only the LOG).
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(2),
+        "io_events count — precompile-tagged event + Recovered LOG"
+    );
+
+    // --- function table ---
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        functions,
+        vec!["run", "fn_at_pc_479", "fn_at_pc_403"],
+        "function table — entry-point + dispatcher orphans"
+    );
+
+    // --- varnames: the four ecrecover args + recovered signer ---
+    let varnames: Vec<&str> = doc["varnames"]
+        .as_array()
+        .expect("varnames array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        varnames,
+        vec!["hash", "v", "r", "s", "signer"],
+        "varnames — the four ecrecover args + the recovered address local"
+    );
+
+    // --- exact step-line sequence ---
+    let lines = observed_step_lines(&doc);
+    assert_eq!(
+        lines,
+        vec![
+            1, 26, // dispatcher + contract opener
+            29, // function run() {
+            30, 31, 32, 33, // bytes32 hash; uint8 v; bytes32 r; bytes32 s;
+            34, // address signer = ecrecover(hash, v, r, s);
+            35, 36, // emit Recovered(signer); return signer;
+            29, // run() return-site
+        ],
+        "step-line sequence pins the run() body — note the precompile \
+         call surfaces as a tagged event but does NOT introduce extra \
+         step events (the precompile is executed natively without \
+         entering its own EVM frame)"
+    );
+
+    // --- call_entry sequence: NO external_call_depth_2 ---
+    // Crucially the precompile call does NOT surface as an
+    // `external_call_depth_2` placeholder — the structlog doesn't
+    // increment depth for precompiles.  This is the structural proof
+    // that precompile detection MUST be opcode-site-based, not
+    // depth-change-based.
+    let entries = observed_call_entry_funcs(&doc);
+    let external_entries = entries
+        .iter()
+        .filter(|n| n.starts_with("external_call_depth_"))
+        .count();
+    assert_eq!(
+        external_entries, 0,
+        "expected NO external_call_depth_* placeholder for the \
+         precompile call (anvil's structlog doesn't increment depth \
+         for precompiles); got entries {entries:?}"
+    );
+
+    // --- io events: precompile-tagged event + Recovered(signer) ---
+    // The deterministic test vector recovers to this signer address.
+    const RECOVERED_SIGNER_LOWER: &str = "8581d5e99e70c941f1e415dcaf58d2c81238b19a";
+    let ios = observed_io_events(&doc);
+    assert_eq!(ios.len(), 2, "expected exactly two io events");
+    assert_eq!(
+        ios[0].0, "ioStderr",
+        "precompile-tagged event collapses to ioStderr"
+    );
+    assert_eq!(ios[1].0, "ioStderr", "Recovered LOG collapses to ioStderr");
+
+    // io[0] = the precompile-tagged event.  The recorder formats the
+    // text as `<name>:0x<20-byte address>` so consumers can verify
+    // both the canonical precompile mnemonic AND the raw address.
+    assert_eq!(
+        ios[0].1, "ecrecover:0x0000000000000000000000000000000000000001",
+        "precompile event must carry the canonical name `ecrecover` \
+         and the precompile address 0x01"
+    );
+
+    // io[1] = Recovered(signer) — LOG1, topic0 + 32-byte data slot
+    // (left-padded to 32 bytes).
+    //   topic0 = keccak256("Recovered(address)")
+    let expected_recovered = format!(
+        "0x5e06a4da1c258ba9bc6142ca9e5b6dfa64e57f7fc4e91a150ba0b3fd301587a0, \
+         0x000000000000000000000000{}",
+        RECOVERED_SIGNER_LOWER
+    );
+    assert_eq!(
+        ios[1].1, expected_recovered,
+        "Recovered(signer) must encode the recovered ECDSA signer \
+         address (0x{}) — the deterministic test vector's signer",
+        RECOVERED_SIGNER_LOWER
     );
 }
