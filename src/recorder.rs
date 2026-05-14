@@ -7,10 +7,10 @@ use alloy::primitives::Address;
 
 use crate::call_tree::{CallTree, CallType};
 use crate::contract_registry::ContractRegistry;
+use crate::memory_tracker::MemoryTracker;
 use crate::revert_decode;
 use crate::solidity_ast::{FunctionDef, SolidityAst};
 use crate::source_map::{self, JumpType, SourceMap};
-use crate::memory_tracker::MemoryTracker;
 use crate::stack_tracker::StackTracker;
 use crate::storage_layout::StorageLayout;
 use crate::structlog::StructLog;
@@ -54,8 +54,7 @@ fn build_compound_value(
     slot_count: u64,
     slot_values: &std::collections::HashMap<u64, alloy::primitives::U256>,
 ) -> Option<ValueRecord> {
-    let element_type_id =
-        TraceWriter::ensure_type_id(writer, TypeKind::Int, "uint256");
+    let element_type_id = TraceWriter::ensure_type_id(writer, TypeKind::Int, "uint256");
 
     if let Some(members) = parent_ti.members.as_ref() {
         // Struct: one element per member, in declared order.  Each
@@ -82,8 +81,7 @@ fn build_compound_value(
         })
     } else if parent_ti.base.is_some() {
         // Fixed-size array: one element per slot in the contiguous range.
-        let parent_type_id =
-            TraceWriter::ensure_type_id(writer, TypeKind::Array, &parent_ti.label);
+        let parent_type_id = TraceWriter::ensure_type_id(writer, TypeKind::Array, &parent_ti.label);
         let mut elements: Vec<ValueRecord> = Vec::with_capacity(slot_count as usize);
         for offset in 0..slot_count {
             let abs_slot = base_slot + offset;
@@ -767,11 +765,7 @@ impl EvmRecorder {
                 };
                 // Cache the storage variable for carry-forward to subsequent steps.
                 storage_state.insert(var_name.clone(), val.clone());
-                TraceWriter::register_variable_with_full_value(
-                    &mut *self.writer,
-                    &var_name,
-                    val,
-                );
+                TraceWriter::register_variable_with_full_value(&mut *self.writer, &var_name, val);
 
                 // --- Compound (Sequence / Struct) snapshot ---
                 // If the slot belongs to a fixed-size array or an
@@ -780,8 +774,7 @@ impl EvmRecorder {
                 // `_value_kinds_present` test by surfacing
                 // `ValueRecord::Sequence` / `Struct` for the parent
                 // variable in addition to the per-slot `Raw` writes.
-                if let (Ok(slot_u64), Some(layout)) =
-                    (slot_decimal.parse::<u64>(), storage_layout)
+                if let (Ok(slot_u64), Some(layout)) = (slot_decimal.parse::<u64>(), storage_layout)
                 {
                     slot_values.insert(slot_u64, value);
                     if let Some((parent, parent_ti, slot_count)) =
@@ -831,6 +824,45 @@ impl EvmRecorder {
                     &mut *self.writer,
                     EventLogKind::EvmEvent,
                     &metadata,
+                    &content,
+                );
+            }
+
+            // --- SELFDESTRUCT: surface the contract-termination opcode ---
+            //
+            // SELFDESTRUCT halts the contract and forwards any remaining
+            // balance to the beneficiary address popped off the stack.
+            // Tag it with `EventLogKind::EvmEvent` (metadata
+            // `"SELFDESTRUCT"`) so consumers can distinguish a
+            // SELFDESTRUCT-terminated trace from one that ended via
+            // STOP / RETURN / REVERT and see the beneficiary address.
+            if let Some(content) =
+                build_selfdestruct_event_content(log.op.as_ref(), log.stack.as_deref())
+            {
+                TraceWriter::register_special_event(
+                    &mut *self.writer,
+                    EventLogKind::EvmEvent,
+                    "SELFDESTRUCT",
+                    &content,
+                );
+            }
+
+            // --- Precompile detection (addresses 0x01..=0x09) ---
+            //
+            // CALL / STATICCALL / DELEGATECALL targeting one of the EVM
+            // precompiles doesn't surface as a depth change in
+            // `debug_traceTransaction`'s structlog (the precompile is
+            // executed natively without entering its own EVM frame),
+            // so we tag the *opcode site* itself with a
+            // `EventLogKind::EvmEvent` carrying the canonical
+            // precompile name (e.g. `ecrecover` for 0x01).
+            if let Some((metadata, content)) =
+                build_precompile_event_content(log.op.as_ref(), log.stack.as_deref())
+            {
+                TraceWriter::register_special_event(
+                    &mut *self.writer,
+                    EventLogKind::EvmEvent,
+                    metadata,
                     &content,
                 );
             }
@@ -1251,8 +1283,7 @@ impl EvmRecorder {
                                     if let Some(val) =
                                         tracker.get_variable_value(&var.name, concrete_stack)
                                     {
-                                        let type_kind =
-                                            type_kind_for_solidity_type(&var.type_name);
+                                        let type_kind = type_kind_for_solidity_type(&var.type_name);
                                         let type_id = TraceWriter::ensure_type_id(
                                             &mut *self.writer,
                                             type_kind,
@@ -1390,11 +1421,7 @@ impl EvmRecorder {
                     slot_values_per_frame.push(std::collections::HashMap::new());
                 }
                 storage_states[ss_idx].insert(var_name.clone(), val.clone());
-                TraceWriter::register_variable_with_full_value(
-                    &mut *self.writer,
-                    &var_name,
-                    val,
-                );
+                TraceWriter::register_variable_with_full_value(&mut *self.writer, &var_name, val);
 
                 // --- Compound (Sequence / Struct) snapshot ---
                 if let (Ok(slot_u64), Some(layout)) =
@@ -1442,6 +1469,30 @@ impl EvmRecorder {
                     &mut *self.writer,
                     EventLogKind::EvmEvent,
                     &metadata,
+                    &content,
+                );
+            }
+
+            // SELFDESTRUCT: see equivalent block in `record_from_structlog`.
+            if let Some(content) =
+                build_selfdestruct_event_content(log.op.as_ref(), log.stack.as_deref())
+            {
+                TraceWriter::register_special_event(
+                    &mut *self.writer,
+                    EventLogKind::EvmEvent,
+                    "SELFDESTRUCT",
+                    &content,
+                );
+            }
+
+            // Precompile detection: see equivalent block in `record_from_structlog`.
+            if let Some((metadata, content)) =
+                build_precompile_event_content(log.op.as_ref(), log.stack.as_deref())
+            {
+                TraceWriter::register_special_event(
+                    &mut *self.writer,
+                    EventLogKind::EvmEvent,
+                    metadata,
                     &content,
                 );
             }
@@ -1544,11 +1595,16 @@ fn decode_revert_opcode_payload(
     let offset = stack[stack.len() - 1];
     let size = stack[stack.len() - 2];
 
-    let Some(offset_usize) = u64::try_from(offset).ok().and_then(|x| usize::try_from(x).ok())
+    let Some(offset_usize) = u64::try_from(offset)
+        .ok()
+        .and_then(|x| usize::try_from(x).ok())
     else {
         return Vec::new();
     };
-    let Some(size_usize) = u64::try_from(size).ok().and_then(|x| usize::try_from(x).ok()) else {
+    let Some(size_usize) = u64::try_from(size)
+        .ok()
+        .and_then(|x| usize::try_from(x).ok())
+    else {
         return Vec::new();
     };
     if size_usize == 0 {
@@ -1578,6 +1634,122 @@ fn decode_revert_opcode_payload(
 /// This is the M10 LOG{n} ABI-decoding pin (`IndexedEvents.sol`): the
 /// payload now carries the full ABI shape (indexed topics +
 /// non-indexed data) rather than just the topics list.
+/// Build the tagged content for a `SELFDESTRUCT` opcode.  The EVM
+/// `SELFDESTRUCT` opcode pops a single beneficiary address from the
+/// top of the stack and transfers any remaining balance there before
+/// halting the contract.  We surface it as an
+/// `EventLogKind::EvmEvent` io_event with metadata `"SELFDESTRUCT"`
+/// and content `"0x<20-byte-beneficiary>"` so consumers can tell the
+/// trace ended via SELFDESTRUCT (not via STOP / RETURN / REVERT) and
+/// see *who* received the remaining ETH.
+///
+/// Returns `None` when the opcode isn't `SELFDESTRUCT` or the stack
+/// is empty (defensive).
+fn build_selfdestruct_event_content(
+    op: &str,
+    stack: Option<&[alloy::primitives::U256]>,
+) -> Option<String> {
+    if op != "SELFDESTRUCT" {
+        return None;
+    }
+    let stack = stack?;
+    let beneficiary = stack.last()?;
+    // Format as a 20-byte hex address (lower 160 bits of the
+    // 256-bit stack word — EVM addresses are stored zero-padded).
+    let bytes = beneficiary.to_be_bytes::<32>();
+    let mut content = String::with_capacity(2 + 40);
+    content.push_str("0x");
+    use std::fmt::Write as _;
+    for byte in &bytes[12..] {
+        let _ = write!(content, "{:02x}", byte);
+    }
+    Some(content)
+}
+
+/// Map the canonical EVM precompile address (1..=9) to the precompile's
+/// canonical mnemonic name.  Returns `None` for any other address.
+///
+/// The list mirrors the mainnet-active precompiles as of the Cancun
+/// hard fork:
+///
+///   * 0x01 — `ecrecover`   (ECDSA signature recovery)
+///   * 0x02 — `sha256`      (SHA-2 256-bit hash)
+///   * 0x03 — `ripemd160`   (RIPEMD-160 hash)
+///   * 0x04 — `identity`    (memory copy)
+///   * 0x05 — `modexp`      (modular exponentiation)
+///   * 0x06 — `ecAdd`       (BN254 curve point addition)
+///   * 0x07 — `ecMul`       (BN254 curve point scalar multiplication)
+///   * 0x08 — `ecPairing`   (BN254 pairing check)
+///   * 0x09 — `blake2f`     (BLAKE2b compression function)
+fn precompile_name_for_address(addr_lower160: u64) -> Option<&'static str> {
+    match addr_lower160 {
+        0x01 => Some("ecrecover"),
+        0x02 => Some("sha256"),
+        0x03 => Some("ripemd160"),
+        0x04 => Some("identity"),
+        0x05 => Some("modexp"),
+        0x06 => Some("ecAdd"),
+        0x07 => Some("ecMul"),
+        0x08 => Some("ecPairing"),
+        0x09 => Some("blake2f"),
+        _ => None,
+    }
+}
+
+/// Detect a CALL / STATICCALL / DELEGATECALL targeting one of the EVM
+/// precompiles (addresses 0x01..=0x09) and build a tagged event
+/// payload `"<name>:0x<20-byte-address>"`.  The recorder's normal
+/// depth-change path doesn't surface precompile calls (anvil's
+/// `debug_traceTransaction` doesn't increment depth for them — the
+/// precompile executes natively without entering its own EVM frame),
+/// so without this dedicated detection the trace would be silent
+/// about every `ecrecover` / `sha256` / `keccak256-via-precompile`
+/// invocation.
+///
+/// Returns `None` for non-CALL opcodes or for CALLs whose target is
+/// not a recognised precompile.
+fn build_precompile_event_content(
+    op: &str,
+    stack: Option<&[alloy::primitives::U256]>,
+) -> Option<(&'static str, String)> {
+    let is_call = matches!(op, "CALL" | "CALLCODE" | "DELEGATECALL" | "STATICCALL");
+    if !is_call {
+        return None;
+    }
+    let stack = stack?;
+    if stack.len() < 2 {
+        return None;
+    }
+    // Stack ordering for CALL/CALLCODE: [retLen, retOffset, argsLen,
+    //   argsOffset, value, addr, gas] (top = retLen).
+    // For STATICCALL/DELEGATECALL the `value` slot is missing.
+    // In the structlog `stack` array index, top-of-stack is the LAST
+    // element.  `addr` is at index `len - 2`.
+    let addr_word = stack.get(stack.len() - 2)?;
+    // Check that the upper 192 bits are zero AND the address is in
+    // the precompile range (1..=9 fits in the lower 8 bits).
+    let bytes = addr_word.to_be_bytes::<32>();
+    // The 20-byte address sits in bytes 12..32.  For a precompile
+    // the top 19 bytes must all be zero and the last byte in 1..=9.
+    if bytes[..31].iter().any(|b| *b != 0) {
+        return None;
+    }
+    let last_byte = bytes[31] as u64;
+    let name = precompile_name_for_address(last_byte)?;
+    // Format the content as `<name>:0x<20-byte address>` so the
+    // strict pin can verify both the canonical precompile name AND
+    // the raw address.
+    let mut content = String::with_capacity(name.len() + 1 + 2 + 40);
+    content.push_str(name);
+    content.push(':');
+    content.push_str("0x");
+    use std::fmt::Write as _;
+    for byte in &bytes[12..] {
+        let _ = write!(content, "{:02x}", byte);
+    }
+    Some(("Precompile", content))
+}
+
 fn build_log_event_content(
     op: &str,
     stack: Option<&[alloy::primitives::U256]>,
@@ -1609,8 +1781,12 @@ fn build_log_event_content(
     let mut content = topics.join(", ");
 
     // Append the non-indexed `data` segment when present.
-    let size_usize = u64::try_from(size).ok().and_then(|x| usize::try_from(x).ok());
-    let offset_usize = u64::try_from(offset).ok().and_then(|x| usize::try_from(x).ok());
+    let size_usize = u64::try_from(size)
+        .ok()
+        .and_then(|x| usize::try_from(x).ok());
+    let offset_usize = u64::try_from(offset)
+        .ok()
+        .and_then(|x| usize::try_from(x).ok());
     if let (Some(size), Some(offset)) = (size_usize, offset_usize) {
         if size > 0 {
             let memory_bytes = decode_struct_log_memory(memory);
