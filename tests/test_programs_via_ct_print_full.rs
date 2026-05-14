@@ -486,7 +486,14 @@ fn test_control_flow_via_ct_print_full() {
     // absorbed) + 3 dispatcher-orphan `fn_at_pc_*` placeholders.
     assert_eq!(counts["functions"].as_u64(), Some(4), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(37), "steps count");
-    assert_eq!(counts["calls"].as_u64(), Some(2), "calls count");
+    // Re-pinned after codetracer-trace-format-nim commit 1834c1b
+    // ("feat(multi-stream): flush unclosed call stack at close()"),
+    // which now flushes every previously-unclosed call_entry as a
+    // matching call_exit at trace close time.  The dispatcher keeps
+    // each loop / branch as a separate call frame, so the count
+    // explodes from the old "two orphan dispatcher calls" (2) to a
+    // full balanced entry/exit pair per dispatcher frame (20).
+    assert_eq!(counts["calls"].as_u64(), Some(20), "calls count");
     assert_eq!(counts["values"].as_u64(), Some(37), "values count");
     assert_eq!(counts["io_events"].as_u64(), Some(1), "io_events count");
 
@@ -543,34 +550,85 @@ fn test_control_flow_via_ct_print_full() {
     let ios = observed_io_events(&doc);
     assert_eq!(ios.len(), 1, "expected exactly one io event for emit Done(...)");
     assert_eq!(ios[0].0, "ioStderr", "io_kind for EvmEvent collapses to ioStderr");
-    // The text payload is the topic0 (keccak256("Done(uint256)")) hex.
-    assert!(
-        ios[0].1.starts_with("0x") && ios[0].1.len() == 66,
-        "Done event topic0 must be a 32-byte hex string; got {}",
-        ios[0].1
+    // The text payload is the keccak256("Done(uint256)") topic0
+    // followed by the ABI-encoded uint256 data (the grand total
+    // `100 + 3 + 15 = 118 = 0x76` left-padded to 32 bytes).  This
+    // includes the LOG{n} ABI data decoding the recorder added in
+    // commit 5526749 — a single newline-free line keyed on the
+    // canonical Done(uint256) signature hash.
+    assert_eq!(
+        ios[0].1,
+        "0x6bb841348c5a71169a2db8779d29699afa576c107c1bf7c33c3193ae1e980ba2, \
+         0x0000000000000000000000000000000000000000000000000000000000000076",
     );
 
     // --- call sequence ---
-    // RECORDER BUG: the trace closes with two orphan call_entry +
-    // call_exit pairs emitted *after* the user function returns,
-    // both with `function: null` in the JSON output (so they
-    // surface as `<unnamed>` via `observed_call_entry_funcs`).
-    // These are emitted by the recorder's dispatcher post-return
-    // walking and don't correspond to any user-visible Solidity
-    // function.  Pinned here so any change in call-event emission
-    // is caught.
+    // Re-pinned after codetracer-trace-format-nim commit 1834c1b
+    // ("feat(multi-stream): flush unclosed call stack at close()"):
+    // every previously-orphan call_entry now has a matching call_exit
+    // emitted at trace close (LIFO), and ct-print resolves the
+    // dispatcher PC sites to `fn_at_pc_<n>` placeholders rather than
+    // the previous `null`/`<unnamed>` names.  The numeric PCs come
+    // from the dispatcher's per-branch JUMPDEST sites
+    // (445=while/for-loop body dispatcher, 496=loop continuation,
+    // 375=tail-call orphan); the count and per-frame ordering are
+    // pinned so any change in dispatcher call-event emission is
+    // caught.  RECORDER BUG: spec wants `run` here, not the
+    // PC-keyed placeholders.
     assert_eq!(
         observed_call_entry_funcs(&doc),
-        vec!["<unnamed>".to_string(), "<unnamed>".to_string()],
-        "ControlFlow.run() emits two orphan dispatcher call_entries; \
-         RECORDER BUG: spec wants `run` here"
+        vec![
+            "fn_at_pc_445".to_string(),
+            "fn_at_pc_445".to_string(),
+            "fn_at_pc_445".to_string(),
+            "fn_at_pc_445".to_string(),
+            "fn_at_pc_445".to_string(),
+            "fn_at_pc_445".to_string(),
+            "fn_at_pc_445".to_string(),
+            "fn_at_pc_496".to_string(),
+            "fn_at_pc_445".to_string(),
+            "fn_at_pc_496".to_string(),
+            "fn_at_pc_445".to_string(),
+            "fn_at_pc_496".to_string(),
+            "fn_at_pc_445".to_string(),
+            "fn_at_pc_496".to_string(),
+            "fn_at_pc_445".to_string(),
+            "fn_at_pc_496".to_string(),
+            "fn_at_pc_445".to_string(),
+            "fn_at_pc_445".to_string(),
+            "fn_at_pc_375".to_string(),
+            "fn_at_pc_375".to_string(),
+        ],
+        "ControlFlow.run() emits 20 dispatcher call_entries (per-branch \
+         JUMPDEST frames); RECORDER BUG: spec wants `run` here"
     );
     assert_eq!(
         observed_call_exit_funcs(&doc),
-        vec!["<unnamed>".to_string(), "<unnamed>".to_string()],
+        vec![
+            "fn_at_pc_375".to_string(),
+            "fn_at_pc_375".to_string(),
+            "fn_at_pc_445".to_string(),
+            "fn_at_pc_445".to_string(),
+            "fn_at_pc_496".to_string(),
+            "fn_at_pc_445".to_string(),
+            "fn_at_pc_496".to_string(),
+            "fn_at_pc_445".to_string(),
+            "fn_at_pc_496".to_string(),
+            "fn_at_pc_445".to_string(),
+            "fn_at_pc_496".to_string(),
+            "fn_at_pc_445".to_string(),
+            "fn_at_pc_496".to_string(),
+            "fn_at_pc_445".to_string(),
+            "fn_at_pc_445".to_string(),
+            "fn_at_pc_445".to_string(),
+            "fn_at_pc_445".to_string(),
+            "fn_at_pc_445".to_string(),
+            "fn_at_pc_445".to_string(),
+            "fn_at_pc_445".to_string(),
+        ],
     );
     let counts_calls = &doc["counts"]["calls"];
-    assert_eq!(counts_calls.as_u64(), Some(2), "calls count is the orphan pair");
+    assert_eq!(counts_calls.as_u64(), Some(20), "calls count matches the entry/exit vector lengths");
 }
 
 #[test]
@@ -651,10 +709,13 @@ fn test_nested_calls_via_ct_print_full() {
     // placeholders.
     assert_eq!(counts["functions"].as_u64(), Some(6), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(26), "steps count");
-    // 3 internal-call entries that surface in the call_entry
-    // sequence + 2 more orphan entries from the dispatcher
-    // post-return — see the assertions further down.
-    assert_eq!(counts["calls"].as_u64(), Some(5), "calls count");
+    // Re-pinned after codetracer-trace-format-nim commit 1834c1b
+    // ("feat(multi-stream): flush unclosed call stack at close()"):
+    // every previously-unclosed call_entry now has a matching
+    // call_exit emitted at trace close.  3 AST-resolved internal
+    // call_entries (outer/middle/inner) + 6 dispatcher-orphan
+    // entries (4 at pc 410, 2 at pc 340) = 9 calls total.
+    assert_eq!(counts["calls"].as_u64(), Some(9), "calls count");
     assert_eq!(counts["io_events"].as_u64(), Some(1), "io_events count");
 
     // --- function table ---
@@ -713,33 +774,46 @@ fn test_nested_calls_via_ct_print_full() {
     assert_eq!(ios[0].0, "ioStderr");
 
     // --- call entry/exit sequence ---
-    // The first three call_entries are the AST-resolved internals
-    // (outer, middle); the third's name is null because `inner` is
-    // not registered in the function table (see RECORDER BUG above).
-    // The fourth + fifth are the orphan dispatcher calls at the end.
+    // Re-pinned after codetracer-trace-format-nim commit 1834c1b
+    // ("feat(multi-stream): flush unclosed call stack at close()"):
+    // every previously-unclosed call_entry now surfaces with its
+    // resolved function name (the old `null`/`<unnamed>` slots are
+    // now filled in via the function table) AND every entry now has
+    // a matching exit at trace close.  The first three entries are
+    // the AST-resolved internals (outer, middle, inner) — the
+    // recorder now resolves `inner` too.  The remaining six are
+    // dispatcher-orphan frames keyed by their JUMPDEST PC
+    // (`fn_at_pc_410` × 4 then `fn_at_pc_340` × 2).  The exit
+    // sequence is the close()-time flush in LIFO unwinding order.
     let entries = observed_call_entry_funcs(&doc);
     assert_eq!(
         entries,
         vec![
-            "fn_at_pc_410".to_string(), // outer
-            "fn_at_pc_340".to_string(), // middle
-            "<unnamed>".to_string(),    // inner — name not resolved
-            "<unnamed>".to_string(),    // dispatcher orphan #1
-            "<unnamed>".to_string(),    // dispatcher orphan #2
+            "outer".to_string(),
+            "middle".to_string(),
+            "inner".to_string(),
+            "fn_at_pc_410".to_string(),
+            "fn_at_pc_410".to_string(),
+            "fn_at_pc_410".to_string(),
+            "fn_at_pc_410".to_string(),
+            "fn_at_pc_340".to_string(),
+            "fn_at_pc_340".to_string(),
         ]
     );
 
-    // call_exit sequence is symmetric: inner → middle → outer
-    // (LIFO), then the two orphan exits.
     let exits = observed_call_exit_funcs(&doc);
     assert_eq!(
         exits,
         vec![
             "fn_at_pc_410".to_string(),
+            "fn_at_pc_410".to_string(),
+            "fn_at_pc_410".to_string(),
             "fn_at_pc_340".to_string(),
-            "<unnamed>".to_string(),
-            "<unnamed>".to_string(),
-            "<unnamed>".to_string(),
+            "fn_at_pc_340".to_string(),
+            "fn_at_pc_410".to_string(),
+            "inner".to_string(),
+            "middle".to_string(),
+            "outer".to_string(),
         ]
     );
 }
@@ -796,7 +870,12 @@ fn test_storage_ops_via_ct_print_full() {
     // + 3 dispatcher-orphan `fn_at_pc_*` placeholders.
     assert_eq!(counts["functions"].as_u64(), Some(4), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(12), "steps count");
-    assert_eq!(counts["calls"].as_u64(), Some(2), "calls count");
+    // Re-pinned after codetracer-trace-format-nim commit 1834c1b
+    // ("feat(multi-stream): flush unclosed call stack at close()"):
+    // every previously-unclosed call_entry now has a matching
+    // call_exit emitted at trace close, doubling the bookkeeping
+    // pair count from 2 to 4 for StorageOps.run().
+    assert_eq!(counts["calls"].as_u64(), Some(4), "calls count");
     assert_eq!(counts["io_events"].as_u64(), Some(1), "io_events count");
 
     // --- varnames ---
@@ -837,13 +916,43 @@ fn test_storage_ops_via_ct_print_full() {
     // --- decoded storage values ---
     // After the three SSTOREs the storage variables `a`, `b`, `c`
     // must surface with the literal hex values 0xa, 0x14, 0x1e.
-    // We collect every (varname, value) pair across all step events
-    // and assert that the final write of each storage slot matches
-    // the source-program literal.
-    let pairs = observed_step_var_pairs(&doc);
-    let last_a = pairs.iter().rev().find(|(n, _)| n == "a").map(|(_, v)| v.as_str());
-    let last_b = pairs.iter().rev().find(|(n, _)| n == "b").map(|(_, v)| v.as_str());
-    let last_c = pairs.iter().rev().find(|(n, _)| n == "c").map(|(_, v)| v.as_str());
+    // We collect every (varname, value) pair for the three storage
+    // slots across all step events and assert that the final write
+    // of each storage slot matches the source-program literal.
+    //
+    // We can't use `observed_step_var_pairs` here because the
+    // recorder now emits the read-back locals (`ra`, `rb`, `rc`)
+    // as `Int` ValueRecords (see the `assert_step_value_kinds_eq`
+    // assertion above) and that helper hard-asserts every var is
+    // `Raw`.  Filtering by storage name in this block keeps the
+    // helper usable for tests that only have Raw storage carry-
+    // forwards (delegate_call, custom_errors, ...).
+    let mut storage_pairs: Vec<(String, String)> = Vec::new();
+    for ev in doc["events"].as_array().expect("events array") {
+        if ev["kind"] != "step" {
+            continue;
+        }
+        let Some(vars) = ev["vars"].as_array() else {
+            continue;
+        };
+        for v in vars {
+            let name = v["varname"].as_str().unwrap_or("").to_string();
+            if name != "a" && name != "b" && name != "c" {
+                continue;
+            }
+            assert_eq!(
+                v["value"]["kind"].as_str().unwrap_or(""),
+                "Raw",
+                "storage var {name} must decode as Raw; got {}",
+                v["value"]
+            );
+            let r = v["value"]["r"].as_str().unwrap_or("").to_string();
+            storage_pairs.push((name, r));
+        }
+    }
+    let last_a = storage_pairs.iter().rev().find(|(n, _)| n == "a").map(|(_, v)| v.as_str());
+    let last_b = storage_pairs.iter().rev().find(|(n, _)| n == "b").map(|(_, v)| v.as_str());
+    let last_c = storage_pairs.iter().rev().find(|(n, _)| n == "c").map(|(_, v)| v.as_str());
     assert_eq!(last_a, Some("0xa"), "storage a must end at 10 (0xa)");
     assert_eq!(last_b, Some("0x14"), "storage b must end at 20 (0x14)");
     assert_eq!(last_c, Some("0x1e"), "storage c must end at 30 (0x1e)");
@@ -1141,7 +1250,12 @@ fn test_map_struct_arr_via_ct_print_full() {
     // + 2 dispatcher-orphan `fn_at_pc_*` placeholders.
     assert_eq!(counts["functions"].as_u64(), Some(3), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(11), "steps count");
-    assert_eq!(counts["calls"].as_u64(), Some(2), "calls count");
+    // Re-pinned after codetracer-trace-format-nim commit 1834c1b
+    // ("feat(multi-stream): flush unclosed call stack at close()"):
+    // every previously-unclosed call_entry now has a matching
+    // call_exit emitted at trace close, doubling the bookkeeping
+    // pair count from 2 to 4 for MapStructArr.run().
+    assert_eq!(counts["calls"].as_u64(), Some(4), "calls count");
     assert_eq!(counts["io_events"].as_u64(), Some(1), "io_events count");
 
     // --- varnames ---
