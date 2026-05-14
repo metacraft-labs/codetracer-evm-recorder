@@ -12,10 +12,17 @@
 //!   Solidity 0.8.0.  Payload is a single 32-byte panic code; well-known
 //!   codes are spelled out in the Solidity docs (assert, arithmetic
 //!   overflow, division by zero, ...).
+//! * Solidity 0.8.4+ **custom errors** — `error Foo(t1, t2, ...);`
+//!   declarations compile to a 4-byte selector
+//!   (`keccak256("Foo(t1,t2,...)")[0..4]`) followed by the ABI-encoded
+//!   tuple of arguments.  When the recorder is given the contract
+//!   ABI it builds a [`CustomErrorRegistry`] mapping each known
+//!   selector back to its source-level signature, so reverts surface
+//!   as `Foo(arg1=v1, arg2=v2)` instead of opaque hex.
 //!
-//! Anything else (custom errors, raw `revert(bytes)` payloads, an
-//! empty payload) is surfaced as a hex blob — the recorder still
-//! emits *some* error event so the trace is never silently empty.
+//! Anything else (raw `revert(bytes)` payloads, an empty payload)
+//! is surfaced as a hex blob — the recorder still emits *some*
+//! error event so the trace is never silently empty.
 
 /// Outcome of decoding a revert payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,13 +42,115 @@ pub const ERROR_STRING_SELECTOR: [u8; 4] = [0x08, 0xc3, 0x79, 0xa0];
 /// Selector for `Panic(uint256)` — `keccak256("Panic(uint256)")[0..4]`.
 pub const PANIC_UINT256_SELECTOR: [u8; 4] = [0x4e, 0x48, 0x7b, 0x71];
 
+/// One Solidity custom-error declaration recovered from the contract
+/// ABI.  `name` is the error identifier (e.g. `"InsufficientBalance"`)
+/// and `param_types` is the ordered list of canonical Solidity type
+/// names from the ABI (e.g. `["uint256", "uint256"]`).  Together they
+/// determine the canonical signature `Name(t1,t2,...)` whose
+/// `keccak256[..4]` becomes the on-chain selector.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomErrorDef {
+    pub name: String,
+    pub param_types: Vec<String>,
+    pub param_names: Vec<String>,
+}
+
+impl CustomErrorDef {
+    /// Canonical signature `Name(t1,t2,...)`.
+    pub fn signature(&self) -> String {
+        format!("{}({})", self.name, self.param_types.join(","))
+    }
+}
+
+/// Lookup table mapping the 4-byte selector of a custom error to its
+/// declaration.  Built from the contract ABI by the recorder CLI; an
+/// empty registry preserves the prior `RevertRaw` behaviour for unknown
+/// selectors.
+#[derive(Debug, Default, Clone)]
+pub struct CustomErrorRegistry {
+    by_selector: std::collections::HashMap<[u8; 4], CustomErrorDef>,
+}
+
+impl CustomErrorRegistry {
+    /// Build a registry from the parsed solc combined-json `abi` array.
+    /// Entries whose `type` is not `"error"` are silently skipped, so
+    /// the caller can hand the entire ABI to this builder.
+    pub fn from_abi(abi: &[serde_json::Value]) -> Self {
+        let mut by_selector = std::collections::HashMap::new();
+        for item in abi {
+            let kind = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            if kind != "error" {
+                continue;
+            }
+            let Some(name) = item.get("name").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let inputs: Vec<&serde_json::Value> = item
+                .get("inputs")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().collect())
+                .unwrap_or_default();
+            let param_types: Vec<String> = inputs
+                .iter()
+                .map(|p| p.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string())
+                .collect();
+            let param_names: Vec<String> = inputs
+                .iter()
+                .map(|p| p.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string())
+                .collect();
+            let signature = format!("{}({})", name, param_types.join(","));
+            let selector = keccak_selector(signature.as_bytes());
+            by_selector.insert(
+                selector,
+                CustomErrorDef {
+                    name: name.to_string(),
+                    param_types,
+                    param_names,
+                },
+            );
+        }
+        Self { by_selector }
+    }
+
+    pub fn get(&self, selector: &[u8; 4]) -> Option<&CustomErrorDef> {
+        self.by_selector.get(selector)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_selector.is_empty()
+    }
+}
+
+/// Compute the canonical 4-byte function/error selector for a signature.
+fn keccak_selector(signature: &[u8]) -> [u8; 4] {
+    let hash = alloy::primitives::keccak256(signature);
+    let mut sel = [0u8; 4];
+    sel.copy_from_slice(&hash[..4]);
+    sel
+}
+
 /// Decode the `return_value` of a reverted transaction.
 ///
-/// Always returns `Some(DecodedRevert)` for a reverted call: even an
+/// Always returns `DecodedRevert` for a reverted call: even an
 /// empty payload becomes `RevertEmpty` so the recorder can still emit
 /// an `EventLogKind::Error` io_event.  The caller only needs to gate on
 /// the transaction's `failed` flag.
+///
+/// This convenience wrapper passes an empty [`CustomErrorRegistry`];
+/// callers that have a contract ABI should use
+/// [`decode_revert_with_registry`] to get the typed-custom-error path.
 pub fn decode_revert(output: &[u8]) -> DecodedRevert {
+    decode_revert_with_registry(output, &CustomErrorRegistry::default())
+}
+
+/// Like [`decode_revert`] but consults `registry` to spell out the
+/// human-readable name (and ABI-decoded args) of a custom error
+/// whose selector is recognised.  Falls back to `RevertRaw` for
+/// unknown selectors so the trace is never silently empty.
+pub fn decode_revert_with_registry(
+    output: &[u8],
+    registry: &CustomErrorRegistry,
+) -> DecodedRevert {
     if output.is_empty() {
         return DecodedRevert {
             kind: "RevertEmpty",
@@ -76,17 +185,94 @@ pub fn decode_revert(output: &[u8]) -> DecodedRevert {
                 kind: "Panic",
                 message,
             };
+        } else if let Some(def) = registry.get(&selector) {
+            // Solidity custom error (`error Foo(t1, t2, ...);`).  Decode
+            // each argument out of the ABI-encoded payload and render
+            // `Foo(name1=v1, name2=v2)` so the consumer sees the
+            // typed reason rather than a raw selector.
+            let args = decode_custom_error_args(payload, &def.param_types, &def.param_names);
+            let message = if args.is_empty() {
+                format!("{}()", def.name)
+            } else {
+                format!("{}({})", def.name, args.join(", "))
+            };
+            return DecodedRevert {
+                kind: "CustomError",
+                message,
+            };
         }
     }
 
-    // Custom errors (selector + ABI args) and bare `revert(bytes)`
-    // calls land here — surface the hex dump so the user can still
-    // inspect the payload.  We deliberately do NOT silently drop
-    // unknown payloads; the spec wants every reverted transaction to
-    // emit an Error io_event.
+    // Bare `revert(bytes)` calls and unknown selectors land here —
+    // surface the hex dump so the user can still inspect the payload.
+    // We deliberately do NOT silently drop unknown payloads; the spec
+    // wants every reverted transaction to emit an Error io_event.
     DecodedRevert {
         kind: "RevertRaw",
         message: format!("0x{}", alloy::hex::encode(output)),
+    }
+}
+
+/// Decode the ABI-encoded argument tuple of a custom error.  Renders
+/// each argument as `name=v` (or just `v` when the parameter has no
+/// declared name) using a shape the existing tests can pin on:
+///
+///   * `uint*` / `int*` arguments are rendered as decimal integers.
+///   * `address` arguments are rendered as `0x`-prefixed 20-byte hex.
+///   * `bool` arguments are rendered as `true`/`false`.
+///   * everything else falls back to a 32-byte hex word so the data
+///     is never silently lost.
+///
+/// Dynamic types (`string`, `bytes`, `<type>[]`, ...) are not yet
+/// reconstructed; they would need head/tail offset chasing.  We surface
+/// `<dynamic>` for those slots — the test fixtures in this round only
+/// exercise primitives, and a future extension can teach the decoder
+/// to follow dynamic offsets when needed.
+fn decode_custom_error_args(
+    payload: &[u8],
+    param_types: &[String],
+    param_names: &[String],
+) -> Vec<String> {
+    let mut out = Vec::with_capacity(param_types.len());
+    for (idx, ty) in param_types.iter().enumerate() {
+        let slot_off = idx * 32;
+        if payload.len() < slot_off + 32 {
+            // Truncated payload — leave the rest blank rather than
+            // panic, so the trace still surfaces *something* useful.
+            break;
+        }
+        let word = &payload[slot_off..slot_off + 32];
+        let rendered = render_arg_word(word, ty);
+        let name = param_names.get(idx).map(|s| s.as_str()).unwrap_or("");
+        if name.is_empty() {
+            out.push(rendered);
+        } else {
+            out.push(format!("{}={}", name, rendered));
+        }
+    }
+    out
+}
+
+/// Render one 32-byte ABI word using the canonical Solidity type name.
+fn render_arg_word(word: &[u8], ty: &str) -> String {
+    if ty.starts_with("uint") || ty.starts_with("int") {
+        let value = alloy::primitives::U256::from_be_slice(word);
+        // Render small values in decimal — that's the canonical
+        // human-readable form for revert reasons.
+        format!("{}", value)
+    } else if ty == "address" || ty == "address payable" {
+        // Addresses occupy the trailing 20 bytes.
+        format!("0x{}", alloy::hex::encode(&word[12..]))
+    } else if ty == "bool" {
+        if word.iter().any(|&b| b != 0) {
+            "true".to_string()
+        } else {
+            "false".to_string()
+        }
+    } else if ty == "string" || ty == "bytes" || ty.ends_with(']') {
+        "<dynamic>".to_string()
+    } else {
+        format!("0x{}", alloy::hex::encode(word))
     }
 }
 

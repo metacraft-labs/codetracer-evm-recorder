@@ -164,6 +164,19 @@ struct RecordArgs {
     /// caller, preserving historical behaviour.
     #[arg(long, alias = "caller", value_name = "ADDRESS")]
     from: Option<String>,
+
+    /// Optional `value` (wei) attached to the function-call transaction.
+    ///
+    /// Required for exercising `payable` dispatcher checks.  When the
+    /// value is non-zero AND the target function is `nonpayable`, the
+    /// solc-generated dispatcher inserts a `CALLVALUE != 0 → revert`
+    /// guard BEFORE any user code runs; the recorder must surface
+    /// that revert as a distinct `EventLogKind::Error` io_event.
+    ///
+    /// Defaults to `0` (no ETH attached), preserving historical
+    /// behaviour.  Accepts decimal (e.g. `100`) or `0x`-prefixed hex.
+    #[arg(long, value_name = "WEI", default_value = "0")]
+    value: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -482,10 +495,13 @@ async fn record(args: RecordArgs) -> Result<()> {
     // expectation captured in the
     // `test_require_revert_failing_path_emits_error_event` test.
     // -----------------------------------------------------------------------
+    let call_value = parse_value_wei(&args.value)
+        .with_context(|| format!("--value is not a valid wei amount: {}", args.value))?;
     let call_tx = alloy::rpc::types::TransactionRequest::default()
         .from(call_from)
         .to(contract_address)
         .with_input(alloy::primitives::Bytes::from(call_input))
+        .value(call_value)
         .gas_limit(30_000_000);
 
     let call_pending = provider
@@ -593,7 +609,11 @@ async fn record(args: RecordArgs) -> Result<()> {
     // this contract.
     // -----------------------------------------------------------------------
     if frame.failed || !tx_succeeded {
-        let decoded = revert_decode::decode_revert(&frame.return_value);
+        // Build a custom-error registry from the contract ABI so
+        // typed `revert Foo(arg1, arg2)` payloads surface as
+        // `Foo(name1=val1, name2=val2)` instead of opaque hex.
+        let registry = revert_decode::CustomErrorRegistry::from_abi(&abi);
+        let decoded = revert_decode::decode_revert_with_registry(&frame.return_value, &registry);
         eprintln!(
             "Transaction reverted: {} ({})",
             decoded.message, decoded.kind
@@ -672,6 +692,25 @@ fn build_call_signature_and_args(
         encoded.extend_from_slice(&bytes);
     }
     Ok((signature, encoded))
+}
+
+/// Parse a `--value` argument into a `U256` wei amount.
+///
+/// Accepts decimal (`100`) or `0x`-prefixed hex (`0x64`).  Empty
+/// strings are treated as zero so the CLI default `--value 0`
+/// preserves the historical no-value-attached behaviour.
+fn parse_value_wei(s: &str) -> Result<alloy::primitives::U256> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Ok(alloy::primitives::U256::ZERO);
+    }
+    if let Some(rest) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
+        Ok(alloy::primitives::U256::from_str_radix(rest, 16)
+            .with_context(|| format!("invalid hex value: {s}"))?)
+    } else {
+        Ok(alloy::primitives::U256::from_str_radix(trimmed, 10)
+            .with_context(|| format!("invalid decimal value: {s}"))?)
+    }
 }
 
 /// Encode a default value for the given Solidity ABI type.  Currently
