@@ -7,6 +7,7 @@ use alloy::primitives::Address;
 
 use crate::call_tree::{CallTree, CallType};
 use crate::contract_registry::ContractRegistry;
+use crate::revert_decode;
 use crate::solidity_ast::{FunctionDef, SolidityAst};
 use crate::source_map::{self, JumpType, SourceMap};
 use crate::memory_tracker::MemoryTracker;
@@ -419,7 +420,40 @@ impl EvmRecorder {
                     memory_trackers.push(MemoryTracker::new());
                 }
             } else if log.depth < prev_depth {
-                // Returning from an external call
+                // Returning from an external call.
+                //
+                // If the inner call ended via the REVERT opcode (the
+                // last log at `prev_depth` immediately before this
+                // depth drop), surface the decoded revert payload as
+                // an `EventLogKind::Error` io_event.  This is what
+                // Solidity's `try { ... } catch { ... }` block runs
+                // against — the OUTER tx still succeeds (so
+                // `frame.failed` in `main.rs` doesn't fire), but the
+                // CALLEE reverted and we want consumers to see *why*.
+                //
+                // Note: only the *immediate* inner-frame REVERT is
+                // inspected.  If `depth_diff > 1` (a chain of nested
+                // reverts) only the deepest payload — which is the
+                // one Solidity surfaces in the catch arm — is
+                // emitted; intermediate frames simply propagate.
+                if i > 0 {
+                    if let Some(prev_log) = struct_logs.get(i - 1) {
+                        if prev_log.depth == prev_depth && prev_log.op.as_ref() == "REVERT" {
+                            let payload = decode_revert_opcode_payload(
+                                prev_log.stack.as_deref(),
+                                prev_log.memory.as_ref(),
+                            );
+                            let decoded = revert_decode::decode_revert(&payload);
+                            TraceWriter::register_special_event(
+                                &mut *self.writer,
+                                EventLogKind::Error,
+                                "RevertCaught",
+                                &decoded.message,
+                            );
+                        }
+                    }
+                }
+
                 let depth_diff = prev_depth - log.depth;
                 for _ in 0..depth_diff {
                     let ret_val = ValueRecord::Raw {
@@ -1481,6 +1515,52 @@ fn decode_struct_log_memory(memory: Option<&Vec<String>>) -> Vec<u8> {
         out.extend_from_slice(&buf);
     }
     out
+}
+
+/// Read the revert payload from a `REVERT` structLog entry.
+///
+/// `REVERT` pops two arguments off the stack — `offset` (top) and
+/// `size` (next) — and copies that range out of EVM memory as the
+/// transaction's return data.  We mirror the EVM semantics exactly so
+/// the bytes can be fed back into [`revert_decode::decode_revert`] and
+/// surface the same `Error(string)` / `Panic(uint256)` reason that
+/// Solidity's try/catch sees on the catch arm.
+///
+/// Returns an empty byte vector when the structlog is missing the
+/// stack/memory snapshot or when the requested memory range is not
+/// fully captured (truncated memory) — `decode_revert` handles the
+/// empty case as `RevertEmpty`, which is what tx-level reverts with
+/// no payload also surface as.
+fn decode_revert_opcode_payload(
+    stack: Option<&[alloy::primitives::U256]>,
+    memory: Option<&Vec<String>>,
+) -> Vec<u8> {
+    let Some(stack) = stack else {
+        return Vec::new();
+    };
+    if stack.len() < 2 {
+        return Vec::new();
+    }
+    let offset = stack[stack.len() - 1];
+    let size = stack[stack.len() - 2];
+
+    let Some(offset_usize) = u64::try_from(offset).ok().and_then(|x| usize::try_from(x).ok())
+    else {
+        return Vec::new();
+    };
+    let Some(size_usize) = u64::try_from(size).ok().and_then(|x| usize::try_from(x).ok()) else {
+        return Vec::new();
+    };
+    if size_usize == 0 {
+        return Vec::new();
+    }
+
+    let memory_bytes = decode_struct_log_memory(memory);
+    let end = offset_usize.saturating_add(size_usize);
+    if end > memory_bytes.len() {
+        return Vec::new();
+    }
+    memory_bytes[offset_usize..end].to_vec()
 }
 
 /// Build the EvmEvent content payload for a LOG{n} opcode.

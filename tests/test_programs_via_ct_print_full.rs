@@ -120,14 +120,29 @@ fn test_program(group: &str, file: &str) -> PathBuf {
 /// (the same path users invoke).  The CLI compiles via `solc`, deploys
 /// to a transient anvil node, calls `function_name`, and writes a
 /// `.ct` bundle into `out_dir`.
-fn run_recorder_cli(program: &Path, out_dir: &Path, function_name: &str) {
+///
+/// When `from` is `Some(addr)`, `--from <addr>` is forwarded to the
+/// recorder so the function-call transaction is sent from a specific
+/// anvil pre-funded account; this is what
+/// `test_modifier_failing_path_emits_error_event` uses to drive the
+/// non-owner branch of an `onlyOwner`-guarded entry-point.
+fn run_recorder_cli_with_from(
+    program: &Path,
+    out_dir: &Path,
+    function_name: &str,
+    from: Option<&str>,
+) {
     let bin = env!("CARGO_BIN_EXE_codetracer-evm-recorder");
-    let output = Command::new(bin)
-        .args(["record"])
+    let mut cmd = Command::new(bin);
+    cmd.args(["record"])
         .arg(program)
         .args(["--out-dir"])
         .arg(out_dir)
-        .args(["--function", function_name])
+        .args(["--function", function_name]);
+    if let Some(from_addr) = from {
+        cmd.args(["--from", from_addr]);
+    }
+    let output = cmd
         .env_remove("CODETRACER_EVM_RECORDER_DISABLED")
         .env_remove("CODETRACER_EVM_RECORDER_OUT_DIR")
         .output()
@@ -152,6 +167,19 @@ fn record_and_dump_full(
     file: &str,
     function_name: &str,
 ) -> Option<serde_json::Value> {
+    record_and_dump_full_with_from(test_name, group, file, function_name, None)
+}
+
+/// Like [`record_and_dump_full`] but also forwards `--from <address>`
+/// to the recorder CLI.  See `run_recorder_cli_with_from` for the
+/// motivation.
+fn record_and_dump_full_with_from(
+    test_name: &str,
+    group: &str,
+    file: &str,
+    function_name: &str,
+    from: Option<&str>,
+) -> Option<serde_json::Value> {
     let ct_print = ct_print_or_skip(test_name)?;
 
     let tmp_dir = tempfile::tempdir().expect("tempdir");
@@ -159,7 +187,7 @@ fn record_and_dump_full(
     std::fs::create_dir_all(&out_dir).unwrap();
 
     let source_path = test_program(group, file);
-    run_recorder_cli(&source_path, &out_dir, function_name);
+    run_recorder_cli_with_from(&source_path, &out_dir, function_name, from);
 
     let ct_files = ct_files_in(&out_dir);
     assert!(
@@ -1665,21 +1693,23 @@ fn test_modifier_via_ct_print_full() {
 /// which the recorder must surface as an `EventLogKind::Error`
 /// io_event carrying the `"not owner"` reason string.
 ///
-/// `#[ignore]`d: the recorder CLI deploys + invokes a contract from
-/// a single signer (the deployer is also the caller), so we can't
-/// reach the failing path through `record_and_dump_full` without
-/// extending the CLI to support `--from <address>`.  That CLI
-/// extension gates on the M9-deferred multi-account / failing-call
-/// provider configuration work.
+/// The recorder CLI now accepts `--from <address>`; we route the
+/// `setValue` invocation through anvil's `accounts[1]` (a known
+/// pre-funded address that is *not* the deployer), which trips the
+/// modifier's owner check and produces the expected revert.
 #[test]
-#[ignore = "M9-deferred: recorder CLI deploys + calls from the same signer; \
-            need --from / --caller flag to drive the non-owner failing path"]
 fn test_modifier_failing_path_emits_error_event() {
-    let Some(doc) = record_and_dump_full(
+    // Anvil's deterministic pre-funded `accounts[1]` — different from
+    // the deployer (`accounts[0]`), so the `onlyOwner` modifier rejects
+    // the call with `"not owner"`.
+    const ANVIL_ACCOUNT_1: &str = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
+
+    let Some(doc) = record_and_dump_full_with_from(
         "test_modifier_failing_path_emits_error_event",
         "modifier_test",
         "Modifier.sol",
-        "setValue", // would need a non-owner caller too
+        "setValue",
+        Some(ANVIL_ACCOUNT_1),
     ) else {
         return;
     };
@@ -1732,17 +1762,18 @@ fn test_try_catch_via_ct_print_full() {
 
     let counts = &doc["counts"];
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
-    // Exactly one io_event: the final `emit Outcome(okValue, lastPanic)`.
-    // The fact that this is exactly one (NOT more) is the headline
-    // assertion: an over-eager recorder that surfaced inner reverts
-    // as io_events would inflate this count.  The inner reverts ARE
-    // caught — there should be NO ioError event for `failStr` /
-    // `failPanic`.
+    // Three io_events: the final `emit Outcome(okValue, lastPanic)`
+    // plus two `ioError` events for the caught inner-CALL reverts
+    // (`failStr` → `Error("boom")` and `failPanic` → `Panic(0x12)`).
+    // The catch-and-surface behaviour is pinned by the
+    // `_catches_emit_error_events` sibling — this happy-path test
+    // mirrors the same total count so an over-eager OR an
+    // under-emitting walker both surface as a hard failure here.
     assert_eq!(
         counts["io_events"].as_u64(),
-        Some(1),
-        "expected exactly one io_event — the final emit Outcome(...); \
-         caught inner reverts must NOT surface as ioError"
+        Some(3),
+        "expected three io_events — the final emit Outcome(...) \
+         and one ioError per caught inner-CALL revert (failStr / failPanic)"
     );
 
     // --- function table includes `run` ---
@@ -1804,19 +1835,29 @@ fn test_try_catch_via_ct_print_full() {
          indicates the recorder leaked a caught-revert frame"
     );
 
-    // --- io: the Outcome(...) event surfaces as one EvmEvent ---
+    // --- io: the Outcome(...) EvmEvent + 2 caught-revert ioError events ---
     let ios = observed_io_events(&doc);
-    assert_eq!(ios.len(), 1, "expected one Outcome(uint256,uint256) event");
-    assert_eq!(ios[0].0, "ioStderr");
+    assert_eq!(
+        ios.len(),
+        3,
+        "expected three io_events: one Outcome(uint256,uint256) and two ioError"
+    );
+    let stderr_events: Vec<&(String, String)> =
+        ios.iter().filter(|(k, _)| k == "ioStderr").collect();
+    assert_eq!(
+        stderr_events.len(),
+        1,
+        "exactly one ioStderr (the Outcome emit); got {ios:?}"
+    );
     // Outcome carries non-indexed data only: okValue=1, lastPanic=0x12.
     // The serialised LOG1 payload is topic0 + 64-byte data
     // (32 bytes per uint256 arg).
     assert!(
-        ios[0]
+        stderr_events[0]
             .1
             .contains("0x00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000012"),
         "Outcome(okValue=1, lastPanic=0x12) must encode both args in the data segment; got {}",
-        ios[0].1
+        stderr_events[0].1
     );
 }
 
@@ -1827,16 +1868,12 @@ fn test_try_catch_via_ct_print_full() {
 /// revert should surface as a separate `ioError` io_event so
 /// consumers can see *why* the inner CALL failed.
 ///
-/// `#[ignore]`d: the recorder currently treats inner CALL reverts
-/// as opaque returns (the structlog walker doesn't recognise the
-/// `REVERT → CALL-side error-handler → JUMPDEST` pattern that
-/// Solidity's try/catch generates).  Surfacing them as ioError
-/// events is the structural follow-up to the M9-deferred top-level
-/// revert capture.
+/// The recorder now detects inner-CALL REVERTs in the structlog
+/// walker (when execution depth drops while the previous opcode at
+/// the inner depth was `REVERT`) and emits an `EventLogKind::Error`
+/// io_event with the decoded payload, so the captured reason
+/// surfaces alongside the OUTER tx's normal completion.
 #[test]
-#[ignore = "M10 follow-up: inner CALL reverts under try/catch are \
-            not yet surfaced as ioError; recorder needs to recognise \
-            the Solidity-generated CALL-side error-handler pattern"]
 fn test_try_catch_catches_emit_error_events() {
     let Some(doc) = record_and_dump_full(
         "test_try_catch_catches_emit_error_events",

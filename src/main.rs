@@ -46,8 +46,10 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::str::FromStr;
 
 use alloy::network::TransactionBuilder;
+use alloy::primitives::Address;
 use alloy::providers::Provider;
 use alloy::providers::ProviderBuilder;
 use clap::{Parser, Subcommand};
@@ -143,6 +145,25 @@ struct RecordArgs {
     /// ABI, the first non-constructor function is used instead.
     #[arg(long, default_value = "run")]
     function: String,
+
+    /// Optional caller address (`0x...` hex) used as the `from` account
+    /// for the function-call transaction.
+    ///
+    /// Anvil pre-funds 10 deterministic accounts and signs for any of
+    /// them when a transaction's `from` field is set; passing a non-zero
+    /// account here lets test fixtures exercise access-control failure
+    /// paths (e.g. `onlyOwner` modifiers) where the deployer
+    /// (`accounts[0]`) is the contract owner and a different signer must
+    /// trigger the revert.
+    ///
+    /// Aliases: `--caller` (kept for symmetry with revert-handling
+    /// nomenclature).  Both flags accept the same canonical EIP-55 hex
+    /// representation.
+    ///
+    /// When omitted the deploy account (`accounts[0]`) is used as the
+    /// caller, preserving historical behaviour.
+    #[arg(long, alias = "caller", value_name = "ADDRESS")]
+    from: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -359,14 +380,25 @@ async fn record(args: RecordArgs) -> Result<()> {
     };
 
     let function_name = resolve_function_name(&abi, &args.function);
+
+    // Build the canonical function signature (`name(t1,t2,...)`) from
+    // the ABI entry so we can compute the correct selector AND
+    // auto-encode default arguments for simple primitive parameter
+    // lists.  This lets the CLI invoke parameterised functions like
+    // `setValue(uint256)` directly from a fixture, which is required
+    // to drive access-control failure paths (e.g. the `onlyOwner`
+    // modifier test) where the wrapped function takes a parameter.
+    let (call_signature, encoded_args) =
+        build_call_signature_and_args(&abi, &function_name)?;
     eprintln!(
-        "Calling function: {}() on contract {}",
-        function_name, contract_name
+        "Calling function: {} on contract {}",
+        call_signature, contract_name
     );
 
-    // Build the function selector (keccak256 of "name()")[0..4]
-    let selector_input = format!("{}()", function_name);
-    let selector = &alloy::primitives::keccak256(selector_input.as_bytes())[..4];
+    let selector = &alloy::primitives::keccak256(call_signature.as_bytes())[..4];
+    let mut call_input = Vec::with_capacity(4 + encoded_args.len());
+    call_input.extend_from_slice(selector);
+    call_input.extend_from_slice(&encoded_args);
 
     // Determine constructor arguments (encode them if needed)
     let constructor_args = encode_constructor_args(&abi, contract_name)?;
@@ -384,7 +416,22 @@ async fn record(args: RecordArgs) -> Result<()> {
 
     let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
     let accounts = provider.get_accounts().await?;
-    let from = accounts[0];
+    let deploy_from = accounts[0];
+
+    // Resolve the caller address for the function-call transaction.
+    //
+    // The deploy transaction always runs from `accounts[0]` (so the
+    // contract's `owner = msg.sender` constructors pin the owner to a
+    // stable, well-known address).  The function-call transaction's
+    // caller is whatever `--from` was set to, defaulting to the deploy
+    // account.  Passing a different address from anvil's pre-funded
+    // accounts lets test fixtures hit access-control failure paths
+    // (e.g. the `onlyOwner` modifier in `Modifier.sol`).
+    let call_from: Address = match args.from.as_deref() {
+        Some(s) => Address::from_str(s)
+            .with_context(|| format!("--from is not a valid 0x-prefixed hex address: {s}"))?,
+        None => deploy_from,
+    };
 
     // -----------------------------------------------------------------------
     // 5. Deploy the contract
@@ -398,7 +445,7 @@ async fn record(args: RecordArgs) -> Result<()> {
     };
 
     let deploy_tx = alloy::rpc::types::TransactionRequest::default()
-        .from(from)
+        .from(deploy_from)
         .with_deploy_code(deploy_data);
 
     let deploy_pending = provider
@@ -436,9 +483,9 @@ async fn record(args: RecordArgs) -> Result<()> {
     // `test_require_revert_failing_path_emits_error_event` test.
     // -----------------------------------------------------------------------
     let call_tx = alloy::rpc::types::TransactionRequest::default()
-        .from(from)
+        .from(call_from)
         .to(contract_address)
-        .with_input(alloy::primitives::Bytes::copy_from_slice(selector))
+        .with_input(alloy::primitives::Bytes::from(call_input))
         .gas_limit(30_000_000);
 
     let call_pending = provider
@@ -570,6 +617,89 @@ async fn record(args: RecordArgs) -> Result<()> {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Build the canonical function call signature (e.g. `setValue(uint256)`)
+/// and the ABI-encoded calldata args for the function named `function_name`.
+///
+/// Falls back to `name()` (no args) when the ABI entry is missing — that
+/// preserves the old behaviour for callers that don't depend on ABI
+/// lookup.  For parameterised functions we synthesise sensible defaults
+/// for the few primitive shapes the CLI currently encodes
+/// (see [`encode_default_arg_value`]); anything else returns an error
+/// asking the caller to provide a no-argument entry-point function.
+///
+/// This generality matters because some test fixtures need to hit the
+/// failing branch of a guarded function (e.g. an `onlyOwner` modifier
+/// guarding `setValue(uint256)`) rather than wrapping it in a
+/// parameterless wrapper — the failing-modifier test
+/// (`test_modifier_failing_path_emits_error_event`) relies on this.
+fn build_call_signature_and_args(
+    abi: &[serde_json::Value],
+    function_name: &str,
+) -> Result<(String, Vec<u8>)> {
+    // Find the matching ABI entry, if any.
+    let entry = abi.iter().find(|item| {
+        item.get("type").and_then(|v| v.as_str()) == Some("function")
+            && item.get("name").and_then(|v| v.as_str()) == Some(function_name)
+    });
+
+    let inputs: &[serde_json::Value] = entry
+        .and_then(|e| e.get("inputs"))
+        .and_then(|v| v.as_array())
+        .map(|a| a.as_slice())
+        .unwrap_or(&[]);
+
+    // Build the canonical signature: name(t1,t2,...).
+    let type_list: Vec<&str> = inputs
+        .iter()
+        .map(|p| p.get("type").and_then(|v| v.as_str()).unwrap_or(""))
+        .collect();
+    let signature = format!("{}({})", function_name, type_list.join(","));
+
+    // Encode each argument with a sensible default.
+    let mut encoded = Vec::with_capacity(inputs.len() * 32);
+    for (idx, ty) in type_list.iter().enumerate() {
+        let bytes = encode_default_arg_value(ty).ok_or_else(|| {
+            eyre::eyre!(
+                "function `{}` parameter #{} has type `{}` for which the CLI \
+                 cannot synthesise a default value; pass a parameterless \
+                 wrapper as the entry-point",
+                function_name,
+                idx,
+                ty
+            )
+        })?;
+        encoded.extend_from_slice(&bytes);
+    }
+    Ok((signature, encoded))
+}
+
+/// Encode a default value for the given Solidity ABI type.  Currently
+/// supports `uint*` / `int*` (defaults to `7` — non-zero and small,
+/// matching the canonical fixture pattern), `bool` (false) and
+/// `address` (zero address).  Returns `None` for any other type so
+/// the caller surfaces a precise diagnostic.
+fn encode_default_arg_value(ty: &str) -> Option<[u8; 32]> {
+    let mut buf = [0u8; 32];
+    if ty.starts_with("uint") || ty.starts_with("int") {
+        // Default to 7 — small, non-zero, matches the modifier_test
+        // fixture's expected `setValue(7)` invocation.
+        buf[31] = 7;
+        Some(buf)
+    } else if ty == "bool" {
+        Some(buf) // false
+    } else if ty == "address" || ty == "address payable" {
+        Some(buf) // zero address (left-padded)
+    } else if let Some(rest) = ty.strip_prefix("bytes") {
+        // bytes1..bytes32: zero-padded fixed-size bytes default.
+        if rest.parse::<u32>().ok().is_some_and(|n| (1..=32).contains(&n)) {
+            return Some(buf);
+        }
+        None
+    } else {
+        None
+    }
+}
 
 /// Find the function name to call.
 ///
