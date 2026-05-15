@@ -39,8 +39,12 @@ eyre = "0.6"
 # CLI argument parsing
 clap = { version = "4", features = ["derive"] }
 
-[dev-dependencies]
+# Tempdir used by the Sourcify recompile path to materialise verified
+# source files before invoking solc.  Also used in tests, kept as a
+# normal dependency so it's available to the lib at runtime.
 tempfile = "3"
+
+[dev-dependencies]
 # CTFS trace reader used by smoke tests to verify the events emitted by
 # the recorder land in the .ct container correctly (CTFS audit, see
 # AUDIT-CTFS-2026-05.md).
