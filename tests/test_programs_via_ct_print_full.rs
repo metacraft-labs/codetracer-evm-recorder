@@ -5268,3 +5268,264 @@ fn test_amm_pattern_via_ct_print_full() {
          result amountIn=100 -> amountOut = 1000 - (1000*1000/1100) = 91"
     );
 }
+
+// ===========================================================================
+// lending_pattern/Lending.sol  (M10 final fixture -- minimal Compound-
+// style lending: deposit -> borrow -> repay -> withdraw lifecycle)
+// ===========================================================================
+
+/// Records `Lending.sol::run()` -- the canonical deposit/borrow/repay/
+/// withdraw lifecycle on a single underlying.  Each operation surfaces
+/// with the user's balance update emitted as a typed LOG event so the
+/// strict pin can assert per-operation accounting:
+///
+///   1. deposit(1000) -> deposits[this] = 1000
+///   2. borrow(400)   -> borrows[this]  = 400
+///   3. repay(150)    -> borrows[this]  = 250
+///   4. withdraw(300) -> deposits[this] = 700
+///
+/// `run()` returns deposits - borrows = 700 - 250 = 450 = 0x1c2.
+#[test]
+fn test_lending_pattern_via_ct_print_full() {
+    let Some(doc) = record_and_dump_full(
+        "test_lending_pattern_via_ct_print_full",
+        "lending_pattern",
+        "Lending.sol",
+        "run",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_is_source_path(&doc, "lending_pattern", "Lending.sol");
+    assert_paths_ends_with_source(&doc, "Lending.sol");
+
+    // --- counts ---
+    let counts = &doc["counts"];
+    assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
+    // 9 = `run` + 4 AST-resolved internal helpers (`_deposit`,
+    // `_borrow`, `_repay`, `_withdraw`) + 4 dispatcher-orphan
+    // `fn_at_pc_*` placeholders for the public `deposit`/`borrow`/
+    // `repay`/`withdraw` wrappers (and shared mapping-slot helpers).
+    assert_eq!(counts["functions"].as_u64(), Some(9), "functions count");
+    assert_eq!(counts["steps"].as_u64(), Some(37), "steps count");
+    // 14 = 4 AST-resolved internal call_entries (one per helper) +
+    // 10 dispatcher-orphan call_entries threaded through the
+    // `mapping(address => uint256)` slot-derivation helpers.  Each
+    // entry has a matching close()-time exit (codetracer-trace-format-nim
+    // commit 1834c1b).
+    assert_eq!(counts["calls"].as_u64(), Some(14), "calls count");
+    // 4 = one LOG3 per lifecycle step (Deposit, Borrow, Repay, Withdraw).
+    assert_eq!(counts["io_events"].as_u64(), Some(4), "io_events count");
+
+    // --- function table ---
+    // `run` lands first (eagerly registered for the absorbed
+    // entry-point JUMP).  The four AST-resolved internals follow in
+    // call order; the four `fn_at_pc_*` entries are dispatcher-orphan
+    // placeholders for the public wrappers + shared mapping-slot
+    // helpers (the recorder doesn't yet AST-resolve those today).
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        functions,
+        vec![
+            "run",
+            "_deposit",
+            "fn_at_pc_2070",
+            "fn_at_pc_2031",
+            "_borrow",
+            "_repay",
+            "fn_at_pc_1980",
+            "_withdraw",
+            "fn_at_pc_1777"
+        ],
+        "function table -- entry-point + four AST-resolved lifecycle \
+         helpers + four dispatcher-orphan placeholders"
+    );
+
+    // --- varnames ---
+    // `amount` + `newBalance` are the two locals shared by every
+    // helper (`amount` is the parameter, `newBalance` is the post-
+    // operation balance).  The two `storage[<u256>]` entries are
+    // the mapping-slot derivations for `deposits[address(this)]` and
+    // `borrows[address(this)]` (slot 0/1 base + the address keccak).
+    let varnames: Vec<&str> = doc["varnames"]
+        .as_array()
+        .expect("varnames array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        varnames,
+        vec![
+            "amount",
+            "newBalance",
+            "storage[101082782226634253326558050151019138847919920199931930590810088513543437875022]",
+            "storage[37257358386699122526634812424273981670640964897237048413606565396481132553310]"
+        ],
+        "varnames -- two locals shared by every helper + two derived \
+         mapping slots (deposits[this] and borrows[this])"
+    );
+
+    // --- exact step-line sequence ---
+    // The lifecycle: run() drives _deposit -> _borrow -> _repay ->
+    // _withdraw, then computes the return value `deposits - borrows`.
+    let lines = observed_step_lines(&doc);
+    assert_eq!(
+        lines,
+        vec![
+            1,  // dispatcher entry
+            29, // contract Lending {
+            38, // function run() {
+            39, //   _deposit(1000);
+            46, // function _deposit(uint256 amount) header
+            47, //   uint256 newBalance = deposits[address(this)] + amount;
+            48, //   deposits[address(this)] = newBalance;
+            49, //   emit Deposit(address(this), amount, newBalance);
+            50, //   return newBalance;
+            46, // _deposit return-site
+            39, //   _deposit return-site in run
+            40, //   _borrow(400);
+            53, // function _borrow header
+            54, //   uint256 newBalance = borrows[address(this)] + amount;
+            55, //   borrows[address(this)] = newBalance;
+            56, //   emit Borrow(address(this), amount, newBalance);
+            57, //   return newBalance;
+            53, // _borrow return-site
+            40, //   _borrow return-site in run
+            41, //   _repay(150);
+            60, // function _repay header
+            61, //   uint256 newBalance = borrows[address(this)] - amount;
+            62, //   borrows[address(this)] = newBalance;
+            63, //   emit Repay(address(this), amount, newBalance);
+            64, //   return newBalance;
+            60, // _repay return-site
+            41, //   _repay return-site in run
+            42, //   _withdraw(300);
+            67, // function _withdraw header
+            68, //   uint256 newBalance = deposits[address(this)] - amount;
+            69, //   deposits[address(this)] = newBalance;
+            70, //   emit Withdraw(address(this), amount, newBalance);
+            71, //   return newBalance;
+            67, // _withdraw return-site
+            42, //   _withdraw return-site in run
+            43, //   return deposits - borrows
+            38, //   run() return-site
+        ],
+        "step-line sequence pins run -> _deposit -> _borrow -> _repay \
+         -> _withdraw lifecycle and final return"
+    );
+
+    // --- call entry sequence ---
+    // The four AST-resolved internals interleave with two
+    // dispatcher-orphan helper frames per call (the
+    // mapping-slot keccak helpers).  `_repay` and `_withdraw` reuse
+    // the already-registered `fn_at_pc_1980` placeholder.
+    let entries = observed_call_entry_funcs(&doc);
+    assert_eq!(
+        entries,
+        vec![
+            "_deposit".to_string(),
+            "fn_at_pc_2070".to_string(),
+            "fn_at_pc_2031".to_string(),
+            "_borrow".to_string(),
+            "fn_at_pc_2070".to_string(),
+            "fn_at_pc_2031".to_string(),
+            "_repay".to_string(),
+            "fn_at_pc_1980".to_string(),
+            "fn_at_pc_2031".to_string(),
+            "_withdraw".to_string(),
+            "fn_at_pc_1980".to_string(),
+            "fn_at_pc_2031".to_string(),
+            "fn_at_pc_1980".to_string(),
+            "fn_at_pc_1777".to_string(),
+        ],
+        "call_entry sequence pins the four lifecycle helpers \
+         interleaved with the dispatcher-orphan mapping-slot frames"
+    );
+
+    // --- call exit sequence (close()-time LIFO flush) ---
+    let exits = observed_call_exit_funcs(&doc);
+    assert_eq!(
+        exits,
+        vec![
+            "fn_at_pc_2031".to_string(),
+            "fn_at_pc_2031".to_string(),
+            "fn_at_pc_2031".to_string(),
+            "fn_at_pc_2031".to_string(),
+            "fn_at_pc_1980".to_string(),
+            "fn_at_pc_1777".to_string(),
+            "fn_at_pc_1980".to_string(),
+            "_withdraw".to_string(),
+            "fn_at_pc_1980".to_string(),
+            "_repay".to_string(),
+            "fn_at_pc_2070".to_string(),
+            "_borrow".to_string(),
+            "fn_at_pc_2070".to_string(),
+            "_deposit".to_string(),
+        ],
+        "call_exit sequence pins the close()-time LIFO unwind"
+    );
+
+    // --- io: four LOG3 events, one per lifecycle step ---
+    // Each event is `<topic0>, <topic1=user>, <data: amount || newBalance>`.
+    // The user is the deterministic anvil-deployed contract address
+    // `0x5fbdb2315678afecb367f032d93f642f64180aa3` (first CREATE on a
+    // fresh anvil node from the default deployer).
+    //
+    // topic0 hashes:
+    //   keccak256("Deposit(address,uint256,uint256)")  =
+    //     0x90890809c654f11d6e72a28fa60149770a0d11ec6c92319d6ceb2bb0a4ea1a15
+    //   keccak256("Borrow(address,uint256,uint256)")   =
+    //     0xe1979fe4c35e0cef342fef5668e2c8e7a7e9f5d5d1ca8fee0ac6c427fa4153af
+    //   keccak256("Repay(address,uint256,uint256)")    =
+    //     0x77c6871227e5d2dec8dadd5354f78453203e22e669cd0ec4c19d9a8c5edb31d0
+    //   keccak256("Withdraw(address,uint256,uint256)") =
+    //     0xf279e6a1f5e320cca91135676d9cb6e44ca8a08c0b88342bcdb1144f6511b568
+    let ios = observed_io_events(&doc);
+    assert_eq!(ios.len(), 4, "expected one event per lifecycle step");
+    for (kind, _) in &ios {
+        assert_eq!(kind, "ioStderr", "EvmEvents collapse to ioStderr");
+    }
+
+    // io[0] = Deposit(this, 1000, 1000) -- amount=0x3e8, newBalance=0x3e8
+    assert_eq!(
+        ios[0].1,
+        "0x90890809c654f11d6e72a28fa60149770a0d11ec6c92319d6ceb2bb0a4ea1a15, \
+         0x5fbdb2315678afecb367f032d93f642f64180aa3, \
+         0x00000000000000000000000000000000000000000000000000000000000003e800000000000000000000000000000000000000000000000000000000000003e8",
+        "Deposit(this, 1000, 1000) must encode amount=0x3e8 and post-op balance=0x3e8"
+    );
+
+    // io[1] = Borrow(this, 400, 400) -- amount=0x190, newBalance=0x190
+    assert_eq!(
+        ios[1].1,
+        "0xe1979fe4c35e0cef342fef5668e2c8e7a7e9f5d5d1ca8fee0ac6c427fa4153af, \
+         0x5fbdb2315678afecb367f032d93f642f64180aa3, \
+         0x00000000000000000000000000000000000000000000000000000000000001900000000000000000000000000000000000000000000000000000000000000190",
+        "Borrow(this, 400, 400) must encode amount=0x190 and post-op balance=0x190"
+    );
+
+    // io[2] = Repay(this, 150, 250) -- amount=0x96, newBalance=0xfa
+    assert_eq!(
+        ios[2].1,
+        "0x77c6871227e5d2dec8dadd5354f78453203e22e669cd0ec4c19d9a8c5edb31d0, \
+         0x5fbdb2315678afecb367f032d93f642f64180aa3, \
+         0x000000000000000000000000000000000000000000000000000000000000009600000000000000000000000000000000000000000000000000000000000000fa",
+        "Repay(this, 150, 250) must encode amount=0x96 (150) and \
+         post-op borrows balance = 400 - 150 = 250 = 0xfa"
+    );
+
+    // io[3] = Withdraw(this, 300, 700) -- amount=0x12c, newBalance=0x2bc
+    assert_eq!(
+        ios[3].1,
+        "0xf279e6a1f5e320cca91135676d9cb6e44ca8a08c0b88342bcdb1144f6511b568, \
+         0x5fbdb2315678afecb367f032d93f642f64180aa3, \
+         0x000000000000000000000000000000000000000000000000000000000000012c00000000000000000000000000000000000000000000000000000000000002bc",
+        "Withdraw(this, 300, 700) must encode amount=0x12c (300) and \
+         post-op deposits balance = 1000 - 300 = 700 = 0x2bc"
+    );
+}
