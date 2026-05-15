@@ -28,6 +28,11 @@ serde_json = "1"
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
+# HTTP client (used by source_fetcher.rs to query the Sourcify verified-
+# contract API).  Pinned to default-features=false + rustls-tls to avoid
+# pulling in OpenSSL on top of the rustls stack alloy already brings in.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
 # Error handling
 eyre = "0.6"
 
