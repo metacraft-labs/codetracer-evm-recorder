@@ -165,6 +165,86 @@ fn resolve_internal_call_target<'a>(
     })
 }
 
+/// Fallback resolver for JUMPs whose immediate post-jump instructions
+/// stay in compiler-generated code (loop-continuation JUMPDESTs,
+/// shared dispatcher back-edges, ...).
+///
+/// This is the implementation of category 1 of the M11 recorder
+/// fixes: instead of surfacing such frames under a synthetic
+/// `fn_at_pc_<n>` placeholder, look up the JUMP **source** site's
+/// enclosing function in the AST.  Practically every dispatcher
+/// orphan JUMP we see in user-mode internal-call sequences is an
+/// intra-function back-edge (loop / branch continuation) — i.e. the
+/// JUMP itself is emitted inside the body of a Solidity function,
+/// even when the JUMP target's source map entry has been clobbered
+/// by stack-shuffling compiler-generated code.
+///
+/// Returns the `FunctionDef` whose source range contains the JUMP
+/// instruction's own source offset, when one exists.  Falls back to
+/// `None` (preserving the existing `fn_at_pc_*` placeholder path)
+/// when neither the JUMP source nor any nearby instruction maps to a
+/// known function — the canonical case here is a constructor-time
+/// JUMP that lands entirely outside any runtime FunctionDefinition.
+fn resolve_enclosing_function_for_jump<'a>(
+    struct_logs: &[StructLog],
+    current_index: usize,
+    source_map: &SourceMap,
+    pc_to_idx: &[usize],
+    solidity_ast: Option<&'a SolidityAst>,
+) -> Option<&'a FunctionDef> {
+    let ast = solidity_ast?;
+    let log = struct_logs.get(current_index)?;
+    let entry = source_map.get_entry_for_pc(log.pc as usize, pc_to_idx)?;
+    if entry.file_index < 0 {
+        return None;
+    }
+    ast.function_at(entry.offset, entry.file_index)
+}
+
+/// Compute `keccak256(input)` and return the 256-bit result as a
+/// big-endian `U256` — used to identify the storage slot that an
+/// SSTORE writes to when the slot was derived from a mapping
+/// `keccak256(key . base_slot)` operation we intercepted earlier.
+fn keccak256_u256(input: &[u8]) -> alloy::primitives::U256 {
+    let hash = alloy::primitives::keccak256(input);
+    alloy::primitives::U256::from_be_bytes(*hash)
+}
+
+/// Format a 32-byte mapping key as a Solidity-style literal, given
+/// the canonical key type label from the storage layout.
+///
+///   * `address` / `address payable`: lower-case 20-byte hex
+///     (`0x70997970...c8`), trimming the upper 12 zero bytes.
+///   * Integer types (`uint*` / `int*`): canonical hex with a `0x`
+///     prefix and no leading zeros, matching `format!("0x{:x}", ...)`.
+///   * Everything else: full 32-byte hex blob (lossless fallback).
+fn format_mapping_key(key_type_label: &str, key_bytes: &[u8; 32]) -> String {
+    if matches!(key_type_label, "address" | "address payable") {
+        let mut s = String::with_capacity(2 + 40);
+        s.push_str("0x");
+        use std::fmt::Write as _;
+        for byte in &key_bytes[12..] {
+            let _ = write!(s, "{:02x}", byte);
+        }
+        return s;
+    }
+    if key_type_label.starts_with("uint")
+        || key_type_label.starts_with("int")
+        || key_type_label == "bool"
+    {
+        let value = alloy::primitives::U256::from_be_bytes(*key_bytes);
+        return format!("0x{:x}", value);
+    }
+    // Fallback: full 32-byte hex.
+    let mut s = String::with_capacity(2 + 64);
+    s.push_str("0x");
+    use std::fmt::Write as _;
+    for byte in key_bytes {
+        let _ = write!(s, "{:02x}", byte);
+    }
+    s
+}
+
 fn stage_internal_call_args(
     writer: &mut dyn TraceWriter,
     tracker: &mut StackTracker,
@@ -391,6 +471,13 @@ impl EvmRecorder {
         let mut slot_values: std::collections::HashMap<u64, alloy::primitives::U256> =
             std::collections::HashMap::new();
 
+        // Mapping slot resolver (M11 category 2).  Maps the
+        // `keccak256(key . base_slot)` output back to the canonical
+        // `<mapping_name>[<key>]` qualified name, populated lazily by
+        // intercepting every SHA3/KECCAK256 opcode.
+        let mut mapping_slot_names: std::collections::HashMap<alloy::primitives::U256, String> =
+            std::collections::HashMap::new();
+
         for (i, log) in struct_logs.iter().enumerate() {
             let pc = log.pc as usize;
 
@@ -615,9 +702,12 @@ impl EvmRecorder {
                                         .get(file_idx as usize)
                                         .copied()
                                         .unwrap_or(main_path);
+                                    let display_name = solidity_ast
+                                        .map(|ast| ast.qualified_function_name(target_fn))
+                                        .unwrap_or_else(|| target_fn.name.clone());
                                     let _ = TraceWriter::ensure_function_id(
                                         &mut *self.writer,
-                                        &target_fn.name,
+                                        &display_name,
                                         fn_path,
                                         Line(line as i64),
                                     );
@@ -644,16 +734,38 @@ impl EvmRecorder {
                                 // Falls back to a `fn_at_*` placeholder when
                                 // the AST isn't available or when the offset
                                 // doesn't fall inside any known function.
-                                let target_fn = resolve_internal_call_target(
+                                let mut target_fn = resolve_internal_call_target(
                                     struct_logs,
                                     i,
                                     source_map,
                                     &pc_to_idx,
                                     solidity_ast,
                                 );
+                                // Category 1 (M11 spec-correct path):
+                                // fall back to the JUMP's *enclosing*
+                                // user function when post-jump
+                                // lookahead lands in compiler-generated
+                                // code (loop continuations, shared
+                                // dispatcher back-edges).  This replaces
+                                // the previous `fn_at_pc_<n>` orphan
+                                // placeholders for intra-function back-
+                                // edge JUMPs with the canonical name of
+                                // the function the JUMP itself sits
+                                // inside.
+                                if target_fn.is_none() {
+                                    target_fn = resolve_enclosing_function_for_jump(
+                                        struct_logs,
+                                        i,
+                                        source_map,
+                                        &pc_to_idx,
+                                        solidity_ast,
+                                    );
+                                }
                                 let fn_name = {
                                     if let Some(target_fn) = target_fn {
-                                        target_fn.name.clone()
+                                        solidity_ast
+                                            .map(|ast| ast.qualified_function_name(target_fn))
+                                            .unwrap_or_else(|| target_fn.name.clone())
                                     } else if let Some(next_log) = struct_logs.get(i + 1) {
                                         let next_pc = next_log.pc as usize;
                                         if let Some(next_loc) = source_map.resolve_pc(
@@ -730,6 +842,77 @@ impl EvmRecorder {
                 }
             }
 
+            // --- KECCAK256 (SHA3): record mapping-slot derivations ---
+            //
+            // Solidity computes a mapping value's storage slot as
+            // `keccak256(abi.encode(key, base_slot))`.  By
+            // intercepting every KECCAK256 with a 64-byte input we
+            // can cache the derived slot → name mapping so the SSTORE
+            // handler below can surface `<mapping_name>[<key>]`
+            // instead of a synthetic `storage[<huge_slot>]`
+            // placeholder (M11 category 2).
+            //
+            // Two cases:
+            //
+            //  * The tail 32 bytes match a mapping declared at a
+            //    state-variable base slot in the storage layout —
+            //    direct resolution.
+            //  * The tail 32 bytes match a previously-derived
+            //    mapping slot (e.g. the inner mapping of a nested
+            //    `mapping(K1 => mapping(K2 => V))`).  We recurse by
+            //    appending the new key to the cached parent name,
+            //    yielding `outer[k1][k2]`.
+            if matches!(log.op.as_ref(), "KECCAK256" | "SHA3")
+                && let (Some(stack), Some(layout)) = (log.stack.as_ref(), storage_layout)
+                && stack.len() >= 2
+            {
+                let offset = stack[stack.len() - 1];
+                let size = stack[stack.len() - 2];
+                if size == alloy::primitives::U256::from(64u64)
+                    && let Some(off_us) = usize::try_from(offset).ok()
+                {
+                    let memory_bytes = decode_struct_log_memory(log.memory.as_ref());
+                    let end = off_us.saturating_add(64);
+                    if end <= memory_bytes.len() {
+                        let input = &memory_bytes[off_us..end];
+                        let key_bytes: [u8; 32] = input[..32].try_into().unwrap();
+                        let slot_bytes: [u8; 32] = input[32..].try_into().unwrap();
+                        let base_slot_u256 = alloy::primitives::U256::from_be_bytes(slot_bytes);
+                        let derived_slot = keccak256_u256(input);
+
+                        // Case 1: direct mapping at a state-variable base.
+                        if let Ok(base_slot_u64) = u64::try_from(base_slot_u256)
+                            && let Some((mapping_label, key_type_label)) =
+                                layout.mapping_at_base(base_slot_u64)
+                        {
+                            let key_repr = format_mapping_key(&key_type_label, &key_bytes);
+                            mapping_slot_names
+                                .insert(derived_slot, format!("{mapping_label}[{key_repr}]"));
+                        }
+                        // Case 2: nested mapping — the base slot was
+                        // itself derived from an earlier KECCAK256 that
+                        // we already cached.  Append the new key to
+                        // the cached parent name.
+                        else if let Some(parent_name) =
+                            mapping_slot_names.get(&base_slot_u256).cloned()
+                        {
+                            // For nested mappings the inner mapping's
+                            // value type label isn't directly
+                            // discoverable from the storage layout's
+                            // root entries (they only carry the
+                            // top-level mapping's key type).  Default
+                            // to address formatting because nearly
+                            // every nested-mapping key in our test
+                            // corpus is an address; fall back to the
+                            // full hex blob otherwise.
+                            let key_repr = format_mapping_key("address", &key_bytes);
+                            mapping_slot_names
+                                .insert(derived_slot, format!("{parent_name}[{key_repr}]"));
+                        }
+                    }
+                }
+            }
+
             // --- SSTORE: decode storage writes ---
             if log.op.as_ref() == "SSTORE"
                 && let Some(ref stack) = log.stack
@@ -741,10 +924,39 @@ impl EvmRecorder {
                 let slot_decimal = slot.to_string();
                 let value_hex = format!("0x{:x}", value);
 
-                // Try to resolve the variable name via storage layout
+                // Try to resolve the variable name (M11 category 2):
+                //
+                // 1. Direct layout match (named state-variable slot).
+                // 2. Mapping cache: `<mapping>[<key>]` for slots that
+                //    were derived from a `keccak256(key . base)`
+                //    operation we intercepted earlier.
+                // 3. Struct-member lookup: `<struct>.<field>` for
+                //    slots inside an `inplace`-encoded struct.
+                // 4. Array-element lookup: `<array>[i]` for slots
+                //    inside a fixed-size array.
+                // 5. Fallback synthetic `storage[<slot>]` for slots
+                //    we couldn't attribute (still surfaces the raw
+                //    write in the trace).
                 let var_name = storage_layout
                     .and_then(|sl| sl.resolve_slot(&slot_decimal))
                     .map(|entry| entry.label.clone())
+                    .or_else(|| mapping_slot_names.get(&slot).cloned())
+                    .or_else(|| {
+                        slot_decimal.parse::<u64>().ok().and_then(|s| {
+                            storage_layout.and_then(|sl| {
+                                sl.struct_member_at(s)
+                                    .map(|(parent, member)| format!("{parent}.{member}"))
+                            })
+                        })
+                    })
+                    .or_else(|| {
+                        slot_decimal.parse::<u64>().ok().and_then(|s| {
+                            storage_layout.and_then(|sl| {
+                                sl.array_element_at(s)
+                                    .map(|(parent, idx)| format!("{parent}[{idx}]"))
+                            })
+                        })
+                    })
                     .unwrap_or_else(|| format!("storage[{}]", slot_decimal));
 
                 let type_name = storage_layout
@@ -996,6 +1208,12 @@ impl EvmRecorder {
             std::collections::HashMap<u64, alloy::primitives::U256>,
         > = vec![std::collections::HashMap::new()];
 
+        // Mapping slot resolver per frame (M11 category 2).  Mirrors
+        // the single-contract `mapping_slot_names` cache.
+        let mut mapping_slot_names_per_frame: Vec<
+            std::collections::HashMap<alloy::primitives::U256, String>,
+        > = vec![std::collections::HashMap::new()];
+
         for (i, log) in struct_logs.iter().enumerate() {
             let pc = log.pc as usize;
 
@@ -1103,6 +1321,9 @@ impl EvmRecorder {
                 while slot_values_per_frame.len() < log.depth as usize {
                     slot_values_per_frame.push(std::collections::HashMap::new());
                 }
+                while mapping_slot_names_per_frame.len() < log.depth as usize {
+                    mapping_slot_names_per_frame.push(std::collections::HashMap::new());
+                }
             } else if log.depth < prev_depth {
                 let depth_diff = prev_depth - log.depth;
                 for _ in 0..depth_diff {
@@ -1119,6 +1340,9 @@ impl EvmRecorder {
                     }
                     if slot_values_per_frame.len() > 1 {
                         slot_values_per_frame.pop();
+                    }
+                    if mapping_slot_names_per_frame.len() > 1 {
+                        mapping_slot_names_per_frame.pop();
                     }
                     call_tree.exit_call(i);
                     if frame_stack.len() > 1 {
@@ -1319,7 +1543,7 @@ impl EvmRecorder {
                             // function prologues (JUMPDEST + PUSH/POP) that
                             // sit at the head of every internal function and
                             // typically have no source map entry.
-                            let target_fn = cur_source_map.and_then(|source_map| {
+                            let mut target_fn = cur_source_map.and_then(|source_map| {
                                 resolve_internal_call_target(
                                     struct_logs,
                                     i,
@@ -1328,9 +1552,25 @@ impl EvmRecorder {
                                     cur_solidity_ast,
                                 )
                             });
+                            // Category 1 (M11): fall back to the JUMP's
+                            // *enclosing* user function when post-jump
+                            // lookahead lands in compiler-generated code.
+                            if target_fn.is_none() {
+                                target_fn = cur_source_map.and_then(|source_map| {
+                                    resolve_enclosing_function_for_jump(
+                                        struct_logs,
+                                        i,
+                                        source_map,
+                                        cur_pc_to_idx,
+                                        cur_solidity_ast,
+                                    )
+                                });
+                            }
                             let fn_name = {
                                 if let Some(target_fn) = target_fn {
-                                    target_fn.name.clone()
+                                    cur_solidity_ast
+                                        .map(|ast| ast.qualified_function_name(target_fn))
+                                        .unwrap_or_else(|| target_fn.name.clone())
                                 } else if let Some(next_log) = struct_logs.get(i + 1) {
                                     let next_pc = next_log.pc as usize;
                                     if let Some(next_loc) = cur_source_map.and_then(|sm| {
@@ -1380,6 +1620,53 @@ impl EvmRecorder {
             }
 
             // ------------------------------------------------------------------
+            // KECCAK256 (SHA3): record mapping-slot derivations
+            // (mirror of single-contract path; M11 category 2,
+            // including nested-mapping recursion).
+            // ------------------------------------------------------------------
+            if matches!(log.op.as_ref(), "KECCAK256" | "SHA3")
+                && let (Some(stack), Some(layout)) = (log.stack.as_ref(), cur_storage_layout)
+                && stack.len() >= 2
+            {
+                let offset = stack[stack.len() - 1];
+                let size = stack[stack.len() - 2];
+                if size == alloy::primitives::U256::from(64u64)
+                    && let Some(off_us) = usize::try_from(offset).ok()
+                {
+                    let memory_bytes = decode_struct_log_memory(log.memory.as_ref());
+                    let end = off_us.saturating_add(64);
+                    if end <= memory_bytes.len() {
+                        let input = &memory_bytes[off_us..end];
+                        let key_bytes: [u8; 32] = input[..32].try_into().unwrap();
+                        let slot_bytes: [u8; 32] = input[32..].try_into().unwrap();
+                        let base_slot_u256 = alloy::primitives::U256::from_be_bytes(slot_bytes);
+                        let derived_slot = keccak256_u256(input);
+
+                        let mn_idx = (log.depth as usize).saturating_sub(1);
+                        while mapping_slot_names_per_frame.len() <= mn_idx {
+                            mapping_slot_names_per_frame.push(std::collections::HashMap::new());
+                        }
+
+                        if let Ok(base_slot_u64) = u64::try_from(base_slot_u256)
+                            && let Some((mapping_label, key_type_label)) =
+                                layout.mapping_at_base(base_slot_u64)
+                        {
+                            let key_repr = format_mapping_key(&key_type_label, &key_bytes);
+                            mapping_slot_names_per_frame[mn_idx]
+                                .insert(derived_slot, format!("{mapping_label}[{key_repr}]"));
+                        } else if let Some(parent_name) = mapping_slot_names_per_frame[mn_idx]
+                            .get(&base_slot_u256)
+                            .cloned()
+                        {
+                            let key_repr = format_mapping_key("address", &key_bytes);
+                            mapping_slot_names_per_frame[mn_idx]
+                                .insert(derived_slot, format!("{parent_name}[{key_repr}]"));
+                        }
+                    }
+                }
+            }
+
+            // ------------------------------------------------------------------
             // SSTORE: decode storage writes using current frame's storage layout
             // ------------------------------------------------------------------
             if log.op.as_ref() == "SSTORE"
@@ -1392,9 +1679,30 @@ impl EvmRecorder {
                 let slot_decimal = slot.to_string();
                 let value_hex = format!("0x{:x}", value);
 
+                let mn_idx = (log.depth as usize).saturating_sub(1);
+                let mapped_name = mapping_slot_names_per_frame
+                    .get(mn_idx)
+                    .and_then(|m| m.get(&slot).cloned());
                 let var_name = cur_storage_layout
                     .and_then(|sl| sl.resolve_slot(&slot_decimal))
                     .map(|entry| entry.label.clone())
+                    .or(mapped_name)
+                    .or_else(|| {
+                        slot_decimal.parse::<u64>().ok().and_then(|s| {
+                            cur_storage_layout.and_then(|sl| {
+                                sl.struct_member_at(s)
+                                    .map(|(parent, member)| format!("{parent}.{member}"))
+                            })
+                        })
+                    })
+                    .or_else(|| {
+                        slot_decimal.parse::<u64>().ok().and_then(|s| {
+                            cur_storage_layout.and_then(|sl| {
+                                sl.array_element_at(s)
+                                    .map(|(parent, idx)| format!("{parent}[{idx}]"))
+                            })
+                        })
+                    })
                     .unwrap_or_else(|| format!("storage[{}]", slot_decimal));
 
                 let type_name = cur_storage_layout

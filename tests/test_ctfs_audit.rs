@@ -222,19 +222,20 @@ async fn audit_ctfs_internal_call_emitted() {
     for k in 0..call_count {
         let raw = reader.call_json(k).expect("call record JSON missing");
         let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        // The Nim multi-stream call stream stores function ids 1-indexed
-        // (function_id=0 is reserved for the implicit toplevel /
-        // unset state).  See `multi_stream_writer.nim::registerCall`.
-        // Subtract 1 to map back to the 0-indexed `function()` table.
-        let fid_raw = parsed["function_id"]
+        // The Nim multi-stream call stream stores function ids
+        // 0-indexed (`ensureFunctionId` allocates from `nextId = 0`
+        // — see `multi_stream_writer.nim::registerCall` and
+        // `interning_table.nim::ensureId`).  This matches the
+        // 0-indexed `function()` table directly so no offset is
+        // applied here.
+        let fid = parsed["function_id"]
             .as_u64()
             .or_else(|| parsed["functionId"].as_u64())
             .unwrap_or(u64::MAX);
-        let fid = fid_raw.saturating_sub(1);
         let name = fn_names
             .get(fid as usize)
             .cloned()
-            .unwrap_or_else(|| format!("<unknown:{}>", fid_raw));
+            .unwrap_or_else(|| format!("<unknown:{}>", fid));
         targets.push(name);
     }
 
@@ -486,8 +487,8 @@ async fn audit_ctfs_call_args_writer_attaches_add_xy() {
         call_summaries.push(format!(
             "{k}:fid={fid_raw}:args={args_len}:varnames={arg_varnames:?}"
         ));
-        let carries_xy = arg_varnames.iter().any(|n| n == "x")
-            && arg_varnames.iter().any(|n| n == "y");
+        let carries_xy =
+            arg_varnames.iter().any(|n| n == "x") && arg_varnames.iter().any(|n| n == "y");
         if carries_xy && add_call_with_args.is_none() {
             add_call_with_args = Some((k, args_len));
         }

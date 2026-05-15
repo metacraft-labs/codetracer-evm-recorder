@@ -160,6 +160,21 @@ pub struct FunctionDef {
     pub parameters: Vec<VarDecl>,
     /// Local variables declared inside the function body.
     pub local_variables: Vec<VarDecl>,
+    /// Name of the parent `ContractDefinition` (or `LibraryDefinition`)
+    /// the function lives in, when known.  Used to qualify functions
+    /// defined inside a `library` (`SafeMath.add`) and to disambiguate
+    /// virtual overrides at different inheritance levels
+    /// (`Base.foo` / `Mid.foo` / `Leaf.foo`).
+    pub contract_name: Option<String>,
+    /// Kind of the parent contract: `"contract"`, `"library"`,
+    /// `"interface"`, ...  When `Some("library")`, the recorder always
+    /// qualifies the function name with the parent name; for ordinary
+    /// `"contract"` parents qualification is applied only when the
+    /// bare function name is ambiguous (i.e. several contracts in the
+    /// same compilation unit declare a function of the same name —
+    /// the canonical case being `Base.foo` / `Mid.foo` / `Leaf.foo`
+    /// in a virtual-inheritance chain).
+    pub contract_kind: Option<String>,
 }
 
 impl FunctionDef {
@@ -211,14 +226,14 @@ impl SolidityAst {
         if let Some(sources) = root.get("sources").and_then(|v| v.as_object()) {
             for (_path, src_obj) in sources {
                 if let Some(ast_node) = src_obj.get("AST") {
-                    ast.visit_node(ast_node);
+                    ast.visit_node(ast_node, None, None);
                 }
             }
         }
 
         // Also handle a bare AST node (useful in tests).
         if root.get("nodeType").is_some() {
-            ast.visit_node(&root);
+            ast.visit_node(&root, None, None);
         }
 
         Ok(ast)
@@ -226,28 +241,91 @@ impl SolidityAst {
 
     /// Find the function whose source range contains `offset` in file
     /// `file_index`.
+    ///
+    /// When several `ContractDefinition`s declare ranges that all
+    /// enclose `offset` (notably for virtual overrides whose source
+    /// ranges nest because solc's contract-level `src` covers the
+    /// whole declaration), we prefer the function with the **smallest**
+    /// matching source range — that is the most specific definition.
     pub fn function_at(&self, offset: i32, file_index: i32) -> Option<&FunctionDef> {
         self.functions
             .iter()
-            .find(|f| f.src.file_index == file_index && f.src.contains_offset(offset))
+            .filter(|f| f.src.file_index == file_index && f.src.contains_offset(offset))
+            .min_by_key(|f| f.src.length)
+    }
+
+    /// Build the canonical display name for `func`:
+    ///
+    ///   * `<Library>.<func>` when the function lives inside a
+    ///     `library` declaration (Solidity inlines library `internal`
+    ///     functions into the caller's bytecode, but they still belong
+    ///     to the library AST-wise — qualifying them prevents
+    ///     `add` / `mul` from colliding with namesake helpers in
+    ///     ordinary contracts).
+    ///   * `<Contract>.<func>` when the bare `func` name is shared
+    ///     across multiple `contract`s in the same compilation unit
+    ///     (the canonical case is virtual `foo()` overrides at
+    ///     `Base` / `Mid` / `Leaf` levels — the recorder must surface
+    ///     each frame under its own contract name so step-frames at
+    ///     different inheritance levels resolve to the correct AST
+    ///     node).
+    ///   * The bare `func.name` otherwise — single-contract programs
+    ///     stay unqualified, matching the existing pinned shape for
+    ///     `nested_calls`, `storage_ops`, ERC-20, etc.
+    pub fn qualified_function_name(&self, func: &FunctionDef) -> String {
+        let bare = &func.name;
+        if let Some(parent) = func.contract_name.as_deref() {
+            let is_library = matches!(func.contract_kind.as_deref(), Some("library"));
+            if is_library {
+                return format!("{parent}.{bare}");
+            }
+            // Contracts: qualify only if the same bare name appears
+            // in another contract (inheritance overrides).
+            let collides = self.functions.iter().any(|other| {
+                std::ptr::eq(other, func) == false
+                    && other.name == func.name
+                    && other.contract_name.as_deref() != Some(parent)
+                    && other.contract_name.is_some()
+            });
+            if collides {
+                return format!("{parent}.{bare}");
+            }
+        }
+        bare.clone()
     }
 
     // -----------------------------------------------------------------------
     // Internal recursive visitor
     // -----------------------------------------------------------------------
 
-    fn visit_node(&mut self, node: &Value) {
+    fn visit_node(
+        &mut self,
+        node: &Value,
+        contract_name: Option<&str>,
+        contract_kind: Option<&str>,
+    ) {
         let node_type = match node.get("nodeType").and_then(|v| v.as_str()) {
             Some(t) => t,
             None => return,
         };
 
         match node_type {
-            "SourceUnit" | "ContractDefinition" => {
-                self.visit_children(node);
+            "SourceUnit" => {
+                self.visit_children(node, contract_name, contract_kind);
+            }
+            "ContractDefinition" => {
+                // solc emits `contractKind: "contract" | "library" | "interface"`.
+                let kind = node
+                    .get("contractKind")
+                    .and_then(|v| v.as_str())
+                    .or(contract_kind);
+                let name = node.get("name").and_then(|v| v.as_str()).or(contract_name);
+                self.visit_children(node, name, kind);
             }
             "FunctionDefinition" => {
-                if let Some(fdef) = Self::parse_function(node) {
+                if let Some(mut fdef) = Self::parse_function(node) {
+                    fdef.contract_name = contract_name.map(str::to_string);
+                    fdef.contract_kind = contract_kind.map(str::to_string);
                     self.functions.push(fdef);
                 }
                 // Do NOT recurse further; parse_function already collects locals.
@@ -255,27 +333,32 @@ impl SolidityAst {
             _ => {
                 // Other top-level nodes (state-variable declarations, etc.):
                 // recurse so we handle nested contracts.
-                self.visit_children(node);
+                self.visit_children(node, contract_name, contract_kind);
             }
         }
     }
 
-    fn visit_children(&mut self, node: &Value) {
+    fn visit_children(
+        &mut self,
+        node: &Value,
+        contract_name: Option<&str>,
+        contract_kind: Option<&str>,
+    ) {
         // Try "nodes" (SourceUnit / ContractDefinition children)
         if let Some(nodes) = node.get("nodes").and_then(|v| v.as_array()) {
             for child in nodes {
-                self.visit_node(child);
+                self.visit_node(child, contract_name, contract_kind);
             }
         }
         // Try "body" statements (though we recurse into function body
         // separately via parse_function)
         if let Some(body) = node.get("body") {
-            self.visit_node(body);
+            self.visit_node(body, contract_name, contract_kind);
         }
         // Try "statements"
         if let Some(stmts) = node.get("statements").and_then(|v| v.as_array()) {
             for s in stmts {
-                self.visit_node(s);
+                self.visit_node(s, contract_name, contract_kind);
             }
         }
     }
@@ -332,6 +415,8 @@ impl SolidityAst {
             src,
             parameters,
             local_variables,
+            contract_name: None,
+            contract_kind: None,
         })
     }
 

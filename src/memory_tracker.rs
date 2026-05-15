@@ -212,12 +212,7 @@ impl MemoryTracker {
     /// region.  Returns `None` if the variable is not tracked, the offset
     /// is past the region's allocated size, or the memory snapshot is
     /// too short.
-    pub fn get_field_value(
-        &self,
-        name: &str,
-        field_offset: u64,
-        memory: &[u8],
-    ) -> Option<U256> {
+    pub fn get_field_value(&self, name: &str, field_offset: u64, memory: &[u8]) -> Option<U256> {
         let region = self.region(name)?;
         if (field_offset as usize + WORD) > region.size_in_bytes {
             return None;
@@ -398,10 +393,7 @@ fn u256_to_u64_saturating(v: U256) -> u64 {
 /// Pick the memory-resident variable whose declaration/statement range
 /// contains the given source offset.  Mirrors the prioritisation logic
 /// used by [`crate::stack_tracker::StackTracker::label_for_push`].
-fn pick_var_for_offset<'a>(
-    offset: i32,
-    vars_in_scope: &'a [&'a VarDecl],
-) -> Option<&'a VarDecl> {
+fn pick_var_for_offset<'a>(offset: i32, vars_in_scope: &'a [&'a VarDecl]) -> Option<&'a VarDecl> {
     // 1) exact declaration offset
     for v in vars_in_scope {
         if v.is_memory_resident() && v.declaration_offset == offset {
