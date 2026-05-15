@@ -12,3 +12,4 @@ pub mod stack_tracker;
 pub mod storage_layout;
 pub mod structlog;
 pub mod trace_fetcher;
+pub mod yul_compile;

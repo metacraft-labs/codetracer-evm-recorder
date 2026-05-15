@@ -61,6 +61,7 @@ use codetracer_evm_recorder::solidity_ast::SolidityAst;
 use codetracer_evm_recorder::source_map::SourceMap;
 use codetracer_evm_recorder::storage_layout::StorageLayout;
 use codetracer_evm_recorder::trace_fetcher;
+use codetracer_evm_recorder::yul_compile;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -260,10 +261,27 @@ async fn record(args: RecordArgs) -> Result<()> {
         return Ok(());
     }
 
-    let out_dir_path = resolve_out_dir(args.out_dir, args.trace_dir)?;
+    let out_dir_path = resolve_out_dir(args.out_dir.clone(), args.trace_dir.clone())?;
     let out_dir = &out_dir_path;
     std::fs::create_dir_all(out_dir)
         .with_context(|| format!("cannot create output dir: {}", out_dir.display()))?;
+
+    // Pure-Yul (.yul) files take a different compile path: solc's
+    // `--strict-assembly` mode rejects the `--combined-json` invocation
+    // used for Solidity files, so we shell out to a dedicated
+    // assembly-mode invocation, synthesize a runtime source map from
+    // the resulting `--asm-json` document, and run the recorder
+    // pipeline with no ABI dispatch (calls go through with empty
+    // calldata) and no Solidity AST or storage layout.  See
+    // `yul_compile.rs` for the asm-json -> SourceMap conversion.
+    let is_yul = source_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("yul"))
+        .unwrap_or(false);
+    if is_yul {
+        return record_yul(args, &source_path, out_dir).await;
+    }
 
     // -----------------------------------------------------------------------
     // 1. Compile the Solidity file with solc
@@ -401,8 +419,7 @@ async fn record(args: RecordArgs) -> Result<()> {
     // `setValue(uint256)` directly from a fixture, which is required
     // to drive access-control failure paths (e.g. the `onlyOwner`
     // modifier test) where the wrapped function takes a parameter.
-    let (call_signature, encoded_args) =
-        build_call_signature_and_args(&abi, &function_name)?;
+    let (call_signature, encoded_args) = build_call_signature_and_args(&abi, &function_name)?;
     eprintln!(
         "Calling function: {} on contract {}",
         call_signature, contract_name
@@ -634,6 +651,216 @@ async fn record(args: RecordArgs) -> Result<()> {
     Ok(())
 }
 
+/// Pure-Yul recorder path.
+///
+/// Mirrors [`record`] but with a dedicated compile + dispatch
+/// pipeline:
+///
+///   1. Compile via `solc --strict-assembly --bin --asm-json` (see
+///      `yul_compile.rs`).
+///   2. Spin up a transient anvil node with `--steps-tracing`.
+///   3. Deploy the constructor bytecode (the outer `object` that
+///      copies the runtime to memory and RETURNs it).
+///   4. Fetch the deployed runtime bytecode via `eth_getCode` -- this
+///      is what executes for every call regardless of calldata, and
+///      what the synthesized source map is indexed against.
+///   5. Send a single transaction with empty calldata (Yul has no
+///      ABI dispatcher and no selector).
+///   6. Run the EVM recorder with the synthesized source map and
+///      `None` for the Solidity AST / storage layout.
+///
+/// The strict pin in
+/// `tests/test_programs_via_ct_print_full.rs::test_yul_pure_via_ct_print_full`
+/// asserts that Yul function calls (`function foo(...) -> r`) surface
+/// as nested call frames via the source map's [in]/[out] jump-type
+/// markers, and that the on-chain return value matches the
+/// arithmetic the Yul program performs.
+async fn record_yul(args: RecordArgs, source_path: &Path, out_dir: &Path) -> Result<()> {
+    // -----------------------------------------------------------------------
+    // 1. Compile the Yul source file with solc --strict-assembly
+    // -----------------------------------------------------------------------
+    let solc_cmd = std::env::var("SOLC_PATH").unwrap_or_else(|_| "solc".to_string());
+    let yul_out = yul_compile::compile_yul(&solc_cmd, source_path)?;
+
+    let source_contents = std::fs::read_to_string(source_path)
+        .with_context(|| format!("failed to read source file: {}", source_path.display()))?;
+
+    // The Yul object name is the file stem (matches the
+    // `object "Name" { ... }` declaration by convention).  Used as
+    // the contract label in stderr breadcrumbs.
+    let object_name = source_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("YulObject");
+
+    // -----------------------------------------------------------------------
+    // 2. Spin up a local Anvil node
+    // -----------------------------------------------------------------------
+    let anvil = alloy::node_bindings::Anvil::new()
+        .arg("--steps-tracing")
+        .spawn();
+    let rpc_url = anvil.endpoint();
+
+    let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+    let accounts = provider.get_accounts().await?;
+    let deploy_from = accounts[0];
+
+    let call_from: Address = match args.from.as_deref() {
+        Some(s) => Address::from_str(s)
+            .with_context(|| format!("--from is not a valid 0x-prefixed hex address: {s}"))?,
+        None => deploy_from,
+    };
+
+    eprintln!("Calling Yul object {object_name} (no ABI dispatcher; empty calldata)");
+
+    // -----------------------------------------------------------------------
+    // 3. Deploy the contract
+    // -----------------------------------------------------------------------
+    let deploy_data = alloy::primitives::Bytes::from(yul_out.deploy_bytecode.clone());
+    let deploy_tx = alloy::rpc::types::TransactionRequest::default()
+        .from(deploy_from)
+        .with_deploy_code(deploy_data);
+
+    let deploy_pending = provider
+        .send_transaction(deploy_tx)
+        .await
+        .context("failed to send Yul deploy transaction")?;
+    let deploy_receipt = deploy_pending
+        .get_receipt()
+        .await
+        .context("failed to get Yul deploy receipt")?;
+    let contract_address = deploy_receipt
+        .contract_address
+        .ok_or_else(|| eyre::eyre!("Yul deploy transaction produced no contract address"))?;
+
+    eprintln!("Deployed Yul object {object_name} at {contract_address}");
+
+    // -----------------------------------------------------------------------
+    // 4. Fetch the deployed runtime bytecode
+    //
+    // Pure-Yul objects don't expose `bin-runtime` from solc's
+    // assembly mode (`solc --strict-assembly --bin-runtime` is
+    // rejected with `not supported in assembler mode`), so we read
+    // the deployed bytecode straight off the chain.  This is what
+    // the synthesized source map is indexed against.
+    // -----------------------------------------------------------------------
+    let runtime_bytecode_bytes = provider.get_code_at(contract_address).await?;
+    let runtime_bytecode: Vec<u8> = runtime_bytecode_bytes.to_vec();
+    if runtime_bytecode.is_empty() {
+        return Err(eyre::eyre!(
+            "deployed Yul object has no runtime bytecode (eth_getCode returned 0 bytes)"
+        ));
+    }
+
+    // -----------------------------------------------------------------------
+    // 5. Call the contract with empty calldata
+    // -----------------------------------------------------------------------
+    let call_value = parse_value_wei(&args.value)
+        .with_context(|| format!("--value is not a valid wei amount: {}", args.value))?;
+    let call_tx = alloy::rpc::types::TransactionRequest::default()
+        .from(call_from)
+        .to(contract_address)
+        .with_input(alloy::primitives::Bytes::new())
+        .value(call_value)
+        .gas_limit(30_000_000);
+
+    let call_pending = provider
+        .send_transaction(call_tx)
+        .await
+        .context("failed to send Yul function call transaction")?;
+    let call_receipt = call_pending
+        .get_receipt()
+        .await
+        .context("failed to get Yul function call receipt")?;
+    let tx_hash = call_receipt.transaction_hash;
+    let tx_succeeded = call_receipt.status();
+
+    eprintln!(
+        "Transaction: {:?} (status={})",
+        tx_hash,
+        if tx_succeeded { "ok" } else { "reverted" }
+    );
+
+    // -----------------------------------------------------------------------
+    // 6. Fetch debug_traceTransaction structlogs
+    // -----------------------------------------------------------------------
+    let frame = trace_fetcher::fetch_struct_logs(&rpc_url, tx_hash)
+        .await
+        .context("failed to fetch structlogs via debug_traceTransaction")?;
+    let struct_logs = trace_fetcher::extract_struct_logs(&frame);
+    eprintln!("Fetched {} struct log entries", struct_logs.len());
+    if struct_logs.is_empty() {
+        return Err(eyre::eyre!(
+            "debug_traceTransaction returned no structlogs -- ensure anvil was started with --steps-tracing"
+        ));
+    }
+
+    // -----------------------------------------------------------------------
+    // 7. Copy the source file into the trace directory
+    // -----------------------------------------------------------------------
+    let source_filename = source_path
+        .file_name()
+        .ok_or_else(|| eyre::eyre!("source path has no filename component"))?;
+    let source_copy_path = out_dir.join(source_filename);
+    std::fs::copy(source_path, &source_copy_path).with_context(|| {
+        format!(
+            "failed to copy source file into trace dir: {} -> {}",
+            source_path.display(),
+            source_copy_path.display()
+        )
+    })?;
+
+    // -----------------------------------------------------------------------
+    // 8. Process through the recorder and write trace output
+    //
+    // Pure-Yul has no Solidity AST and no storage-layout document, so
+    // we pass `None` for both.  Internal-call resolution still works
+    // because the source map's [in]/[out] jump-type markers drive the
+    // recorder's call-frame tracking even without an AST.
+    // -----------------------------------------------------------------------
+    let program_label = source_path.to_string_lossy();
+    let mut recorder =
+        EvmRecorder::new(&program_label, out_dir).context("failed to create EvmRecorder")?;
+    recorder
+        .initialize()
+        .context("failed to initialize EvmRecorder")?;
+
+    let source_path_ref: &Path = source_copy_path.as_path();
+    recorder
+        .record_from_structlog(
+            &struct_logs,
+            &yul_out.runtime_source_map,
+            &runtime_bytecode,
+            &[source_path_ref],
+            &[source_contents.as_str()],
+            None,
+            None,
+        )
+        .context("recorder failed to process structlogs")?;
+
+    if frame.failed || !tx_succeeded {
+        let registry = revert_decode::CustomErrorRegistry::default();
+        let decoded = revert_decode::decode_revert_with_registry(&frame.return_value, &registry);
+        eprintln!(
+            "Transaction reverted: {} ({})",
+            decoded.message, decoded.kind
+        );
+        recorder.register_revert(decoded.kind, &decoded.message);
+    }
+
+    recorder
+        .finalize()
+        .context("failed to finalize EvmRecorder")?;
+
+    eprintln!("Trace written to {}", out_dir.display());
+    eprintln!("  trace.json");
+    eprintln!("  trace_metadata.json");
+    eprintln!("  trace_paths.json");
+    eprintln!("  {}", source_filename.to_string_lossy());
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -704,7 +931,10 @@ fn parse_value_wei(s: &str) -> Result<alloy::primitives::U256> {
     if trimmed.is_empty() {
         return Ok(alloy::primitives::U256::ZERO);
     }
-    if let Some(rest) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
+    if let Some(rest) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
         Ok(alloy::primitives::U256::from_str_radix(rest, 16)
             .with_context(|| format!("invalid hex value: {s}"))?)
     } else {
@@ -731,7 +961,11 @@ fn encode_default_arg_value(ty: &str) -> Option<[u8; 32]> {
         Some(buf) // zero address (left-padded)
     } else if let Some(rest) = ty.strip_prefix("bytes") {
         // bytes1..bytes32: zero-padded fixed-size bytes default.
-        if rest.parse::<u32>().ok().is_some_and(|n| (1..=32).contains(&n)) {
+        if rest
+            .parse::<u32>()
+            .ok()
+            .is_some_and(|n| (1..=32).contains(&n))
+        {
             return Some(buf);
         }
         None
