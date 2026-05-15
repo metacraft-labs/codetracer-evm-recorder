@@ -96,6 +96,17 @@ impl SourceMap {
         Self { entries }
     }
 
+    /// Build a SourceMap from a pre-built list of entries.
+    ///
+    /// Used by the Yul compile path, where the source map is
+    /// synthesized from solc's `--asm-json` output (one entry per
+    /// emitted bytecode instruction, in instruction-index order)
+    /// rather than parsed from a Solidity-style `s:l:f:j:m`
+    /// semicolon-separated string.
+    pub fn from_entries(entries: Vec<SourceMapEntry>) -> Self {
+        Self { entries }
+    }
+
     /// Number of entries in the source map.
     pub fn len(&self) -> usize {
         self.entries.len()
