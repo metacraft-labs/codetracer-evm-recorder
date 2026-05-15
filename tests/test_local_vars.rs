@@ -447,7 +447,10 @@ fn test_evm_local_vars_memory() {
     };
 
     // The classifier should recognise this as memory-resident.
-    assert!(var_p.is_memory_resident(), "struct memory local must be flagged");
+    assert!(
+        var_p.is_memory_resident(),
+        "struct memory local must be flagged"
+    );
 
     let scope: Vec<&VarDecl> = vec![&var_p];
 
@@ -468,7 +471,7 @@ fn test_evm_local_vars_memory() {
     // stack for MSTORE is [..., value, dest].  Top of stack is `dest=0x40`,
     // one below is `value=0xC0` (the new FMP).
     let bump_stack = vec![
-        U256::from(0xC0u64), // value: new FMP
+        U256::from(0xC0u64),                    // value: new FMP
         U256::from(FREE_MEMORY_POINTER_OFFSET), // dest: 0x40
     ];
     let asgn_a = tracker.process_step(

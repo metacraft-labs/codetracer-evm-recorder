@@ -92,11 +92,21 @@ impl CustomErrorRegistry {
                 .unwrap_or_default();
             let param_types: Vec<String> = inputs
                 .iter()
-                .map(|p| p.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string())
+                .map(|p| {
+                    p.get("type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string()
+                })
                 .collect();
             let param_names: Vec<String> = inputs
                 .iter()
-                .map(|p| p.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string())
+                .map(|p| {
+                    p.get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string()
+                })
                 .collect();
             let signature = format!("{}({})", name, param_types.join(","));
             let selector = keccak_selector(signature.as_bytes());
@@ -147,10 +157,7 @@ pub fn decode_revert(output: &[u8]) -> DecodedRevert {
 /// human-readable name (and ABI-decoded args) of a custom error
 /// whose selector is recognised.  Falls back to `RevertRaw` for
 /// unknown selectors so the trace is never silently empty.
-pub fn decode_revert_with_registry(
-    output: &[u8],
-    registry: &CustomErrorRegistry,
-) -> DecodedRevert {
+pub fn decode_revert_with_registry(output: &[u8], registry: &CustomErrorRegistry) -> DecodedRevert {
     if output.is_empty() {
         return DecodedRevert {
             kind: "RevertEmpty",

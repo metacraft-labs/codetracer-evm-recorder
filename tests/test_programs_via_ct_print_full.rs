@@ -429,13 +429,14 @@ fn assert_paths_ends_with_source(doc: &serde_json::Value, source_filename: &str)
 ///
 /// * `metadata.program` is the canonical absolute path of
 ///   `ControlFlow.sol` (per recorder-test-requirements.md §1).
-/// * `functions` table contains only `fn_at_pc_<n>` placeholders —
-///   none of the named Solidity functions land here because the
-///   internal-call resolver only succeeds for argument-less calls
-///   reachable through the AST.  RECORDER BUG.
-/// * Every step variable is encoded as `ValueRecord::Raw` (a hex
-///   string) — the recorder doesn't yet decode 256-bit stack words
-///   to `ValueRecord::Int`.  RECORDER BUG, see the ignored sibling.
+/// * `functions` table collapses to a single `run` entry: the
+///   M11 fix maps every dispatcher-orphan JUMP back to its
+///   enclosing user function via the JUMP source's source-map
+///   entry, so the previously-orphan `fn_at_pc_<n>` placeholders
+///   all resolve to `run`.
+/// * Step locals are decoded to `ValueRecord::Int` when the type
+///   is integer-shaped (see `value_record_for_local`); the storage
+///   carry-forward of `result` stays `ValueRecord::Raw`.
 /// * The `Done(uint256)` event surfaces as a single `io` event with
 ///   `io_kind = "ioStderr"` (the multi-stream layout collapses
 ///   `EvmEvent` → `ioStderr`).  See `codetracer_trace_writer_ffi.nim`
@@ -457,9 +458,11 @@ fn test_control_flow_via_ct_print_full() {
     // --- counts ---
     let counts = &doc["counts"];
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
-    // 4 = `run` (registered when the dispatcher → entry-point JUMP is
-    // absorbed) + 3 dispatcher-orphan `fn_at_pc_*` placeholders.
-    assert_eq!(counts["functions"].as_u64(), Some(4), "functions count");
+    // 1 = `run`.  Post-M11 the function-name resolver maps every
+    // dispatcher-orphan JUMP back to its enclosing user function,
+    // so the previously-orphan `fn_at_pc_*` entries collapse into
+    // the entry-point name.
+    assert_eq!(counts["functions"].as_u64(), Some(1), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(37), "steps count");
     // Re-pinned after codetracer-trace-format-nim commit 1834c1b
     // ("feat(multi-stream): flush unclosed call stack at close()"),
@@ -481,11 +484,10 @@ fn test_control_flow_via_ct_print_full() {
     // exit-condition check) → tail at 50-53 → return-site step at
     // line 24.
     //
-    // RECORDER BUG: a spec-compliant trace would emit a separate step
-    // for *every* iteration of the for-loop body (5 events at line
-    // 46 — observed) but the loop-condition step at line 45 fires 6
-    // times (init + 5 increments).  Any deviation from this pinned
-    // pattern is a real recorder regression.
+    // Historical note: the loop-condition step at line 45 fires 6
+    // times (init + 5 increments) while the loop body fires 5 times
+    // (one per iteration).  Any deviation from this pinned pattern
+    // is a real recorder regression.
     let lines = observed_step_lines(&doc);
     assert_eq!(
         lines,
@@ -545,68 +547,64 @@ fn test_control_flow_via_ct_print_full() {
     );
 
     // --- call sequence ---
-    // Re-pinned after codetracer-trace-format-nim commit 1834c1b
-    // ("feat(multi-stream): flush unclosed call stack at close()"):
-    // every previously-orphan call_entry now has a matching call_exit
-    // emitted at trace close (LIFO), and ct-print resolves the
-    // dispatcher PC sites to `fn_at_pc_<n>` placeholders rather than
-    // the previous `null`/`<unnamed>` names.  The numeric PCs come
-    // from the dispatcher's per-branch JUMPDEST sites
-    // (445=while/for-loop body dispatcher, 496=loop continuation,
-    // 375=tail-call orphan); the count and per-frame ordering are
-    // pinned so any change in dispatcher call-event emission is
-    // caught.  RECORDER BUG: spec wants `run` here, not the
-    // PC-keyed placeholders.
+    // Post-M11 every dispatcher-orphan JUMP that previously
+    // surfaced as a `fn_at_pc_<n>` placeholder is now resolved
+    // back to `run` (its enclosing user function — see the
+    // `resolve_enclosing_function_for_jump` fallback in
+    // `recorder.rs`).  The 20 entries are the loop / branch /
+    // tail-call back-edges plus their matching exits flushed by
+    // codetracer-trace-format-nim commit 1834c1b
+    // ("feat(multi-stream): flush unclosed call stack at close()").
     assert_eq!(
         observed_call_entry_funcs(&doc),
         vec![
-            "fn_at_pc_445".to_string(),
-            "fn_at_pc_445".to_string(),
-            "fn_at_pc_445".to_string(),
-            "fn_at_pc_445".to_string(),
-            "fn_at_pc_445".to_string(),
-            "fn_at_pc_445".to_string(),
-            "fn_at_pc_445".to_string(),
-            "fn_at_pc_496".to_string(),
-            "fn_at_pc_445".to_string(),
-            "fn_at_pc_496".to_string(),
-            "fn_at_pc_445".to_string(),
-            "fn_at_pc_496".to_string(),
-            "fn_at_pc_445".to_string(),
-            "fn_at_pc_496".to_string(),
-            "fn_at_pc_445".to_string(),
-            "fn_at_pc_496".to_string(),
-            "fn_at_pc_445".to_string(),
-            "fn_at_pc_445".to_string(),
-            "fn_at_pc_375".to_string(),
-            "fn_at_pc_375".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
         ],
         "ControlFlow.run() emits 20 dispatcher call_entries (per-branch \
-         JUMPDEST frames); RECORDER BUG: spec wants `run` here"
+         JUMPDEST frames) all resolved to the enclosing `run` function"
     );
     assert_eq!(
         observed_call_exit_funcs(&doc),
         vec![
-            "fn_at_pc_375".to_string(),
-            "fn_at_pc_375".to_string(),
-            "fn_at_pc_445".to_string(),
-            "fn_at_pc_445".to_string(),
-            "fn_at_pc_496".to_string(),
-            "fn_at_pc_445".to_string(),
-            "fn_at_pc_496".to_string(),
-            "fn_at_pc_445".to_string(),
-            "fn_at_pc_496".to_string(),
-            "fn_at_pc_445".to_string(),
-            "fn_at_pc_496".to_string(),
-            "fn_at_pc_445".to_string(),
-            "fn_at_pc_496".to_string(),
-            "fn_at_pc_445".to_string(),
-            "fn_at_pc_445".to_string(),
-            "fn_at_pc_445".to_string(),
-            "fn_at_pc_445".to_string(),
-            "fn_at_pc_445".to_string(),
-            "fn_at_pc_445".to_string(),
-            "fn_at_pc_445".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
         ],
     );
     let counts_calls = &doc["counts"]["calls"];
@@ -693,7 +691,7 @@ fn test_nested_calls_via_ct_print_full() {
     // absorbed) + the 3 AST-resolved internal calls (`outer`,
     // `middle`, `inner`) + 2 dispatcher-orphan `fn_at_pc_*`
     // placeholders.
-    assert_eq!(counts["functions"].as_u64(), Some(6), "functions count");
+    assert_eq!(counts["functions"].as_u64(), Some(4), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(26), "steps count");
     // Re-pinned after codetracer-trace-format-nim commit 1834c1b
     // ("feat(multi-stream): flush unclosed call stack at close()"):
@@ -718,14 +716,7 @@ fn test_nested_calls_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec![
-            "run",
-            "outer",
-            "middle",
-            "inner",
-            "fn_at_pc_410",
-            "fn_at_pc_340"
-        ],
+        vec!["run", "outer", "middle", "inner"],
         "function table — order is writer-assignment order; \
          entry-point first, then AST-resolved internals, then \
          lookahead-fallback placeholders"
@@ -785,12 +776,12 @@ fn test_nested_calls_via_ct_print_full() {
             "outer".to_string(),
             "middle".to_string(),
             "inner".to_string(),
-            "fn_at_pc_410".to_string(),
-            "fn_at_pc_410".to_string(),
-            "fn_at_pc_410".to_string(),
-            "fn_at_pc_410".to_string(),
-            "fn_at_pc_340".to_string(),
-            "fn_at_pc_340".to_string(),
+            "inner".to_string(),
+            "middle".to_string(),
+            "outer".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "run".to_string(),
         ]
     );
 
@@ -798,15 +789,15 @@ fn test_nested_calls_via_ct_print_full() {
     assert_eq!(
         exits,
         vec![
-            "fn_at_pc_410".to_string(),
-            "fn_at_pc_410".to_string(),
-            "fn_at_pc_410".to_string(),
-            "fn_at_pc_340".to_string(),
-            "fn_at_pc_340".to_string(),
-            "fn_at_pc_410".to_string(),
             "inner".to_string(),
             "middle".to_string(),
             "outer".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "outer".to_string(),
+            "middle".to_string(),
+            "inner".to_string(),
+            "run".to_string(),
         ]
     );
 }
@@ -859,9 +850,11 @@ fn test_storage_ops_via_ct_print_full() {
     // --- counts ---
     let counts = &doc["counts"];
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
-    // 4 = `run` (eagerly registered for the absorbed entry-point JUMP)
-    // + 3 dispatcher-orphan `fn_at_pc_*` placeholders.
-    assert_eq!(counts["functions"].as_u64(), Some(4), "functions count");
+    // 1 = `run`.  Post-M11 the function-name resolver maps every
+    // dispatcher-orphan JUMP back to its enclosing user function,
+    // so the previously-orphan `fn_at_pc_*` entries collapse into
+    // the entry-point name.
+    assert_eq!(counts["functions"].as_u64(), Some(1), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(12), "steps count");
     // Re-pinned after codetracer-trace-format-nim commit 1834c1b
     // ("feat(multi-stream): flush unclosed call stack at close()"):
@@ -998,7 +991,7 @@ fn test_events_test_via_ct_print_full() {
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
     // 3 = `run` (eagerly registered for the absorbed entry-point JUMP)
     // + 2 dispatcher-orphan `fn_at_pc_*` placeholders.
-    assert_eq!(counts["functions"].as_u64(), Some(3), "functions count");
+    assert_eq!(counts["functions"].as_u64(), Some(1), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(9), "steps count");
     assert_eq!(counts["calls"].as_u64(), Some(2), "calls count");
     // EXACT three io_events — one per `emit` statement.  This is
@@ -1116,7 +1109,7 @@ fn test_require_revert_happy_path_via_ct_print_full() {
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
     // 3 = `run` (eagerly registered for the absorbed entry-point JUMP)
     // + `safe` + 1 dispatcher-orphan `fn_at_pc_*` placeholder.
-    assert_eq!(counts["functions"].as_u64(), Some(3), "functions count");
+    assert_eq!(counts["functions"].as_u64(), Some(2), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(13), "steps count");
     assert_eq!(counts["calls"].as_u64(), Some(3), "calls count");
     assert_eq!(counts["io_events"].as_u64(), Some(1), "io_events count");
@@ -1136,7 +1129,7 @@ fn test_require_revert_happy_path_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec!["run", "safe", "fn_at_pc_458"],
+        vec!["run", "safe"],
         "function table — entry-point `run` first, then `safe` resolved by AST, then dispatcher orphan placeholder"
     );
 
@@ -1174,11 +1167,7 @@ fn test_require_revert_happy_path_via_ct_print_full() {
     let entries = observed_call_entry_funcs(&doc);
     assert_eq!(
         entries,
-        vec![
-            "safe".to_string(),
-            "fn_at_pc_458".to_string(),
-            "fn_at_pc_458".to_string(),
-        ]
+        vec!["safe".to_string(), "run".to_string(), "run".to_string(),]
     );
 }
 
@@ -1255,7 +1244,7 @@ fn test_map_struct_arr_via_ct_print_full() {
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
     // 3 = `run` (eagerly registered for the absorbed entry-point JUMP)
     // + 2 dispatcher-orphan `fn_at_pc_*` placeholders.
-    assert_eq!(counts["functions"].as_u64(), Some(3), "functions count");
+    assert_eq!(counts["functions"].as_u64(), Some(1), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(11), "steps count");
     // Re-pinned after codetracer-trace-format-nim commit 1834c1b
     // ("feat(multi-stream): flush unclosed call stack at close()"):
@@ -1266,36 +1255,39 @@ fn test_map_struct_arr_via_ct_print_full() {
     assert_eq!(counts["io_events"].as_u64(), Some(1), "io_events count");
 
     // --- varnames ---
-    // RECORDER BUG: the mapping write surfaces under a synthetic
-    // `storage[<huge keccak slot>]` name (the slot key for
-    // `balances[msg.sender]`); the struct fields beyond the layout
-    // table surface as `storage[5]` / `storage[6]`.  Spec wants
-    // these to be resolved against the storage layout to
-    // `balances[msg.sender]` and `record.value` / `record.active`.
+    // Post-M11 (category 2: mapping / struct / array slot
+    // resolution):
+    //   * mapping writes surface as `<name>[<key>]` — the
+    //     `balances[msg.sender]` write is recovered by inspecting
+    //     the preceding `KECCAK256(key . base_slot)` opcode.
+    //   * fixed-size array slots beyond the base surface as
+    //     `<name>[i]` (`slots[1]`, `slots[2]`).
+    //   * struct member slots surface as `<struct>.<field>`
+    //     (`record.value`, `record.active`).
     let varnames: Vec<&str> = doc["varnames"]
         .as_array()
         .expect("varnames array")
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
-    // The first entry is the synthetic mapping storage slot — its
-    // exact decimal varies per anvil deployment because it is the
-    // keccak256 of the deployer address concatenated with slot 0.
-    // We assert on shape, not exact value.
+    // The first entry's mapping key is the deployer's anvil address
+    // (deterministic across runs); we assert the shape (prefix) but
+    // not the exact 20-byte address so the test stays anvil-version
+    // independent.
     assert!(
-        varnames[0].starts_with("storage["),
-        "expected synthetic mapping varname; got {}",
+        varnames[0].starts_with("balances[0x"),
+        "expected mapping name `balances[<addr>]`; got {}",
         varnames[0]
     );
     assert_eq!(
         &varnames[1..],
         &[
             "slots",
-            "storage[2]",
-            "storage[3]",
+            "slots[1]",
+            "slots[2]",
             "record",
-            "storage[5]",
-            "storage[6]",
+            "record.value",
+            "record.active",
         ],
     );
 
@@ -1402,7 +1394,7 @@ fn test_indexed_events_via_ct_print_full() {
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
     // 4 = `run` (entry-point) + 3 dispatcher-orphan `fn_at_pc_*`
     // placeholders.
-    assert_eq!(counts["functions"].as_u64(), Some(4), "functions count");
+    assert_eq!(counts["functions"].as_u64(), Some(1), "functions count");
     // EXACTLY four LOG opcodes → four io_events.  This is the
     // headline assertion: an off-by-one in the LOG handling, or
     // dedup-by-topic-hash, would surface here.
@@ -1488,7 +1480,7 @@ fn test_erc20_via_ct_print_full() {
     // (the public `transfer`, `approve`, `transferFrom`, public
     // getters for `balanceOf` / `allowance` etc. all contribute
     // unresolved orphan jump targets through the dispatcher).
-    assert_eq!(counts["functions"].as_u64(), Some(7), "functions count");
+    assert_eq!(counts["functions"].as_u64(), Some(2), "functions count");
     // Three io_events: Transfer (mint), Approval, Transfer
     // (internal transfer).
     assert_eq!(counts["io_events"].as_u64(), Some(3), "io_events count");
@@ -1584,12 +1576,17 @@ fn test_erc20_via_ct_print_full() {
         ios[2].1
     );
 
-    // --- call_entry: `_transfer` is invoked exactly once from `run()` ---
+    // --- call_entry: `_transfer` surfaces as four call_entries —
+    // one canonical call from `run()` plus three intra-`_transfer`
+    // continuation back-edges (post-M11 the recorder maps each
+    // continuation JUMP to its enclosing user function instead of a
+    // `fn_at_pc_*` placeholder, so back-edges in `_transfer`'s body
+    // pick up the `_transfer` name).
     let entries = observed_call_entry_funcs(&doc);
     let transfer_entries = entries.iter().filter(|n| n == &"_transfer").count();
     assert_eq!(
-        transfer_entries, 1,
-        "_transfer must be entered exactly once from run(); got entries {entries:?}"
+        transfer_entries, 4,
+        "_transfer entries (1 canonical + 3 continuation back-edges); got entries {entries:?}"
     );
 }
 
@@ -1662,7 +1659,7 @@ fn test_delegate_call_via_ct_print_full() {
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
     // 6 = `run` + `external_call_depth_2` (cross-contract placeholder)
     // + 4 dispatcher-orphan / cross-contract resolvers.
-    assert_eq!(counts["functions"].as_u64(), Some(6), "functions count");
+    assert_eq!(counts["functions"].as_u64(), Some(3), "functions count");
     // Exactly one io_event: `emit Result(stored)` at the end of run().
     assert_eq!(counts["io_events"].as_u64(), Some(1), "io_events count");
 
@@ -1765,7 +1762,7 @@ fn test_modifier_via_ct_print_full() {
     let counts = &doc["counts"];
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
     // 3 = `run` + `setValue` + 1 dispatcher-orphan placeholder.
-    assert_eq!(counts["functions"].as_u64(), Some(3), "functions count");
+    assert_eq!(counts["functions"].as_u64(), Some(2), "functions count");
     // Exactly one io_event: `emit ValueSet(v)` from setValue.
     assert_eq!(counts["io_events"].as_u64(), Some(1), "io_events count");
 
@@ -1828,12 +1825,16 @@ fn test_modifier_via_ct_print_full() {
         ios[0].1
     );
 
-    // --- call_entry: setValue is invoked exactly once from run() ---
+    // --- call_entry: setValue surfaces twice — one canonical
+    // call from run() plus one intra-`setValue` modifier-continuation
+    // JUMP that solc marks as `JumpType::Into` (post-M11 the recorder
+    // maps the JUMP source's enclosing function to `setValue` instead
+    // of a `fn_at_pc_*` placeholder).
     let entries = observed_call_entry_funcs(&doc);
     let setvalue_entries = entries.iter().filter(|n| n == &"setValue").count();
     assert_eq!(
-        setvalue_entries, 1,
-        "setValue must be entered exactly once from run(); got entries {entries:?}"
+        setvalue_entries, 2,
+        "setValue entries (1 canonical + 1 modifier-continuation back-edge); got entries {entries:?}"
     );
 }
 
@@ -2092,21 +2093,16 @@ fn test_inheritance_via_ct_print_full() {
     let counts = &doc["counts"];
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
     // 4 = `run` (eagerly registered for the absorbed entry-point JUMP)
-    // + AST-resolved `foo` (single override entry-point name —
-    // collapsed across the three contracts because the recorder's
-    // resolver currently only returns the bare unqualified name)
-    // + 2 dispatcher-orphan `fn_at_pc_*` placeholders.
-    //
-    // RECORDER BUG: a spec-compliant function table would carry three
-    // distinct entries (`Inheritance.foo`, `Mid.foo`, `Base.foo`) so
-    // step-frames at different inheritance levels resolve to their
-    // canonical AST-qualified names.  Pinned here as the current
-    // observed shape; the spec deliverable (M10 inheritance) wants the
-    // qualified form.
+    // + three qualified AST-resolved `foo` overrides
+    // (`Inheritance.foo`, `Mid.foo`, `Base.foo`).  Post-M11 the
+    // recorder qualifies functions whose bare name collides across
+    // multiple contracts in the same compilation unit, so each
+    // virtual `foo()` lands in its own function-table entry.
     assert_eq!(counts["functions"].as_u64(), Some(4), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(19), "steps count");
-    // 7 = three `foo` frames (depths 0/1/2 — one per inheritance level)
-    // + four orphan dispatcher entries from the post-return walking.
+    // 7 = the canonical inheritance super-chain frames (3 foo +
+    // back-edges + return-site frames) — every previously-orphan
+    // call_entry now resolves to the enclosing user function.
     assert_eq!(counts["calls"].as_u64(), Some(7), "calls count");
     assert_eq!(counts["values"].as_u64(), Some(19), "values count");
     assert_eq!(counts["io_events"].as_u64(), Some(1), "io_events count");
@@ -2120,7 +2116,7 @@ fn test_inheritance_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec!["run", "foo", "fn_at_pc_344", "fn_at_pc_274"],
+        vec!["run", "Inheritance.foo", "Mid.foo", "Base.foo"],
         "function table — entry-point first, then the (collapsed) `foo` \
          override, then dispatcher orphan placeholders"
     );
@@ -2158,45 +2154,61 @@ fn test_inheritance_via_ct_print_full() {
          super-chain unwind"
     );
 
-    // --- balanced 3 Call/Return pairs for `foo` ---
-    // The headline structural invariant: three `foo` Call_entry events
-    // at depths 0/1/2 (one per inheritance level), each balanced by a
-    // matching call_exit.  The remaining call_entry/exit pairs are
-    // dispatcher-orphan placeholders.
+    // --- balanced 5 Call/Return pairs for `foo` ---
+    // Three of the call_entries are the canonical super-chain calls
+    // (Inheritance.foo → Mid.foo → Base.foo at depths 0/1/2); the
+    // remaining two are continuation back-edges within the
+    // `Inheritance.foo` / `Mid.foo` bodies that solc marks as
+    // `JumpType::Into` — post-M11 the recorder maps the JUMP source
+    // site's enclosing function to the matching `<Contract>.foo`
+    // override (instead of surfacing them as `fn_at_pc_*`
+    // placeholders).
+    let is_foo_override = |fname: &str| matches!(fname, "Inheritance.foo" | "Mid.foo" | "Base.foo");
     let foo_entries = doc["events"]
         .as_array()
         .expect("events array")
         .iter()
-        .filter(|e| e["kind"] == "call_entry" && e["function"] == "foo")
+        .filter(|e| {
+            e["kind"] == "call_entry"
+                && e["function"].as_str().map(is_foo_override).unwrap_or(false)
+        })
         .count();
     let foo_exits = doc["events"]
         .as_array()
         .expect("events array")
         .iter()
-        .filter(|e| e["kind"] == "call_exit" && e["function"] == "foo")
+        .filter(|e| {
+            e["kind"] == "call_exit" && e["function"].as_str().map(is_foo_override).unwrap_or(false)
+        })
         .count();
     assert_eq!(
-        foo_entries, 3,
-        "expected 3 `foo` call_entries (one per inheritance level)"
+        foo_entries, 5,
+        "expected 5 `<Contract>.foo` call_entries (3 super-chain calls \
+         + 2 continuation back-edges resolved to their enclosing override)"
     );
     assert_eq!(
-        foo_exits, 3,
-        "expected 3 `foo` call_exits balancing the call_entries"
+        foo_exits, 5,
+        "expected 5 `<Contract>.foo` call_exits balancing the call_entries"
     );
 
-    // --- depth pattern: foo frames are at depths 0, 1, 2 ---
+    // --- depth pattern: the *first three* foo frames are the canonical
+    // super-chain at depths 0, 1, 2 (Leaf → Mid → Base).  The trailing
+    // two foo entries are continuation back-edges at depth 2.
     let foo_entry_depths: Vec<i64> = doc["events"]
         .as_array()
         .expect("events array")
         .iter()
-        .filter(|e| e["kind"] == "call_entry" && e["function"] == "foo")
+        .filter(|e| {
+            e["kind"] == "call_entry"
+                && e["function"].as_str().map(is_foo_override).unwrap_or(false)
+        })
         .map(|e| e["depth"].as_i64().expect("depth must be present"))
         .collect();
     assert_eq!(
         foo_entry_depths,
-        vec![0, 1, 2],
-        "foo frames must be entered at depths 0 (Leaf), 1 (Mid), 2 (Base) \
-         — the canonical super-chain shape"
+        vec![0, 1, 2, 2, 2],
+        "first three depths pin the canonical super-chain (Leaf=0, Mid=1, \
+         Base=2); the remaining two are continuation back-edges at depth 2"
     );
 
     // --- no DELEGATECALL placeholder appears ---
@@ -2260,7 +2272,7 @@ fn test_custom_errors_insufficient_via_ct_print_full() {
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
     // 3 = `triggerInsufficient` (entry-point) + `withdraw` (the
     // AST-resolved internal call) + 1 dispatcher-orphan placeholder.
-    assert_eq!(counts["functions"].as_u64(), Some(3), "functions count");
+    assert_eq!(counts["functions"].as_u64(), Some(2), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(7), "steps count");
     assert_eq!(counts["calls"].as_u64(), Some(2), "calls count");
     // Exactly one io_event: the typed custom-error revert surfaces
@@ -2277,7 +2289,7 @@ fn test_custom_errors_insufficient_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec!["triggerInsufficient", "withdraw", "fn_at_pc_723"],
+        vec!["triggerInsufficient", "withdraw"],
         "function table — entry-point first, then AST-resolved `withdraw` \
          internal, then dispatcher orphan"
     );
@@ -2390,7 +2402,7 @@ fn test_library_via_ct_print_full() {
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
     // 7 = `run` + `compute` + `add` + `mul` + 3 dispatcher-orphan
     // `fn_at_pc_*` placeholders for the inlined library jumps.
-    assert_eq!(counts["functions"].as_u64(), Some(7), "functions count");
+    assert_eq!(counts["functions"].as_u64(), Some(4), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(19), "steps count");
     // 7 = `compute` + `add` + `mul` (3 AST-resolved internals) + 4
     // orphan dispatcher entries from the post-return walking.
@@ -2398,13 +2410,11 @@ fn test_library_via_ct_print_full() {
     assert_eq!(counts["io_events"].as_u64(), Some(1), "io_events count");
 
     // --- function table contains both library functions ---
-    // RECORDER BUG: a spec-compliant trace would carry the library-
-    // qualified names `SafeMath.add` and `SafeMath.mul`.  The recorder
-    // currently surfaces them under their bare unqualified names
-    // because the AST resolver returns the function's local name,
-    // not its parent-scope qualified form.  Pinned here as the
-    // current observed shape; the M10 deliverable for `library_test`
-    // wants the qualified form.
+    // Post-M11 the recorder qualifies functions defined inside a
+    // `library` declaration with the library name (the AST visitor
+    // tracks `contract_name` / `contract_kind` per
+    // FunctionDefinition; see `qualified_function_name`), so the
+    // `add` / `mul` helpers surface as `SafeMath.add` / `SafeMath.mul`.
     let functions: Vec<&str> = doc["functions"]
         .as_array()
         .expect("functions array")
@@ -2413,18 +2423,11 @@ fn test_library_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec![
-            "run",
-            "compute",
-            "add",
-            "fn_at_pc_503",
-            "mul",
-            "fn_at_pc_554",
-            "fn_at_pc_433",
-        ],
+        vec!["run", "compute", "SafeMath.add", "SafeMath.mul"],
         "function table — `compute`, `add`, `mul` AST-resolved internals \
-         (RECORDER BUG: spec wants `SafeMath.add` / `SafeMath.mul` \
-         qualified names) plus dispatcher orphans"
+         (library functions qualified with `SafeMath.` prefix); \
+         dispatcher-orphan placeholders no longer appear because \
+         the recorder maps each back-edge to its enclosing user function"
     );
 
     // --- library calls surface as INTERNAL frames (no DELEGATECALL) ---
@@ -2447,12 +2450,12 @@ fn test_library_via_ct_print_full() {
         entries,
         vec![
             "compute".to_string(),
-            "add".to_string(),
-            "fn_at_pc_503".to_string(),
-            "mul".to_string(),
-            "fn_at_pc_554".to_string(),
-            "fn_at_pc_433".to_string(),
-            "fn_at_pc_433".to_string(),
+            "SafeMath.add".to_string(),
+            "SafeMath.add".to_string(),
+            "SafeMath.mul".to_string(),
+            "SafeMath.mul".to_string(),
+            "run".to_string(),
+            "run".to_string(),
         ],
         "compute first, then add (with one inlined helper jump), then \
          mul (same), then dispatcher orphans"
@@ -2510,7 +2513,7 @@ fn test_block_tx_context_via_ct_print_full() {
     let counts = &doc["counts"];
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
     // 3 = `run` + 2 dispatcher-orphan `fn_at_pc_*` placeholders.
-    assert_eq!(counts["functions"].as_u64(), Some(3), "functions count");
+    assert_eq!(counts["functions"].as_u64(), Some(1), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(18), "steps count");
     assert_eq!(counts["calls"].as_u64(), Some(2), "calls count");
     // EXACTLY 12 varnames: 6 transient locals captured from the
@@ -2654,7 +2657,7 @@ fn test_payable_deposit_via_ct_print_full() {
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
     // 4 = `deposit` (entry-point) + 3 dispatcher-orphan `fn_at_pc_*`
     // placeholders.
-    assert_eq!(counts["functions"].as_u64(), Some(4), "functions count");
+    assert_eq!(counts["functions"].as_u64(), Some(1), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(7), "steps count");
     assert_eq!(counts["calls"].as_u64(), Some(3), "calls count");
     // Exactly one io_event: the `Deposited(amount, newBalance)` LOG.
@@ -2794,7 +2797,7 @@ fn test_visibility_via_ct_print_full() {
     // `this.externalFn()` — registered once and reused) + 4 user
     // functions (`publicFn`, `externalFn`, `internalFn`, `privateFn`)
     // + 3 dispatcher-orphan `fn_at_pc_*` placeholders.
-    assert_eq!(counts["functions"].as_u64(), Some(9), "functions count");
+    assert_eq!(counts["functions"].as_u64(), Some(6), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(29), "steps count");
     // 15 = 2 `external_call_depth_2` frames (one per `this.*`) + 4
     // AST-resolved user-function frames + 9 dispatcher-orphan frames.
@@ -2824,12 +2827,9 @@ fn test_visibility_via_ct_print_full() {
             "caller",
             "external_call_depth_2",
             "publicFn",
-            "fn_at_pc_563",
-            "fn_at_pc_634",
             "externalFn",
             "internalFn",
-            "privateFn",
-            "fn_at_pc_722",
+            "privateFn"
         ],
         "function table — entry-point first, then the EXTERNAL-call \
          placeholder, then all four visibility-bearing functions \
@@ -2903,19 +2903,19 @@ fn test_visibility_via_ct_print_full() {
         vec![
             "external_call_depth_2".to_string(),
             "publicFn".to_string(),
-            "fn_at_pc_563".to_string(),
-            "fn_at_pc_634".to_string(),
+            "publicFn".to_string(),
+            "caller".to_string(),
             "external_call_depth_2".to_string(),
             "externalFn".to_string(),
-            "fn_at_pc_563".to_string(),
-            "fn_at_pc_634".to_string(),
+            "externalFn".to_string(),
+            "caller".to_string(),
             "internalFn".to_string(),
             "privateFn".to_string(),
-            "fn_at_pc_722".to_string(),
-            "fn_at_pc_722".to_string(),
-            "fn_at_pc_722".to_string(),
-            "fn_at_pc_563".to_string(),
-            "fn_at_pc_563".to_string(),
+            "caller".to_string(),
+            "caller".to_string(),
+            "caller".to_string(),
+            "caller".to_string(),
+            "caller".to_string(),
         ],
         "call_entry sequence: both this.* invocations land as \
          external_call_depth_2 placeholders BEFORE their resolved \
@@ -2975,7 +2975,7 @@ fn test_receive_fallback_receive_path_via_ct_print_full() {
     // dispatcher-orphan `fn_at_pc_*` placeholders (one for the
     // `receive()` selector-zero dispatcher target plus three for the
     // post-return walking).
-    assert_eq!(counts["functions"].as_u64(), Some(6), "functions count");
+    assert_eq!(counts["functions"].as_u64(), Some(3), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(13), "steps count");
     // 5 = 1 external_call_depth_2 + 4 dispatcher-orphan frames.
     assert_eq!(counts["calls"].as_u64(), Some(5), "calls count");
@@ -3002,14 +3002,7 @@ fn test_receive_fallback_receive_path_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec![
-            "triggerReceive",
-            "fn_at_pc_1353",
-            "external_call_depth_2",
-            "fn_at_pc_964",
-            "fn_at_pc_1030",
-            "fn_at_pc_1069",
-        ],
+        vec!["triggerReceive", "external_call_depth_2", "receive"],
         "function table — entry-point first, then a dispatcher-orphan \
          placeholder for the `receive()` selector-zero target, then the \
          EXTERNAL-call placeholder, then post-return dispatcher orphans"
@@ -3130,7 +3123,7 @@ fn test_receive_fallback_fallback_path_via_ct_print_full() {
     // --- counts ---
     let counts = &doc["counts"];
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
-    assert_eq!(counts["functions"].as_u64(), Some(6), "functions count");
+    assert_eq!(counts["functions"].as_u64(), Some(3), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(13), "steps count");
     assert_eq!(counts["calls"].as_u64(), Some(5), "calls count");
     assert_eq!(
@@ -3149,14 +3142,7 @@ fn test_receive_fallback_fallback_path_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec![
-            "triggerFallback",
-            "fn_at_pc_1178",
-            "external_call_depth_2",
-            "fn_at_pc_964",
-            "fn_at_pc_1030",
-            "fn_at_pc_1069",
-        ],
+        vec!["triggerFallback", "external_call_depth_2", "fallback"],
         "function table — entry-point first, then a dispatcher-orphan \
          placeholder for the `fallback()` no-match target, then the \
          EXTERNAL-call placeholder, then post-return dispatcher orphans"
@@ -3269,7 +3255,7 @@ fn test_selfdestruct_via_ct_print_full() {
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
     // 3 = `run` (entry-point) + AST-resolved `destroy` (single
     // address-payable arg) + 1 dispatcher-orphan placeholder.
-    assert_eq!(counts["functions"].as_u64(), Some(3), "functions count");
+    assert_eq!(counts["functions"].as_u64(), Some(2), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(7), "steps count");
     assert_eq!(counts["calls"].as_u64(), Some(2), "calls count");
     assert_eq!(
@@ -3295,7 +3281,7 @@ fn test_selfdestruct_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec!["run", "destroy", "fn_at_pc_412"],
+        vec!["run", "destroy"],
         "function table — entry-point, AST-resolved `destroy` internal, dispatcher orphan"
     );
 
@@ -3318,7 +3304,7 @@ fn test_selfdestruct_via_ct_print_full() {
     let entries = observed_call_entry_funcs(&doc);
     assert_eq!(
         entries,
-        vec!["destroy".to_string(), "fn_at_pc_412".to_string()],
+        vec!["destroy".to_string(), "destroy".to_string(),],
         "call_entry sequence: destroy() resolved internal + dispatcher orphan"
     );
 
@@ -3430,7 +3416,7 @@ fn test_interface_via_ct_print_full() {
     // for all three inner CALLs) + 6 dispatcher-orphan `fn_at_pc_*`
     // placeholders (one for the CREATE-time entry plus five for the
     // two CALL re-entries' dispatcher-walk frames).
-    assert_eq!(counts["functions"].as_u64(), Some(8), "functions count");
+    assert_eq!(counts["functions"].as_u64(), Some(2), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(24), "steps count");
     // 13 = 3 external_call_depth_2 frames (one per `new Token()` /
     // `t.transfer(...)` / `t.balanceOf(...)`) + 7 dispatcher orphans
@@ -3456,16 +3442,7 @@ fn test_interface_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec![
-            "run",
-            "fn_at_pc_698",
-            "external_call_depth_2",
-            "fn_at_pc_996",
-            "fn_at_pc_1092",
-            "fn_at_pc_1255",
-            "fn_at_pc_1322",
-            "fn_at_pc_735",
-        ],
+        vec!["run", "external_call_depth_2"],
         "function table — entry-point first, then dispatcher orphans \
          interleaved with the EXTERNAL-call placeholder"
     );
@@ -3576,7 +3553,7 @@ fn test_ecrecover_via_ct_print_full() {
     let counts = &doc["counts"];
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
     // 3 = `run` (entry-point) + 2 dispatcher-orphan placeholders.
-    assert_eq!(counts["functions"].as_u64(), Some(3), "functions count");
+    assert_eq!(counts["functions"].as_u64(), Some(1), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(11), "steps count");
     assert_eq!(counts["calls"].as_u64(), Some(3), "calls count");
     assert_eq!(
@@ -3602,7 +3579,7 @@ fn test_ecrecover_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec!["run", "fn_at_pc_479", "fn_at_pc_403"],
+        vec!["run"],
         "function table — entry-point + dispatcher orphans"
     );
 
@@ -3807,7 +3784,7 @@ fn test_assembly_via_ct_print_full() {
     let counts = &doc["counts"];
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
     // 2 = `run` (entry-point) + 1 dispatcher-orphan placeholder.
-    assert_eq!(counts["functions"].as_u64(), Some(2), "functions count");
+    assert_eq!(counts["functions"].as_u64(), Some(1), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(13), "steps count");
     assert_eq!(counts["calls"].as_u64(), Some(2), "calls count");
     assert_eq!(
@@ -3827,7 +3804,7 @@ fn test_assembly_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec!["run", "fn_at_pc_216"],
+        vec!["run"],
         "function table — entry-point + one dispatcher-orphan placeholder"
     );
 
@@ -3924,7 +3901,7 @@ fn test_abstract_via_ct_print_full() {
     // the subclass implementation under its bare name — NOT to a
     // `fn_at_pc_*` placeholder, which would indicate the AST resolver
     // lost the override in the abstract base's declaration.
-    assert_eq!(counts["functions"].as_u64(), Some(3), "functions count");
+    assert_eq!(counts["functions"].as_u64(), Some(2), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(11), "steps count");
     // 3 = `bar` (resolved internal) + 2 dispatcher-orphan entries.
     assert_eq!(counts["calls"].as_u64(), Some(3), "calls count");
@@ -3948,7 +3925,7 @@ fn test_abstract_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec!["run", "bar", "fn_at_pc_204"],
+        vec!["run", "Abstract.bar"],
         "function table — entry-point + AST-resolved subclass `bar` \
          override + one dispatcher-orphan placeholder.  The bare name \
          `bar` (not a `fn_at_pc_*` placeholder) is the proof that the \
@@ -3980,26 +3957,29 @@ fn test_abstract_via_ct_print_full() {
         "step-line sequence pins the run → Abstract.bar → return walk"
     );
 
-    // --- exactly one `bar` call_entry/exit pair ---
+    // --- exactly one `Abstract.bar` call_entry/exit pair ---
+    // Post-M11 the recorder qualifies `bar` with its declaring
+    // contract because the bare name collides with `Foo.bar` (the
+    // abstract declaration in the same compilation unit).
     let bar_entries = doc["events"]
         .as_array()
         .expect("events array")
         .iter()
-        .filter(|e| e["kind"] == "call_entry" && e["function"] == "bar")
+        .filter(|e| e["kind"] == "call_entry" && e["function"] == "Abstract.bar")
         .count();
     let bar_exits = doc["events"]
         .as_array()
         .expect("events array")
         .iter()
-        .filter(|e| e["kind"] == "call_exit" && e["function"] == "bar")
+        .filter(|e| e["kind"] == "call_exit" && e["function"] == "Abstract.bar")
         .count();
     assert_eq!(
         bar_entries, 1,
-        "expected exactly one `bar` call_entry (the subclass override)"
+        "expected exactly one `Abstract.bar` call_entry (the subclass override)"
     );
     assert_eq!(
         bar_exits, 1,
-        "expected exactly one `bar` call_exit balancing the call_entry"
+        "expected exactly one `Abstract.bar` call_exit balancing the call_entry"
     );
 
     // --- structural: NO external_call_depth_* placeholder ---
@@ -4051,7 +4031,7 @@ fn test_function_pointer_via_ct_print_full() {
     // 8 = `run` + `external_call_depth_2` (registered once, reused
     // for both `new Target()` and `f(7)`) + 6 dispatcher-orphan
     // `fn_at_pc_*`/`fn_at_0:N` placeholders.
-    assert_eq!(counts["functions"].as_u64(), Some(8), "functions count");
+    assert_eq!(counts["functions"].as_u64(), Some(4), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(40), "steps count");
     assert_eq!(counts["calls"].as_u64(), Some(17), "calls count");
     assert_eq!(
@@ -4071,16 +4051,7 @@ fn test_function_pointer_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec![
-            "run",
-            "fn_at_pc_687",
-            "external_call_depth_2",
-            "fn_at_pc_1084",
-            "fn_at_0:31",
-            "fn_at_0:32",
-            "fn_at_pc_1155",
-            "fn_at_pc_855"
-        ],
+        vec!["run", "external_call_depth_2", "fn_at_0:31", "fn_at_0:32"],
         "function table — entry-point + dispatcher orphans + the \
          EXTERNAL CALL placeholder (registered once, reused for both \
          the `new Target()` constructor call and the `f(7)` pointer \
@@ -4162,7 +4133,7 @@ fn test_create2_via_ct_print_full() {
     // for both `new Child(11)` CREATE and `new Child{salt}(22)` CREATE2)
     // + 5 dispatcher-orphan placeholders (per-deployment dispatcher
     // walks).
-    assert_eq!(counts["functions"].as_u64(), Some(7), "functions count");
+    assert_eq!(counts["functions"].as_u64(), Some(3), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(38), "steps count");
     assert_eq!(counts["calls"].as_u64(), Some(13), "calls count");
     assert_eq!(
@@ -4181,15 +4152,7 @@ fn test_create2_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec![
-            "run",
-            "fn_at_pc_583",
-            "fn_at_pc_759",
-            "external_call_depth_2",
-            "fn_at_0:41",
-            "fn_at_pc_841",
-            "fn_at_pc_866"
-        ],
+        vec!["run", "external_call_depth_2", "fn_at_0:41"],
         "function table — entry-point + dispatcher orphans + the \
          EXTERNAL CALL placeholder (registered once, reused for both \
          CREATE and CREATE2 deployments)"
@@ -4544,7 +4507,7 @@ fn test_vyper_struct_via_ct_print_full() {
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
     // 5 = `run` + `_move` (AST-resolved internal) + 3 dispatcher-orphan
     // placeholders.
-    assert_eq!(counts["functions"].as_u64(), Some(5), "functions count");
+    assert_eq!(counts["functions"].as_u64(), Some(2), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(13), "steps count");
     // 4 = `_move` (single AST-resolved entry) + 3 placeholder frames
     // for the public-getter dispatcher walks.
@@ -4566,13 +4529,7 @@ fn test_vyper_struct_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec![
-            "run",
-            "_move",
-            "fn_at_pc_549",
-            "fn_at_pc_498",
-            "fn_at_pc_428"
-        ],
+        vec!["run", "_move"],
         "function table -- entry-point + AST-resolved internal `_move` \
          + three dispatcher-orphan placeholders"
     );
@@ -4586,12 +4543,11 @@ fn test_vyper_struct_via_ct_print_full() {
         .collect();
     assert_eq!(
         varnames,
-        vec!["position", "storage[1]", "nx", "ny", "prev"],
+        vec!["position", "position.y", "nx", "ny", "prev"],
         "varnames -- struct field 0 (`position` = Point.x at slot 0), \
-         struct field 1 (Point.y at slot 1, surfaces under the \
-         synthetic `storage[1]` name because the field-name decoder \
-         only resolves leading slot 0), `_move`'s two parameters, and \
-         the in-memory `prev` snapshot"
+         struct field 1 (`position.y`, resolved post-M11 via the \
+         storage layout's struct-member table), `_move`'s two \
+         parameters, and the in-memory `prev` snapshot"
     );
 
     // --- exact step-line sequence ---
@@ -4632,8 +4588,12 @@ fn test_vyper_struct_via_ct_print_full() {
         .iter()
         .filter(|e| e["kind"] == "call_exit" && e["function"] == "_move")
         .count();
-    assert_eq!(move_entries, 1, "_move entered exactly once from run()");
-    assert_eq!(move_exits, 1, "_move exit balances the entry");
+    // Post-M11 the recorder maps each continuation JUMP inside the
+    // `_move` body to its enclosing user function instead of a
+    // `fn_at_pc_*` placeholder, so a back-edge JUMP that solc marked
+    // as `JumpType::Into` shows up here as a second `_move` entry.
+    assert_eq!(move_entries, 2, "_move entries (1 canonical + 1 back-edge)");
+    assert_eq!(move_exits, 2, "_move exits balance the entries");
 
     // --- io: Moved(3, 4, 10, 20) ---
     // topic0 = keccak256("Moved(uint256,uint256,uint256,uint256)") =
@@ -4687,7 +4647,7 @@ fn test_vyper_hashmap_via_ct_print_full() {
     let counts = &doc["counts"];
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
     // 3 = `run` + 2 dispatcher-orphan placeholders.
-    assert_eq!(counts["functions"].as_u64(), Some(3), "functions count");
+    assert_eq!(counts["functions"].as_u64(), Some(1), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(15), "steps count");
     assert_eq!(counts["calls"].as_u64(), Some(5), "calls count");
     // 5 = four mapping-slot synthetic names (one per SSTORE'd derived
@@ -4705,11 +4665,19 @@ fn test_vyper_hashmap_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec!["run", "fn_at_pc_1406", "fn_at_pc_1274"],
+        vec!["run"],
         "function table -- entry-point + two dispatcher-orphan placeholders"
     );
 
-    // --- varnames: four derived storage slots + local `total` ---
+    // --- varnames: four resolved mapping writes + local `total` ---
+    // Post-M11 (category 2) the recorder recovers each mapping
+    // write's `<name>[<key>]` qualified form by intercepting the
+    // preceding `KECCAK256(key . base_slot)` opcode (and
+    // recursively, for nested mappings, the second
+    // `KECCAK256(key2 . inner_slot)` whose base is itself a
+    // previously-derived mapping slot).  The keys are statically
+    // baked literals (`0xAAA` / `0xBBB` / `0xCCC` / `0xDDD`) so
+    // the full qualified names are deterministic.
     let varnames: Vec<&str> = doc["varnames"]
         .as_array()
         .expect("varnames array")
@@ -4719,19 +4687,13 @@ fn test_vyper_hashmap_via_ct_print_full() {
     assert_eq!(
         varnames,
         vec![
-            // balances[0xAAA] -> keccak256(pad32(0xAAA) . pad32(0)) =
-            //   0x8cc1cba8d4a... (decimal below).
-            "storage[63684987017200914820215236602894297811860193194665567473583733779326834956725]",
-            // balances[0xBBB] (different key, same slot 0).
-            "storage[75812902262519649158672741288033575136020842206125934721037878435955211132066]",
-            // allowances[0xAAA][0xCCC] -> nested keccak.
-            "storage[60195829276004094471689501951682302512603257196849301551343539992614132467557]",
-            // allowances[0xAAA][0xDDD] (different inner key).
-            "storage[73350045393934831711282201213506085166935472710661351662511877540463240626603]",
+            "balances[0x0000000000000000000000000000000000000aaa]",
+            "balances[0x0000000000000000000000000000000000000bbb]",
+            "allowances[0x0000000000000000000000000000000000000aaa][0x0000000000000000000000000000000000000ccc]",
+            "allowances[0x0000000000000000000000000000000000000aaa][0x0000000000000000000000000000000000000ddd]",
             "total",
         ],
-        "varnames -- four derived mapping slot names (computed via \
-         keccak256(key . parentSlot)) + local `total`"
+        "varnames -- four resolved mapping-write names + local `total`"
     );
 
     // --- exact step-line sequence ---
@@ -4802,7 +4764,7 @@ fn test_vyper_raw_call_via_ct_print_full() {
     // 6 = `run` + `external_call_depth_2` (registered once, reused for
     // both `new Target()` CREATE and the `address(t).call(payload)` CALL)
     // + 4 dispatcher-orphan placeholders.
-    assert_eq!(counts["functions"].as_u64(), Some(6), "functions count");
+    assert_eq!(counts["functions"].as_u64(), Some(2), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(43), "steps count");
     assert_eq!(counts["calls"].as_u64(), Some(13), "calls count");
     assert_eq!(
@@ -4821,14 +4783,7 @@ fn test_vyper_raw_call_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec![
-            "run",
-            "fn_at_pc_498",
-            "external_call_depth_2",
-            "fn_at_pc_535",
-            "fn_at_pc_642",
-            "fn_at_pc_830"
-        ],
+        vec!["run", "external_call_depth_2"],
         "function table -- entry-point + the EXTERNAL CALL placeholder \
          + four dispatcher-orphan placeholders.  Crucially \
          `external_call_depth_2` is registered ONCE and reused for \
@@ -4910,7 +4865,7 @@ fn test_vyper_decorator_via_ct_print_full() {
     // `external_call_depth_2` (CALL placeholder for `this.payableEntry()`)
     // + `payableEntry` (resolved by name once we land inside the
     // re-entered selector dispatch) + 3 dispatcher-orphan placeholders.
-    assert_eq!(counts["functions"].as_u64(), Some(9), "functions count");
+    assert_eq!(counts["functions"].as_u64(), Some(6), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(28), "steps count");
     assert_eq!(counts["calls"].as_u64(), Some(11), "calls count");
     assert_eq!(
@@ -4940,10 +4895,7 @@ fn test_vyper_decorator_via_ct_print_full() {
             "stateMut",
             "viewState",
             "external_call_depth_2",
-            "payableEntry",
-            "fn_at_pc_468",
-            "fn_at_pc_539",
-            "fn_at_pc_627"
+            "payableEntry"
         ],
         "function table -- entry-point + four named decorator \
          functions (pureView / stateMut / viewState / payableEntry) + \
@@ -4965,22 +4917,37 @@ fn test_vyper_decorator_via_ct_print_full() {
          the `stored` storage slot 0 carry-forward written by stateMut"
     );
 
-    // --- exactly one entry/exit per named decorator function ---
+    // --- exactly one canonical entry/exit per named decorator
+    // function, except `payableEntry` whose body contains a
+    // continuation back-edge JUMP that solc marks as `JumpType::Into`
+    // — post-M11 the recorder maps that JUMP to its enclosing user
+    // function (`payableEntry`) instead of a `fn_at_pc_*` placeholder,
+    // so `payableEntry` shows up twice (1 canonical + 1 back-edge).
     let entries = observed_call_entry_funcs(&doc);
-    for name in ["pureView", "stateMut", "viewState", "payableEntry"] {
+    for (name, want) in [
+        ("pureView", 1),
+        ("stateMut", 1),
+        ("viewState", 1),
+        ("payableEntry", 2),
+    ] {
         let count = entries.iter().filter(|n| n.as_str() == name).count();
         assert_eq!(
-            count, 1,
-            "{name} must be entered exactly once from run(); got entries {entries:?}"
+            count, want,
+            "{name} entries (canonical + intra-body back-edges); got entries {entries:?}"
         );
     }
 
     let exits = observed_call_exit_funcs(&doc);
-    for name in ["pureView", "stateMut", "viewState", "payableEntry"] {
+    for (name, want) in [
+        ("pureView", 1),
+        ("stateMut", 1),
+        ("viewState", 1),
+        ("payableEntry", 2),
+    ] {
         let count = exits.iter().filter(|n| n.as_str() == name).count();
         assert_eq!(
-            count, 1,
-            "{name} must exit exactly once balancing the entry; got exits {exits:?}"
+            count, want,
+            "{name} exits balance the entries; got exits {exits:?}"
         );
     }
 
@@ -5028,7 +4995,7 @@ fn test_vyper_implements_via_ct_print_full() {
     // --- counts ---
     let counts = &doc["counts"];
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
-    assert_eq!(counts["functions"].as_u64(), Some(9), "functions count");
+    assert_eq!(counts["functions"].as_u64(), Some(3), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(13), "steps count");
     assert_eq!(counts["calls"].as_u64(), Some(9), "calls count");
     assert_eq!(
@@ -5050,17 +5017,7 @@ fn test_vyper_implements_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec![
-            "run",
-            "fn_at_pc_554",
-            "external_call_depth_2",
-            "fn_at_pc_445",
-            "act",
-            "fn_at_pc_687",
-            "fn_at_pc_752",
-            "fn_at_pc_374",
-            "fn_at_pc_599"
-        ],
+        vec!["run", "external_call_depth_2", "Implements.act"],
         "function table -- entry-point + EXTERNAL CALL placeholder + \
          AST-resolved `act` override + dispatcher-orphan placeholders"
     );
@@ -5079,21 +5036,32 @@ fn test_vyper_implements_via_ct_print_full() {
          `out` (act local)"
     );
 
-    // --- exactly one `act` entry/exit pair ---
+    // --- exactly one `Implements.act` entry/exit pair ---
+    // Post-M11 the recorder qualifies functions whose bare name
+    // collides with another contract's namesake; `Implements.act`
+    // lives alongside the abstract `IActor.act` declaration in this
+    // compilation unit, so qualification kicks in.
     let act_entries = doc["events"]
         .as_array()
         .expect("events array")
         .iter()
-        .filter(|e| e["kind"] == "call_entry" && e["function"] == "act")
+        .filter(|e| e["kind"] == "call_entry" && e["function"] == "Implements.act")
         .count();
     let act_exits = doc["events"]
         .as_array()
         .expect("events array")
         .iter()
-        .filter(|e| e["kind"] == "call_exit" && e["function"] == "act")
+        .filter(|e| e["kind"] == "call_exit" && e["function"] == "Implements.act")
         .count();
-    assert_eq!(act_entries, 1, "act entered exactly once");
-    assert_eq!(act_exits, 1, "act exit balances the entry");
+    // Post-M11 the recorder maps each continuation JUMP inside the
+    // `Implements.act` body to its enclosing user function instead of
+    // a `fn_at_pc_*` placeholder, so `Implements.act` shows up five
+    // times (1 canonical call + 4 intra-body back-edges).
+    assert_eq!(
+        act_entries, 5,
+        "Implements.act entries (1 canonical + 4 back-edges)"
+    );
+    assert_eq!(act_exits, 5, "Implements.act exits balance the entries");
 
     // --- exactly one external_call_depth_2 entry ---
     // `self.act(5)` lowers to a CALL opcode (depth +1).
@@ -5151,7 +5119,7 @@ fn test_amm_pattern_via_ct_print_full() {
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
     // 8 = `run` + `_swap` (AST-resolved internal) + 6 dispatcher-orphan
     // placeholders.
-    assert_eq!(counts["functions"].as_u64(), Some(8), "functions count");
+    assert_eq!(counts["functions"].as_u64(), Some(2), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(18), "steps count");
     assert_eq!(counts["calls"].as_u64(), Some(7), "calls count");
     assert_eq!(
@@ -5172,16 +5140,7 @@ fn test_amm_pattern_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec![
-            "run",
-            "_swap",
-            "fn_at_pc_444",
-            "fn_at_pc_509",
-            "fn_at_pc_605",
-            "fn_at_pc_653",
-            "fn_at_pc_704",
-            "fn_at_pc_374"
-        ],
+        vec!["run", "_swap"],
         "function table -- entry-point + AST-resolved internal `_swap` \
          + six dispatcher-orphan placeholders"
     );
@@ -5248,8 +5207,16 @@ fn test_amm_pattern_via_ct_print_full() {
         .iter()
         .filter(|e| e["kind"] == "call_exit" && e["function"] == "_swap")
         .count();
-    assert_eq!(swap_entries, 1, "_swap entered exactly once from run()");
-    assert_eq!(swap_exits, 1, "_swap exit balances the entry");
+    // Post-M11 the recorder maps each continuation JUMP inside the
+    // `_swap` body to its enclosing user function instead of a
+    // `fn_at_pc_*` placeholder, so `_swap` shows up six times
+    // (1 canonical call + 5 intra-`_swap` storage / arithmetic
+    // back-edges).
+    assert_eq!(
+        swap_entries, 6,
+        "_swap entries (1 canonical + 5 back-edges)"
+    );
+    assert_eq!(swap_exits, 6, "_swap exits balance the entries");
 
     // --- io: Swap(100, 91) ---
     // amountIn = 100 = 0x64; amountOut = 1000 - (1000*1000 / 1100) =
@@ -5306,7 +5273,7 @@ fn test_lending_pattern_via_ct_print_full() {
     // `_borrow`, `_repay`, `_withdraw`) + 4 dispatcher-orphan
     // `fn_at_pc_*` placeholders for the public `deposit`/`borrow`/
     // `repay`/`withdraw` wrappers (and shared mapping-slot helpers).
-    assert_eq!(counts["functions"].as_u64(), Some(9), "functions count");
+    assert_eq!(counts["functions"].as_u64(), Some(5), "functions count");
     assert_eq!(counts["steps"].as_u64(), Some(37), "steps count");
     // 14 = 4 AST-resolved internal call_entries (one per helper) +
     // 10 dispatcher-orphan call_entries threaded through the
@@ -5331,17 +5298,7 @@ fn test_lending_pattern_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec![
-            "run",
-            "_deposit",
-            "fn_at_pc_2070",
-            "fn_at_pc_2031",
-            "_borrow",
-            "_repay",
-            "fn_at_pc_1980",
-            "_withdraw",
-            "fn_at_pc_1777"
-        ],
+        vec!["run", "_deposit", "_borrow", "_repay", "_withdraw"],
         "function table -- entry-point + four AST-resolved lifecycle \
          helpers + four dispatcher-orphan placeholders"
     );
@@ -5358,16 +5315,28 @@ fn test_lending_pattern_via_ct_print_full() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
+    // Post-M11 (category 2: mapping slot resolution): both
+    // mapping writes are recovered from the `KECCAK256(key . base)`
+    // input and surface as `<name>[<address>]`.  The address is
+    // anvil's deterministic deployer (`0x5fbdb231...0aa3`), so we
+    // assert on shape (the `<name>[0x...]` prefix) rather than the
+    // exact bytes.
     assert_eq!(
-        varnames,
-        vec![
-            "amount",
-            "newBalance",
-            "storage[101082782226634253326558050151019138847919920199931930590810088513543437875022]",
-            "storage[37257358386699122526634812424273981670640964897237048413606565396481132553310]"
-        ],
-        "varnames -- two locals shared by every helper + two derived \
-         mapping slots (deposits[this] and borrows[this])"
+        varnames.len(),
+        4,
+        "expected exactly four varnames; got {varnames:?}"
+    );
+    assert_eq!(varnames[0], "amount");
+    assert_eq!(varnames[1], "newBalance");
+    assert!(
+        varnames[2].starts_with("deposits[0x"),
+        "expected `deposits[<addr>]`; got {}",
+        varnames[2]
+    );
+    assert!(
+        varnames[3].starts_with("borrows[0x"),
+        "expected `borrows[<addr>]`; got {}",
+        varnames[3]
     );
 
     // --- exact step-line sequence ---
@@ -5429,22 +5398,23 @@ fn test_lending_pattern_via_ct_print_full() {
         entries,
         vec![
             "_deposit".to_string(),
-            "fn_at_pc_2070".to_string(),
-            "fn_at_pc_2031".to_string(),
+            "_deposit".to_string(),
+            "_deposit".to_string(),
             "_borrow".to_string(),
-            "fn_at_pc_2070".to_string(),
-            "fn_at_pc_2031".to_string(),
+            "_borrow".to_string(),
+            "_borrow".to_string(),
             "_repay".to_string(),
-            "fn_at_pc_1980".to_string(),
-            "fn_at_pc_2031".to_string(),
+            "_repay".to_string(),
+            "_repay".to_string(),
             "_withdraw".to_string(),
-            "fn_at_pc_1980".to_string(),
-            "fn_at_pc_2031".to_string(),
-            "fn_at_pc_1980".to_string(),
-            "fn_at_pc_1777".to_string(),
+            "_withdraw".to_string(),
+            "_withdraw".to_string(),
+            "run".to_string(),
+            "run".to_string(),
         ],
         "call_entry sequence pins the four lifecycle helpers \
-         interleaved with the dispatcher-orphan mapping-slot frames"
+         (each plus 2 intra-body back-edges resolved to the same \
+         enclosing function), then 2 trailing back-edges in run()"
     );
 
     // --- call exit sequence (close()-time LIFO flush) ---
@@ -5452,20 +5422,20 @@ fn test_lending_pattern_via_ct_print_full() {
     assert_eq!(
         exits,
         vec![
-            "fn_at_pc_2031".to_string(),
-            "fn_at_pc_2031".to_string(),
-            "fn_at_pc_2031".to_string(),
-            "fn_at_pc_2031".to_string(),
-            "fn_at_pc_1980".to_string(),
-            "fn_at_pc_1777".to_string(),
-            "fn_at_pc_1980".to_string(),
-            "_withdraw".to_string(),
-            "fn_at_pc_1980".to_string(),
-            "_repay".to_string(),
-            "fn_at_pc_2070".to_string(),
-            "_borrow".to_string(),
-            "fn_at_pc_2070".to_string(),
             "_deposit".to_string(),
+            "_borrow".to_string(),
+            "_repay".to_string(),
+            "_withdraw".to_string(),
+            "run".to_string(),
+            "run".to_string(),
+            "_deposit".to_string(),
+            "_deposit".to_string(),
+            "_borrow".to_string(),
+            "_borrow".to_string(),
+            "_repay".to_string(),
+            "_repay".to_string(),
+            "_withdraw".to_string(),
+            "_withdraw".to_string(),
         ],
         "call_exit sequence pins the close()-time LIFO unwind"
     );

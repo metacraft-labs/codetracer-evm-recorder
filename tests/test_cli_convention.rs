@@ -536,7 +536,13 @@ fn test_recorded_trace_via_ct_print_json() {
     let unresolved: Vec<usize> = call_entries
         .iter()
         .enumerate()
-        .filter_map(|(i, e)| if e.get("function").and_then(|v| v.as_str()).is_none() { Some(i) } else { None })
+        .filter_map(|(i, e)| {
+            if e.get("function").and_then(|v| v.as_str()).is_none() {
+                Some(i)
+            } else {
+                None
+            }
+        })
         .collect();
     assert!(
         unresolved.is_empty(),
@@ -586,11 +592,9 @@ fn test_recorded_trace_via_ct_print_json() {
         for v in vars {
             let name = v["varname"].as_str().unwrap_or("<missing>");
             let value = &v["value"];
-            let kind = value["kind"]
-                .as_str()
-                .unwrap_or_else(|| panic!(
-                    "step {step_index} var `{name}` is missing value.kind; got {value}"
-                ));
+            let kind = value["kind"].as_str().unwrap_or_else(|| {
+                panic!("step {step_index} var `{name}` is missing value.kind; got {value}")
+            });
             match kind {
                 "Raw" => {
                     let r = value["r"].as_str().unwrap_or_else(|| {
@@ -665,9 +669,7 @@ fn test_recorded_trace_via_ct_print_json() {
     ];
     for (name, value) in expected {
         assert!(
-            observed_vars
-                .iter()
-                .any(|(n, v)| n == name && v == value),
+            observed_vars.iter().any(|(n, v)| n == name && v == value),
             "expected step variable `{name}` = Raw `{value}` in --full output; \
              observed = {observed_vars:?}"
         );
