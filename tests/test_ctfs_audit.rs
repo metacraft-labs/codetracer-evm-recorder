@@ -360,13 +360,11 @@ fn audit_ctfs_linked_writer_staged_args_roundtrip() {
     let tmp_dir = tempfile::TempDir::new().unwrap();
     let mut writer = create_trace_writer("linked-writer-args", &[], TraceEventsFileFormat::Ctfs);
     let events_path = tmp_dir.path().join("trace.json");
-    let metadata_path = tmp_dir.path().join("trace_metadata.json");
-    let paths_path = tmp_dir.path().join("trace_paths.json");
     let source_path = tmp_dir.path().join("FlowTest.sol");
 
     TraceWriter::begin_writing_trace_events(&mut *writer, &events_path).unwrap();
-    TraceWriter::begin_writing_trace_metadata(&mut *writer, &metadata_path).unwrap();
-    TraceWriter::begin_writing_trace_paths(&mut *writer, &paths_path).unwrap();
+    // Legacy metadata/paths begin calls were no-ops on the Nim side and
+    // were retired with the v3 CTFS rollout (follow-up #254 phase 2).
     TraceWriter::start(&mut *writer, &source_path, Line(1));
 
     let type_id = TraceWriter::ensure_type_id(&mut *writer, TypeKind::Int, "uint256");

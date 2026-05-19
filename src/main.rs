@@ -643,9 +643,6 @@ async fn record(args: RecordArgs) -> Result<()> {
         .context("failed to finalize EvmRecorder")?;
 
     eprintln!("Trace written to {}", out_dir.display());
-    eprintln!("  trace.json");
-    eprintln!("  trace_metadata.json");
-    eprintln!("  trace_paths.json");
     eprintln!("  {}", source_filename.to_string_lossy());
 
     Ok(())
@@ -853,9 +850,6 @@ async fn record_yul(args: RecordArgs, source_path: &Path, out_dir: &Path) -> Res
         .context("failed to finalize EvmRecorder")?;
 
     eprintln!("Trace written to {}", out_dir.display());
-    eprintln!("  trace.json");
-    eprintln!("  trace_metadata.json");
-    eprintln!("  trace_paths.json");
     eprintln!("  {}", source_filename.to_string_lossy());
 
     Ok(())

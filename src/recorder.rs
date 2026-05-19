@@ -323,21 +323,12 @@ impl EvmRecorder {
 
     /// Initialize trace output files.
     ///
-    /// The path arguments are essentially hints for the Nim writer: the
-    /// produced `.ct` file goes to `<output_dir>/<program>.ct` regardless,
-    /// so we keep these as the legacy `trace.json` / `trace_metadata.json`
-    /// / `trace_paths.json` names for backward compatibility with any
-    /// external callers that introspect them.
+    /// The path argument is essentially a hint for the Nim writer: the
+    /// produced `.ct` file goes to `<output_dir>/<program>.ct` regardless.
     pub fn initialize(&mut self) -> eyre::Result<()> {
         let events_path = self.output_dir.join("trace.json");
-        let metadata_path = self.output_dir.join("trace_metadata.json");
-        let paths_path = self.output_dir.join("trace_paths.json");
 
         TraceWriter::begin_writing_trace_events(&mut *self.writer, &events_path)
-            .map_err(|e| eyre::eyre!("{}", e))?;
-        TraceWriter::begin_writing_trace_metadata(&mut *self.writer, &metadata_path)
-            .map_err(|e| eyre::eyre!("{}", e))?;
-        TraceWriter::begin_writing_trace_paths(&mut *self.writer, &paths_path)
             .map_err(|e| eyre::eyre!("{}", e))?;
 
         self.register_evm_types();
@@ -1838,9 +1829,8 @@ impl EvmRecorder {
 
         TraceWriter::finish_writing_trace_events(&mut *self.writer)
             .map_err(|e| eyre::eyre!("{}", e))?;
-        TraceWriter::finish_writing_trace_metadata(&mut *self.writer)
-            .map_err(|e| eyre::eyre!("{}", e))?;
-        TraceWriter::finish_writing_trace_paths(&mut *self.writer)
+        self.writer
+            .write_meta_dat("codetracer-evm-recorder")
             .map_err(|e| eyre::eyre!("{}", e))?;
         self.writer.close().map_err(|e| eyre::eyre!("{}", e))?;
         Ok(())
