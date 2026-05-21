@@ -52,7 +52,7 @@ fn ct_print_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("codetracer-trace-format-nim")
-        .join("ct-print")
+        .join(format!("ct-print{}", std::env::consts::EXE_SUFFIX))
 }
 
 /// Helper: collect every `.ct` file in `out_dir`.
@@ -390,19 +390,27 @@ fn test_recorded_trace_via_ct_print_json() {
     // `metadata.program` carries the canonical absolute path of the
     // source file (recorder-test-requirements.md §1).  Pre-2026-05 the
     // EVM recorder labelled the trace with the bare contract name
-    // (`"FlowTest"`); the spec-correct label is the source path, which
-    // contains the source filename — already asserted above.  Assert
-    // the canonical-path label is the exact substring emitted.
+    // (`"FlowTest"`); the spec-correct label is the source path.
+    //
+    // Compare it as a parsed JSON *value* rather than a raw-text
+    // substring: a Windows canonical path contains backslashes (and the
+    // `\\?\` extended-length prefix), which JSON-escapes to doubled
+    // backslashes in the serialized text -- so a substring check against
+    // the un-escaped `PathBuf` string would never match on Windows.
     let expected_program = flow_test_source()
         .canonicalize()
         .expect("FlowTest.sol must be canonicalizable")
         .to_string_lossy()
         .to_string();
-    assert!(
-        stdout_json.contains(&expected_program),
-        "ct-print --json output should mention the canonical source path \
-         (`metadata.program` per recorder-test-requirements §1); \
-         expected to find `{expected_program}` in:\n{stdout_json}"
+    let print_doc: serde_json::Value = serde_json::from_str(&stdout_json)
+        .expect("ct-print --json must emit valid JSON");
+    let program_label = print_doc["metadata"]["program"]
+        .as_str()
+        .expect("ct-print --json output must carry metadata.program");
+    assert_eq!(
+        program_label, expected_program,
+        "ct-print --json `metadata.program` should be the canonical source \
+         path (recorder-test-requirements §1)"
     );
     assert!(
         stdout_json.contains("\"add\""),

@@ -987,7 +987,15 @@ mod tests {
         assert_eq!(independent.status.success(), true);
         let independent_json: serde_json::Value =
             serde_json::from_slice(&independent.stdout).unwrap();
-        let key = format!("{}:Counter", independent_path.display());
+        // solc keys its `--combined-json` `contracts` map by
+        // `<source-path>:<contract-name>`, and it always normalises the
+        // source path to forward slashes -- even on Windows, where the path
+        // passed on the command line uses backslashes.  Build the lookup
+        // key with the same normalisation so it matches on every OS.
+        let key = format!(
+            "{}:Counter",
+            independent_path.display().to_string().replace('\\', "/")
+        );
         let independent_runtime_hex = independent_json["contracts"][&key]["bin-runtime"]
             .as_str()
             .unwrap()
