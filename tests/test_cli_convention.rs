@@ -402,8 +402,8 @@ fn test_recorded_trace_via_ct_print_json() {
         .expect("FlowTest.sol must be canonicalizable")
         .to_string_lossy()
         .to_string();
-    let print_doc: serde_json::Value = serde_json::from_str(&stdout_json)
-        .expect("ct-print --json must emit valid JSON");
+    let print_doc: serde_json::Value =
+        serde_json::from_str(&stdout_json).expect("ct-print --json must emit valid JSON");
     let program_label = print_doc["metadata"]["program"]
         .as_str()
         .expect("ct-print --json output must carry metadata.program");
