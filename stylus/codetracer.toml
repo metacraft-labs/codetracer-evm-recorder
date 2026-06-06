@@ -1,0 +1,292 @@
+# Stylus host-module configuration consumed by the M27 generic
+# WASM host-module instrumentation framework
+# (codetracer-wasm-host-module-framework).
+#
+# Replaces the hard-coded `vm_hooks` host stubs that used to live in
+# codetracer-wasm-recorder/internal/stylus/ (stylus.go,
+# stylus_funcs.go). The framework reads this TOML at recorder
+# start-up, builds a PassThroughPlan, and the embedder (wazero
+# recorder, wasmtime, browser host) generates one pass-through stub
+# per [[function]] entry. Every crossing emits a CodeTracer
+# tracewriter event named `<module>.<function>` plus an M25
+# correlation marker keyed by the WASM arguments — exactly the
+# behaviour the old hand-written Go file used to encode.
+#
+# The list of imports + their signatures mirrors the Stylus
+# (Arbitrum WASM) hostio surface published by the
+# `stylus-sdk-rs` runtime; signatures were verified against the
+# legacy stylus_funcs.go implementation that the M28 migration
+# retires.
+#
+# Spec: codetracer-specs/Planned-Features/Value-Origin-Tracking.milestones.org § M28
+# Framework: codetracer-wasm-instrumenter/crates/codetracer-wasm-host-module-framework
+# Legacy code being retired:
+#   codetracer-wasm-recorder/internal/stylus/stylus.go
+#   codetracer-wasm-recorder/internal/stylus/stylus_funcs.go
+#   codetracer-wasm-recorder/internal/stylus/stylus_trace.go
+
+[host_module]
+# The wazero-side host module name the Stylus runtime imports from.
+# Documented in the stylus-sdk source (lib/host.rs) and pinned by
+# the on-chain ABI.
+name = "vm_hooks"
+
+# Surface every crossing to the M25 correlation index. Each
+# `[[function]]` entry receives a boundary_id of `vm_hooks.<name>`
+# automatically.
+auto_correlation_markers = true
+
+# EVM sysroot lookup hint used by the recorder to locate
+# debug-built contract WASM by transaction hash. Mirrors the
+# convention already documented in
+# codetracer/src/ct/stylus/record.nim — see § "ct arb record"
+# in the user manual.
+[sysroot]
+contract_debug_wasm_dir = "$XDG_DATA_HOME/codetracer/contract-debug-wasm"
+evm_trace_format = "cargo-stylus-native-tracer-v1"
+
+# Mapping from a host-import name to the tracewriter event kind the
+# framework records. The default is `EvmEvent` (kind 13). Anything
+# that is purely informational (gas/ink counters, blocknum, etc.)
+# could downgrade to a different kind; for V1 every Stylus crossing
+# rides as EvmEvent for byte-for-byte parity with the legacy
+# fixture (see trace.events.json — every entry there records
+# Event.kind = 13).
+[event_kinds]
+default = "EvmEvent"
+
+# ------------------------------------------------------------------
+# Calldata + return path
+# ------------------------------------------------------------------
+
+[[function]]
+name    = "read_args"
+params  = ["i32"]
+results = []
+note    = "Stylus calldata read; writes recorded calldata into WASM memory at ptr"
+
+[[function]]
+name    = "write_result"
+params  = ["i32", "i32"]
+results = []
+note    = "Stylus contract result write"
+
+[[function]]
+name    = "read_return_data"
+params  = ["i32", "i32", "i32"]
+results = ["i32"]
+note    = "Reads return data from previous CALL/STATICCALL/DELEGATECALL"
+
+[[function]]
+name    = "return_data_size"
+params  = []
+results = ["i32"]
+note    = "EVM RETURNDATASIZE"
+
+# ------------------------------------------------------------------
+# Account / contract introspection
+# ------------------------------------------------------------------
+
+[[function]]
+name    = "account_balance"
+params  = ["i32", "i32"]
+results = []
+note    = "EVM BALANCE"
+
+[[function]]
+name    = "account_code"
+params  = ["i32", "i32", "i32", "i32"]
+results = ["i32"]
+note    = "EVM EXTCODECOPY"
+
+[[function]]
+name    = "account_code_size"
+params  = ["i32"]
+results = ["i32"]
+note    = "EVM EXTCODESIZE"
+
+[[function]]
+name    = "account_codehash"
+params  = ["i32", "i32"]
+results = []
+note    = "EVM EXTCODEHASH"
+
+[[function]]
+name    = "contract_address"
+params  = ["i32"]
+results = []
+note    = "EVM ADDRESS"
+
+# ------------------------------------------------------------------
+# Contract creation
+# ------------------------------------------------------------------
+
+[[function]]
+name    = "create1"
+params  = ["i32", "i32", "i32", "i32", "i32"]
+results = []
+note    = "EVM CREATE"
+
+[[function]]
+name    = "create2"
+params  = ["i32", "i32", "i32", "i32", "i32", "i32"]
+results = []
+note    = "EVM CREATE2"
+
+# ------------------------------------------------------------------
+# Message + tx context
+# ------------------------------------------------------------------
+
+[[function]]
+name    = "msg_reentrant"
+params  = []
+results = ["i32"]
+note    = "Stylus reentrancy flag"
+
+[[function]]
+name    = "msg_sender"
+params  = ["i32"]
+results = []
+note    = "EVM CALLER (20 bytes)"
+
+[[function]]
+name    = "msg_value"
+params  = ["i32"]
+results = []
+note    = "EVM CALLVALUE (32 bytes, wei)"
+
+[[function]]
+name    = "tx_ink_price"
+params  = []
+results = ["i32"]
+note    = "Stylus ink (sub-gas) price"
+
+[[function]]
+name    = "tx_gas_price"
+params  = ["i32"]
+results = []
+note    = "EVM GASPRICE"
+
+[[function]]
+name    = "tx_origin"
+params  = ["i32"]
+results = []
+note    = "EVM ORIGIN (20 bytes)"
+
+# ------------------------------------------------------------------
+# Crypto + storage
+# ------------------------------------------------------------------
+
+[[function]]
+name    = "native_keccak256"
+params  = ["i32", "i32", "i32"]
+results = []
+note    = "EVM KECCAK256"
+
+[[function]]
+name    = "storage_cache_bytes32"
+params  = ["i32", "i32"]
+results = []
+note    = "Stylus cached SSTORE (writes via storage_flush_cache)"
+
+[[function]]
+name    = "storage_load_bytes32"
+params  = ["i32", "i32"]
+results = []
+note    = "EVM SLOAD"
+
+[[function]]
+name    = "storage_flush_cache"
+params  = ["i32"]
+results = []
+note    = "Flush Stylus storage cache to EVM journal"
+
+# ------------------------------------------------------------------
+# Logging + cross-contract calls
+# ------------------------------------------------------------------
+
+[[function]]
+name    = "emit_log"
+params  = ["i32", "i32", "i32"]
+results = []
+note    = "EVM LOG{0..4}"
+
+[[function]]
+name    = "call_contract"
+params  = ["i32", "i32", "i32", "i32", "i64", "i32"]
+results = ["i32"]
+note    = "EVM CALL"
+
+[[function]]
+name    = "delegate_call_contract"
+params  = ["i32", "i32", "i32", "i64", "i32"]
+results = ["i32"]
+note    = "EVM DELEGATECALL"
+
+[[function]]
+name    = "static_call_contract"
+params  = ["i32", "i32", "i32", "i64", "i32"]
+results = ["i32"]
+note    = "EVM STATICCALL"
+
+# ------------------------------------------------------------------
+# Block context
+# ------------------------------------------------------------------
+
+[[function]]
+name    = "block_basefee"
+params  = ["i32"]
+results = []
+note    = "EVM BASEFEE"
+
+[[function]]
+name    = "chainid"
+params  = []
+results = ["i64"]
+note    = "EVM CHAINID"
+
+[[function]]
+name    = "block_coinbase"
+params  = ["i32"]
+results = []
+note    = "EVM COINBASE"
+
+[[function]]
+name    = "block_gas_limit"
+params  = []
+results = ["i64"]
+note    = "EVM GASLIMIT"
+
+[[function]]
+name    = "block_number"
+params  = []
+results = ["i64"]
+note    = "EVM NUMBER"
+
+[[function]]
+name    = "block_timestamp"
+params  = []
+results = ["i64"]
+note    = "EVM TIMESTAMP"
+
+# ------------------------------------------------------------------
+# Gas / ink accounting
+# ------------------------------------------------------------------
+
+[[function]]
+name    = "pay_for_memory_grow"
+params  = ["i32"]
+results = []
+note    = "Stylus pay-for-memory hook"
+
+[[function]]
+name    = "evm_gas_left"
+params  = []
+results = ["i64"]
+note    = "EVM GAS opcode"
+
+[[function]]
+name    = "evm_ink_left"
+params  = []
+results = ["i64"]
+note    = "Stylus ink (sub-gas) remaining"
