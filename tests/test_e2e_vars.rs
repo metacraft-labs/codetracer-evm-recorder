@@ -211,7 +211,7 @@ fn record_trace(
         .expect("failed to read output directory")
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| p.extension().map_or(false, |ext| ext == "ct"))
+        .filter(|p| p.extension().is_some_and(|ext| ext == "ct"))
         .collect();
     assert!(
         !ct_files.is_empty(),
