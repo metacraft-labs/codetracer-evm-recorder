@@ -1,3 +1,9 @@
+// Doc-comment formatting in this file mixes ASCII tables, indented
+// code blocks, and prose lists.  rust 1.96's clippy::doc_*_list_items
+// lints flag the irregular indentation but the layout is intentional
+// for readability of the inline trace examples.
+#![allow(clippy::doc_lazy_continuation, clippy::doc_overindented_list_items)]
+
 //! Per-program `ct-print --full` strict-assertion coverage tests.
 //!
 //! These tests follow the recorder-test-requirements policy
