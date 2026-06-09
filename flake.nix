@@ -28,6 +28,8 @@
             # Rust build dependencies
             rustc
             cargo
+            rustfmt
+            clippy
             capnproto
             pkg-config
             openssl
@@ -35,6 +37,15 @@
             # Required by libcodetracer_trace_writer (Nim FFI static lib).
             # Without it, link fails with `ld: cannot find -lzstd`.
             zstd
+
+            # Nim toolchain for codetracer_trace_writer_nim's
+            # build.rs (compiles the Nim FFI sources to a static
+            # library at cargo build time).
+            nim
+            nimble
+
+            # Just for the `just lint` / `just test` entry points.
+            just
           ];
 
           shellHook = ''
