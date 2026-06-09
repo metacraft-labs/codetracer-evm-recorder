@@ -205,10 +205,10 @@ fn resolve_out_dir(
         eprintln!("warning: --trace-dir is deprecated, use --out-dir");
         return Ok(path);
     }
-    if let Some(value) = std::env::var_os(ENV_OUT_DIR) {
-        if !value.is_empty() {
-            return Ok(PathBuf::from(value));
-        }
+    if let Some(value) = std::env::var_os(ENV_OUT_DIR)
+        && !value.is_empty()
+    {
+        return Ok(PathBuf::from(value));
     }
     Err(eyre::eyre!(
         "no output directory specified: pass --out-dir <PATH> (or set {ENV_OUT_DIR})"
@@ -825,7 +825,7 @@ async fn record_yul(args: RecordArgs, source_path: &Path, out_dir: &Path) -> Res
     let source_path_ref: &Path = source_copy_path.as_path();
     recorder
         .record_from_structlog(
-            &struct_logs,
+            struct_logs,
             &yul_out.runtime_source_map,
             &runtime_bytecode,
             &[source_path_ref],
@@ -949,10 +949,9 @@ fn encode_default_arg_value(ty: &str) -> Option<[u8; 32]> {
         // fixture's expected `setValue(7)` invocation.
         buf[31] = 7;
         Some(buf)
-    } else if ty == "bool" {
-        Some(buf) // false
-    } else if ty == "address" || ty == "address payable" {
-        Some(buf) // zero address (left-padded)
+    } else if ty == "bool" || ty == "address" || ty == "address payable" {
+        // bool: false; address[ payable]: zero-padded.
+        Some(buf)
     } else if let Some(rest) = ty.strip_prefix("bytes") {
         // bytes1..bytes32: zero-padded fixed-size bytes default.
         if rest
