@@ -807,7 +807,7 @@ mod tests {
         let metadata = parsed.metadata_json.unwrap();
         let settings = parse_metadata_settings(&metadata).unwrap();
         assert_eq!(settings.solc_version, "0.6.11+commit.5ef660b1");
-        assert_eq!(settings.optimizer_enabled, false);
+        assert!(!settings.optimizer_enabled);
         assert_eq!(settings.optimizer_runs, 200);
         assert_eq!(settings.evm_version, None);
     }
@@ -816,7 +816,7 @@ mod tests {
     fn parse_metadata_rich_extracts_optimizer_and_evm_version() {
         let settings = parse_metadata_settings(FIXTURE_RICH_METADATA).unwrap();
         assert_eq!(settings.solc_version, "0.8.28+commit.7893614a");
-        assert_eq!(settings.optimizer_enabled, true);
+        assert!(settings.optimizer_enabled);
         assert_eq!(settings.optimizer_runs, 800);
         assert_eq!(settings.evm_version, Some("shanghai".to_string()));
     }
@@ -953,9 +953,9 @@ mod tests {
 
         // Strict pins: every load-bearing field must be populated.
         assert_eq!(artifacts.name, "Counter");
-        assert_eq!(artifacts.runtime_bytecode.is_empty(), false);
-        assert_eq!(artifacts.source_map.is_empty(), false);
-        assert_eq!(artifacts.pc_to_idx.is_empty(), false);
+        assert!(!artifacts.runtime_bytecode.is_empty());
+        assert!(!artifacts.source_map.is_empty());
+        assert!(!artifacts.pc_to_idx.is_empty());
         assert_eq!(artifacts.pc_to_idx.len(), artifacts.runtime_bytecode.len());
         assert_eq!(artifacts.source_paths.len(), 1);
         assert_eq!(
@@ -984,7 +984,7 @@ mod tests {
             .arg(&independent_path)
             .output()
             .unwrap();
-        assert_eq!(independent.status.success(), true);
+        assert!(independent.status.success());
         let independent_json: serde_json::Value =
             serde_json::from_slice(&independent.stdout).unwrap();
         // solc keys its `--combined-json` `contracts` map by
