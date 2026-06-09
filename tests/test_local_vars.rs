@@ -558,7 +558,7 @@ fn test_evm_local_vars_memory() {
     // 4) Sanity: looking up a variable that was never tracked returns None.
     // -------------------------------------------------------------------
     assert_eq!(tracker.get_variable_value("does_not_exist", &memory), None);
-    assert_eq!(tracker.region("does_not_exist").is_none(), true);
+    assert!(tracker.region("does_not_exist").is_none());
 
     eprintln!("test_evm_local_vars_memory passed");
 }
