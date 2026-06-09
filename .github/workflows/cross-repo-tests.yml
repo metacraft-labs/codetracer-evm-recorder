@@ -146,7 +146,9 @@ jobs:
           cd "$DEST"
           git submodule init
           git submodule foreach --quiet 'echo $name' | while read -r mod; do
-            git submodule update --init --recursive --depth 1 "$mod" || \
+            git \
+              -c "url.https://x-access-token:${GH_TOKEN}@github.com/.insteadOf=https://github.com/" \
+              submodule update --init --recursive --depth 1 "$mod" || \
               echo "WARNING: failed to update submodule $mod (continuing)"
           done
           set -e
