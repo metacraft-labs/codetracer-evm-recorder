@@ -141,17 +141,16 @@ jobs:
             git -C "$DEST" fetch origin "$CT_REF"
             git -C "$DEST" checkout "$CT_REF"
           fi
-          # Initialize submodules one-by-one to tolerate individual failures
-          set +e
+          # Initialize every submodule (incl. nested) with the
+          # app-token rewritten in for the URLs in .gitmodules so
+          # private submodules (libs/tree-sitter-nim, ...)
+          # authenticate.  ``|| true`` tolerates individual
+          # failures (the nix build later checks what it actually
+          # needs).
           cd "$DEST"
-          git submodule init
-          git submodule foreach --quiet 'echo $name' | while read -r mod; do
-            git \
-              -c "url.https://x-access-token:${GH_TOKEN}@github.com/.insteadOf=https://github.com/" \
-              submodule update --init --recursive --depth 1 "$mod" || \
-              echo "WARNING: failed to update submodule $mod (continuing)"
-          done
-          set -e
+          git \
+            -c "url.https://x-access-token:${GH_TOKEN}@github.com/.insteadOf=https://github.com/" \
+            submodule update --init --recursive --depth 1 || true
 
       - name: Clone codetracer-vscode-extension
         env:
