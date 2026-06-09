@@ -282,7 +282,7 @@ impl SolidityAst {
             // Contracts: qualify only if the same bare name appears
             // in another contract (inheritance overrides).
             let collides = self.functions.iter().any(|other| {
-                std::ptr::eq(other, func) == false
+                !std::ptr::eq(other, func)
                     && other.name == func.name
                     && other.contract_name.as_deref() != Some(parent)
                     && other.contract_name.is_some()

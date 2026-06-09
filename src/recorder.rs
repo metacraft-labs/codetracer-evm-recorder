@@ -512,22 +512,22 @@ impl EvmRecorder {
                 // reverts) only the deepest payload — which is the
                 // one Solidity surfaces in the catch arm — is
                 // emitted; intermediate frames simply propagate.
-                if i > 0 {
-                    if let Some(prev_log) = struct_logs.get(i - 1) {
-                        if prev_log.depth == prev_depth && prev_log.op.as_ref() == "REVERT" {
-                            let payload = decode_revert_opcode_payload(
-                                prev_log.stack.as_deref(),
-                                prev_log.memory.as_ref(),
-                            );
-                            let decoded = revert_decode::decode_revert(&payload);
-                            TraceWriter::register_special_event(
-                                &mut *self.writer,
-                                EventLogKind::Error,
-                                "RevertCaught",
-                                &decoded.message,
-                            );
-                        }
-                    }
+                if i > 0
+                    && let Some(prev_log) = struct_logs.get(i - 1)
+                    && prev_log.depth == prev_depth
+                    && prev_log.op.as_ref() == "REVERT"
+                {
+                    let payload = decode_revert_opcode_payload(
+                        prev_log.stack.as_deref(),
+                        prev_log.memory.as_ref(),
+                    );
+                    let decoded = revert_decode::decode_revert(&payload);
+                    TraceWriter::register_special_event(
+                        &mut *self.writer,
+                        EventLogKind::Error,
+                        "RevertCaught",
+                        &decoded.message,
+                    );
                 }
 
                 let depth_diff = prev_depth - log.depth;
@@ -610,7 +610,7 @@ impl EvmRecorder {
                             // Only the MSTORE / MLOAD opcodes affect it; we
                             // pay the structLog memory-decode cost only then.
                             let mtracker = &mut memory_trackers[tracker_idx];
-                            if matches!(op, 0x51 | 0x52 | 0x53) {
+                            if matches!(op, 0x51..=0x53) {
                                 let pre_stack = log.stack.as_deref().unwrap_or(&[]);
                                 let pre_memory = decode_struct_log_memory(log.memory.as_ref());
                                 let _ = mtracker.process_step(
@@ -1480,7 +1480,7 @@ impl EvmRecorder {
                             // escalated locals.  Decoded memory is only
                             // needed for MSTORE / MLOAD.
                             let mtracker = &mut memory_trackers[tracker_idx];
-                            if matches!(op, 0x51 | 0x52 | 0x53) {
+                            if matches!(op, 0x51..=0x53) {
                                 let pre_stack = log.stack.as_deref().unwrap_or(&[]);
                                 let pre_memory = decode_struct_log_memory(log.memory.as_ref());
                                 let _ = mtracker.process_step(
@@ -1855,10 +1855,10 @@ fn decode_struct_log_memory(memory: Option<&Vec<String>>) -> Vec<u8> {
         let mut buf = [0u8; 32];
         // Each word should be 64 hex chars; tolerate shorter values.
         let bytes_count = trimmed.len() / 2;
-        for i in 0..bytes_count.min(32) {
+        for (i, slot) in buf.iter_mut().take(bytes_count.min(32)).enumerate() {
             let lo = i * 2;
             if let Ok(b) = u8::from_str_radix(&trimmed[lo..lo + 2], 16) {
-                buf[i] = b;
+                *slot = b;
             }
         }
         out.extend_from_slice(&buf);
@@ -2085,20 +2085,20 @@ fn build_log_event_content(
     let offset_usize = u64::try_from(offset)
         .ok()
         .and_then(|x| usize::try_from(x).ok());
-    if let (Some(size), Some(offset)) = (size_usize, offset_usize) {
-        if size > 0 {
-            let memory_bytes = decode_struct_log_memory(memory);
-            let end = offset.saturating_add(size);
-            if end <= memory_bytes.len() {
-                let data = &memory_bytes[offset..end];
-                if !content.is_empty() {
-                    content.push_str(", ");
-                }
-                content.push_str("0x");
-                for byte in data {
-                    use std::fmt::Write as _;
-                    let _ = write!(content, "{:02x}", byte);
-                }
+    if let (Some(size), Some(offset)) = (size_usize, offset_usize)
+        && size > 0
+    {
+        let memory_bytes = decode_struct_log_memory(memory);
+        let end = offset.saturating_add(size);
+        if end <= memory_bytes.len() {
+            let data = &memory_bytes[offset..end];
+            if !content.is_empty() {
+                content.push_str(", ");
+            }
+            content.push_str("0x");
+            for byte in data {
+                use std::fmt::Write as _;
+                let _ = write!(content, "{:02x}", byte);
             }
         }
     }
