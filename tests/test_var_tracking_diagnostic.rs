@@ -314,10 +314,8 @@ async fn test_var_tracking_diagnostic() {
                 }
             }
             prev_line = Some(current);
-        } else {
-            if let Some(op) = opcode {
-                let _ = tracker.process_step(op, pc, source_offset, &[]);
-            }
+        } else if let Some(op) = opcode {
+            let _ = tracker.process_step(op, pc, source_offset, &[]);
         }
     }
 
