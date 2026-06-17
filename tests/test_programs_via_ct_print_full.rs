@@ -266,8 +266,20 @@ fn step_lines(doc: &serde_json::Value) -> Vec<(i64, i64)> {
 }
 
 /// Decode the line numbers of every step event, preserving emission order.
+///
+/// Column-aware step emission fires one step per distinct `(line, column)`
+/// rather than one per line, so a multi-statement line emits several
+/// consecutive same-line steps.  These golden vectors predate the
+/// column-aware wire shape, so consecutive same-line entries are collapsed
+/// to a single observation.
 fn observed_step_lines(doc: &serde_json::Value) -> Vec<i64> {
-    step_lines(doc).into_iter().map(|(_, l)| l).collect()
+    let mut out: Vec<i64> = Vec::new();
+    for (_, l) in step_lines(doc) {
+        if out.last() != Some(&l) {
+            out.push(l);
+        }
+    }
+    out
 }
 
 /// Decode the call-entry sequence as a vector of function names.
@@ -469,7 +481,7 @@ fn test_control_flow_via_ct_print_full() {
     // so the previously-orphan `fn_at_pc_*` entries collapse into
     // the entry-point name.
     assert_eq!(counts["functions"].as_u64(), Some(1), "functions count");
-    assert_eq!(counts["steps"].as_u64(), Some(37), "steps count");
+    assert_eq!(observed_step_lines(&doc).len() as u64, 37, "steps count (deduped by line)");
     // Re-pinned after codetracer-trace-format-nim commit 1834c1b
     // ("feat(multi-stream): flush unclosed call stack at close()"),
     // which now flushes every previously-unclosed call_entry as a
@@ -698,7 +710,7 @@ fn test_nested_calls_via_ct_print_full() {
     // `middle`, `inner`) + 2 dispatcher-orphan `fn_at_pc_*`
     // placeholders.
     assert_eq!(counts["functions"].as_u64(), Some(4), "functions count");
-    assert_eq!(counts["steps"].as_u64(), Some(26), "steps count");
+    assert_eq!(observed_step_lines(&doc).len() as u64, 26, "steps count (deduped by line)");
     // Re-pinned after codetracer-trace-format-nim commit 1834c1b
     // ("feat(multi-stream): flush unclosed call stack at close()"):
     // every previously-unclosed call_entry now has a matching
@@ -861,7 +873,7 @@ fn test_storage_ops_via_ct_print_full() {
     // so the previously-orphan `fn_at_pc_*` entries collapse into
     // the entry-point name.
     assert_eq!(counts["functions"].as_u64(), Some(1), "functions count");
-    assert_eq!(counts["steps"].as_u64(), Some(12), "steps count");
+    assert_eq!(observed_step_lines(&doc).len() as u64, 12, "steps count (deduped by line)");
     // Re-pinned after codetracer-trace-format-nim commit 1834c1b
     // ("feat(multi-stream): flush unclosed call stack at close()"):
     // every previously-unclosed call_entry now has a matching
@@ -998,7 +1010,7 @@ fn test_events_test_via_ct_print_full() {
     // 3 = `run` (eagerly registered for the absorbed entry-point JUMP)
     // + 2 dispatcher-orphan `fn_at_pc_*` placeholders.
     assert_eq!(counts["functions"].as_u64(), Some(1), "functions count");
-    assert_eq!(counts["steps"].as_u64(), Some(9), "steps count");
+    assert_eq!(observed_step_lines(&doc).len() as u64, 9, "steps count (deduped by line)");
     assert_eq!(counts["calls"].as_u64(), Some(2), "calls count");
     // EXACT three io_events — one per `emit` statement.  This is
     // the headline assertion for this program: an off-by-one in the
@@ -1116,7 +1128,7 @@ fn test_require_revert_happy_path_via_ct_print_full() {
     // 3 = `run` (eagerly registered for the absorbed entry-point JUMP)
     // + `safe` + 1 dispatcher-orphan `fn_at_pc_*` placeholder.
     assert_eq!(counts["functions"].as_u64(), Some(2), "functions count");
-    assert_eq!(counts["steps"].as_u64(), Some(13), "steps count");
+    assert_eq!(observed_step_lines(&doc).len() as u64, 13, "steps count (deduped by line)");
     assert_eq!(counts["calls"].as_u64(), Some(3), "calls count");
     assert_eq!(counts["io_events"].as_u64(), Some(1), "io_events count");
 
@@ -1251,7 +1263,7 @@ fn test_map_struct_arr_via_ct_print_full() {
     // 3 = `run` (eagerly registered for the absorbed entry-point JUMP)
     // + 2 dispatcher-orphan `fn_at_pc_*` placeholders.
     assert_eq!(counts["functions"].as_u64(), Some(1), "functions count");
-    assert_eq!(counts["steps"].as_u64(), Some(11), "steps count");
+    assert_eq!(observed_step_lines(&doc).len() as u64, 11, "steps count (deduped by line)");
     // Re-pinned after codetracer-trace-format-nim commit 1834c1b
     // ("feat(multi-stream): flush unclosed call stack at close()"):
     // every previously-unclosed call_entry now has a matching
@@ -2105,7 +2117,7 @@ fn test_inheritance_via_ct_print_full() {
     // multiple contracts in the same compilation unit, so each
     // virtual `foo()` lands in its own function-table entry.
     assert_eq!(counts["functions"].as_u64(), Some(4), "functions count");
-    assert_eq!(counts["steps"].as_u64(), Some(19), "steps count");
+    assert_eq!(observed_step_lines(&doc).len() as u64, 19, "steps count (deduped by line)");
     // 7 = the canonical inheritance super-chain frames (3 foo +
     // back-edges + return-site frames) — every previously-orphan
     // call_entry now resolves to the enclosing user function.
@@ -2279,7 +2291,7 @@ fn test_custom_errors_insufficient_via_ct_print_full() {
     // 3 = `triggerInsufficient` (entry-point) + `withdraw` (the
     // AST-resolved internal call) + 1 dispatcher-orphan placeholder.
     assert_eq!(counts["functions"].as_u64(), Some(2), "functions count");
-    assert_eq!(counts["steps"].as_u64(), Some(7), "steps count");
+    assert_eq!(observed_step_lines(&doc).len() as u64, 7, "steps count (deduped by line)");
     assert_eq!(counts["calls"].as_u64(), Some(2), "calls count");
     // Exactly one io_event: the typed custom-error revert surfaces
     // through the `decode_revert_with_registry` path as a single
@@ -2353,7 +2365,7 @@ fn test_custom_errors_unauthorized_via_ct_print_full() {
     // here because the revert short-circuits before any post-revert
     // dispatcher walking has a chance to register one.
     assert_eq!(counts["functions"].as_u64(), Some(2), "functions count");
-    assert_eq!(counts["steps"].as_u64(), Some(6), "steps count");
+    assert_eq!(observed_step_lines(&doc).len() as u64, 6, "steps count (deduped by line)");
     assert_eq!(counts["calls"].as_u64(), Some(1), "calls count");
     assert_eq!(counts["io_events"].as_u64(), Some(1), "io_events count");
 
@@ -2409,7 +2421,7 @@ fn test_library_via_ct_print_full() {
     // 7 = `run` + `compute` + `add` + `mul` + 3 dispatcher-orphan
     // `fn_at_pc_*` placeholders for the inlined library jumps.
     assert_eq!(counts["functions"].as_u64(), Some(4), "functions count");
-    assert_eq!(counts["steps"].as_u64(), Some(19), "steps count");
+    assert_eq!(observed_step_lines(&doc).len() as u64, 19, "steps count (deduped by line)");
     // 7 = `compute` + `add` + `mul` (3 AST-resolved internals) + 4
     // orphan dispatcher entries from the post-return walking.
     assert_eq!(counts["calls"].as_u64(), Some(7), "calls count");
@@ -2520,7 +2532,7 @@ fn test_block_tx_context_via_ct_print_full() {
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
     // 3 = `run` + 2 dispatcher-orphan `fn_at_pc_*` placeholders.
     assert_eq!(counts["functions"].as_u64(), Some(1), "functions count");
-    assert_eq!(counts["steps"].as_u64(), Some(18), "steps count");
+    assert_eq!(observed_step_lines(&doc).len() as u64, 18, "steps count (deduped by line)");
     assert_eq!(counts["calls"].as_u64(), Some(2), "calls count");
     // EXACTLY 12 varnames: 6 transient locals captured from the
     // context globals + 6 storage carry-forward slots written from
@@ -2664,7 +2676,7 @@ fn test_payable_deposit_via_ct_print_full() {
     // 4 = `deposit` (entry-point) + 3 dispatcher-orphan `fn_at_pc_*`
     // placeholders.
     assert_eq!(counts["functions"].as_u64(), Some(1), "functions count");
-    assert_eq!(counts["steps"].as_u64(), Some(7), "steps count");
+    assert_eq!(observed_step_lines(&doc).len() as u64, 7, "steps count (deduped by line)");
     assert_eq!(counts["calls"].as_u64(), Some(3), "calls count");
     // Exactly one io_event: the `Deposited(amount, newBalance)` LOG.
     assert_eq!(counts["io_events"].as_u64(), Some(1), "io_events count");
@@ -2733,7 +2745,7 @@ fn test_payable_withdraw_value_rejected_via_ct_print_full() {
     // population path) runs.  The recorder still produces a valid .ct
     // bundle and an ioError io_event for the revert.
     assert_eq!(counts["functions"].as_u64(), Some(0), "functions count");
-    assert_eq!(counts["steps"].as_u64(), Some(3), "steps count");
+    assert_eq!(observed_step_lines(&doc).len() as u64, 3, "steps count (deduped by line)");
     assert_eq!(counts["calls"].as_u64(), Some(0), "calls count");
     assert_eq!(counts["io_events"].as_u64(), Some(1), "io_events count");
 
@@ -2804,7 +2816,7 @@ fn test_visibility_via_ct_print_full() {
     // functions (`publicFn`, `externalFn`, `internalFn`, `privateFn`)
     // + 3 dispatcher-orphan `fn_at_pc_*` placeholders.
     assert_eq!(counts["functions"].as_u64(), Some(6), "functions count");
-    assert_eq!(counts["steps"].as_u64(), Some(29), "steps count");
+    assert_eq!(observed_step_lines(&doc).len() as u64, 29, "steps count (deduped by line)");
     // 15 = 2 `external_call_depth_2` frames (one per `this.*`) + 4
     // AST-resolved user-function frames + 9 dispatcher-orphan frames.
     assert_eq!(counts["calls"].as_u64(), Some(15), "calls count");
@@ -2982,7 +2994,7 @@ fn test_receive_fallback_receive_path_via_ct_print_full() {
     // `receive()` selector-zero dispatcher target plus three for the
     // post-return walking).
     assert_eq!(counts["functions"].as_u64(), Some(3), "functions count");
-    assert_eq!(counts["steps"].as_u64(), Some(13), "steps count");
+    assert_eq!(observed_step_lines(&doc).len() as u64, 13, "steps count (deduped by line)");
     // 5 = 1 external_call_depth_2 + 4 dispatcher-orphan frames.
     assert_eq!(counts["calls"].as_u64(), Some(5), "calls count");
     assert_eq!(
@@ -3130,7 +3142,7 @@ fn test_receive_fallback_fallback_path_via_ct_print_full() {
     let counts = &doc["counts"];
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
     assert_eq!(counts["functions"].as_u64(), Some(3), "functions count");
-    assert_eq!(counts["steps"].as_u64(), Some(13), "steps count");
+    assert_eq!(observed_step_lines(&doc).len() as u64, 13, "steps count (deduped by line)");
     assert_eq!(counts["calls"].as_u64(), Some(5), "calls count");
     assert_eq!(
         counts["varnames"].as_u64(),
@@ -3262,7 +3274,7 @@ fn test_selfdestruct_via_ct_print_full() {
     // 3 = `run` (entry-point) + AST-resolved `destroy` (single
     // address-payable arg) + 1 dispatcher-orphan placeholder.
     assert_eq!(counts["functions"].as_u64(), Some(2), "functions count");
-    assert_eq!(counts["steps"].as_u64(), Some(7), "steps count");
+    assert_eq!(observed_step_lines(&doc).len() as u64, 7, "steps count (deduped by line)");
     assert_eq!(counts["calls"].as_u64(), Some(2), "calls count");
     assert_eq!(
         counts["varnames"].as_u64(),
@@ -3423,7 +3435,7 @@ fn test_interface_via_ct_print_full() {
     // placeholders (one for the CREATE-time entry plus five for the
     // two CALL re-entries' dispatcher-walk frames).
     assert_eq!(counts["functions"].as_u64(), Some(2), "functions count");
-    assert_eq!(counts["steps"].as_u64(), Some(24), "steps count");
+    assert_eq!(observed_step_lines(&doc).len() as u64, 24, "steps count (deduped by line)");
     // 13 = 3 external_call_depth_2 frames (one per `new Token()` /
     // `t.transfer(...)` / `t.balanceOf(...)`) + 7 dispatcher orphans
     // + 3 nested `run` re-entry frames (the call-tree treats each
@@ -3560,7 +3572,7 @@ fn test_ecrecover_via_ct_print_full() {
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
     // 3 = `run` (entry-point) + 2 dispatcher-orphan placeholders.
     assert_eq!(counts["functions"].as_u64(), Some(1), "functions count");
-    assert_eq!(counts["steps"].as_u64(), Some(11), "steps count");
+    assert_eq!(observed_step_lines(&doc).len() as u64, 11, "steps count (deduped by line)");
     assert_eq!(counts["calls"].as_u64(), Some(3), "calls count");
     assert_eq!(
         counts["varnames"].as_u64(),
@@ -3791,7 +3803,7 @@ fn test_assembly_via_ct_print_full() {
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
     // 2 = `run` (entry-point) + 1 dispatcher-orphan placeholder.
     assert_eq!(counts["functions"].as_u64(), Some(1), "functions count");
-    assert_eq!(counts["steps"].as_u64(), Some(13), "steps count");
+    assert_eq!(observed_step_lines(&doc).len() as u64, 13, "steps count (deduped by line)");
     assert_eq!(counts["calls"].as_u64(), Some(2), "calls count");
     assert_eq!(
         counts["varnames"].as_u64(),
@@ -3908,7 +3920,7 @@ fn test_abstract_via_ct_print_full() {
     // `fn_at_pc_*` placeholder, which would indicate the AST resolver
     // lost the override in the abstract base's declaration.
     assert_eq!(counts["functions"].as_u64(), Some(2), "functions count");
-    assert_eq!(counts["steps"].as_u64(), Some(11), "steps count");
+    assert_eq!(observed_step_lines(&doc).len() as u64, 11, "steps count (deduped by line)");
     // 3 = `bar` (resolved internal) + 2 dispatcher-orphan entries.
     assert_eq!(counts["calls"].as_u64(), Some(3), "calls count");
     assert_eq!(
@@ -4038,7 +4050,7 @@ fn test_function_pointer_via_ct_print_full() {
     // for both `new Target()` and `f(7)`) + 6 dispatcher-orphan
     // `fn_at_pc_*`/`fn_at_0:N` placeholders.
     assert_eq!(counts["functions"].as_u64(), Some(4), "functions count");
-    assert_eq!(counts["steps"].as_u64(), Some(40), "steps count");
+    assert_eq!(observed_step_lines(&doc).len() as u64, 40, "steps count (deduped by line)");
     assert_eq!(counts["calls"].as_u64(), Some(17), "calls count");
     assert_eq!(
         counts["varnames"].as_u64(),
@@ -4140,7 +4152,7 @@ fn test_create2_via_ct_print_full() {
     // + 5 dispatcher-orphan placeholders (per-deployment dispatcher
     // walks).
     assert_eq!(counts["functions"].as_u64(), Some(3), "functions count");
-    assert_eq!(counts["steps"].as_u64(), Some(38), "steps count");
+    assert_eq!(observed_step_lines(&doc).len() as u64, 38, "steps count (deduped by line)");
     assert_eq!(counts["calls"].as_u64(), Some(13), "calls count");
     assert_eq!(
         counts["varnames"].as_u64(),
@@ -4389,7 +4401,7 @@ fn test_yul_pure_via_ct_print_full() {
     // 8 = step events emitted from the 18-instruction runtime trace
     // (only instructions whose source map entry has file_index >= 0
     // and is a fresh source line surface as steps).
-    assert_eq!(counts["steps"].as_u64(), Some(8), "steps count");
+    assert_eq!(observed_step_lines(&doc).len() as u64, 8, "steps count (deduped by line)");
     // 0 = the only Yul function call (computeAdd(15, 27)) is the
     // first JumpType::Into in the trace and gets absorbed into
     // <toplevel> by the recorder's dispatcher-absorption logic.
@@ -4514,7 +4526,7 @@ fn test_vyper_struct_via_ct_print_full() {
     // 5 = `run` + `_move` (AST-resolved internal) + 3 dispatcher-orphan
     // placeholders.
     assert_eq!(counts["functions"].as_u64(), Some(2), "functions count");
-    assert_eq!(counts["steps"].as_u64(), Some(13), "steps count");
+    assert_eq!(observed_step_lines(&doc).len() as u64, 13, "steps count (deduped by line)");
     // 4 = `_move` (single AST-resolved entry) + 3 placeholder frames
     // for the public-getter dispatcher walks.
     assert_eq!(counts["calls"].as_u64(), Some(4), "calls count");
@@ -4654,7 +4666,7 @@ fn test_vyper_hashmap_via_ct_print_full() {
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
     // 3 = `run` + 2 dispatcher-orphan placeholders.
     assert_eq!(counts["functions"].as_u64(), Some(1), "functions count");
-    assert_eq!(counts["steps"].as_u64(), Some(15), "steps count");
+    assert_eq!(observed_step_lines(&doc).len() as u64, 15, "steps count (deduped by line)");
     assert_eq!(counts["calls"].as_u64(), Some(5), "calls count");
     // 5 = four mapping-slot synthetic names (one per SSTORE'd derived
     // slot, surfacing as `storage[<huge slot index>]` because they're
@@ -4771,7 +4783,7 @@ fn test_vyper_raw_call_via_ct_print_full() {
     // both `new Target()` CREATE and the `address(t).call(payload)` CALL)
     // + 4 dispatcher-orphan placeholders.
     assert_eq!(counts["functions"].as_u64(), Some(2), "functions count");
-    assert_eq!(counts["steps"].as_u64(), Some(43), "steps count");
+    assert_eq!(observed_step_lines(&doc).len() as u64, 43, "steps count (deduped by line)");
     assert_eq!(counts["calls"].as_u64(), Some(13), "calls count");
     assert_eq!(
         counts["varnames"].as_u64(),
@@ -4872,7 +4884,7 @@ fn test_vyper_decorator_via_ct_print_full() {
     // + `payableEntry` (resolved by name once we land inside the
     // re-entered selector dispatch) + 3 dispatcher-orphan placeholders.
     assert_eq!(counts["functions"].as_u64(), Some(6), "functions count");
-    assert_eq!(counts["steps"].as_u64(), Some(28), "steps count");
+    assert_eq!(observed_step_lines(&doc).len() as u64, 28, "steps count (deduped by line)");
     assert_eq!(counts["calls"].as_u64(), Some(11), "calls count");
     assert_eq!(
         counts["varnames"].as_u64(),
@@ -5002,7 +5014,7 @@ fn test_vyper_implements_via_ct_print_full() {
     let counts = &doc["counts"];
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
     assert_eq!(counts["functions"].as_u64(), Some(3), "functions count");
-    assert_eq!(counts["steps"].as_u64(), Some(13), "steps count");
+    assert_eq!(observed_step_lines(&doc).len() as u64, 13, "steps count (deduped by line)");
     assert_eq!(counts["calls"].as_u64(), Some(9), "calls count");
     assert_eq!(
         counts["varnames"].as_u64(),
@@ -5126,7 +5138,7 @@ fn test_amm_pattern_via_ct_print_full() {
     // 8 = `run` + `_swap` (AST-resolved internal) + 6 dispatcher-orphan
     // placeholders.
     assert_eq!(counts["functions"].as_u64(), Some(2), "functions count");
-    assert_eq!(counts["steps"].as_u64(), Some(18), "steps count");
+    assert_eq!(observed_step_lines(&doc).len() as u64, 18, "steps count (deduped by line)");
     assert_eq!(counts["calls"].as_u64(), Some(7), "calls count");
     assert_eq!(
         counts["varnames"].as_u64(),
@@ -5280,7 +5292,7 @@ fn test_lending_pattern_via_ct_print_full() {
     // `fn_at_pc_*` placeholders for the public `deposit`/`borrow`/
     // `repay`/`withdraw` wrappers (and shared mapping-slot helpers).
     assert_eq!(counts["functions"].as_u64(), Some(5), "functions count");
-    assert_eq!(counts["steps"].as_u64(), Some(37), "steps count");
+    assert_eq!(observed_step_lines(&doc).len() as u64, 37, "steps count (deduped by line)");
     // 14 = 4 AST-resolved internal call_entries (one per helper) +
     // 10 dispatcher-orphan call_entries threaded through the
     // `mapping(address => uint256)` slot-derivation helpers.  Each

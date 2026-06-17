@@ -1,6 +1,7 @@
 use codetracer_trace_types::{EventLogKind, Line, NONE_VALUE, TypeId, TypeKind, ValueRecord};
 use codetracer_trace_writer_nim::trace_writer::TraceWriter;
 use codetracer_trace_writer_nim::{TraceEventsFileFormat, create_trace_writer};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use alloy::primitives::Address;
@@ -294,6 +295,40 @@ pub struct EvmRecorder {
     writer: Box<dyn TraceWriter + Send>,
     type_names: Vec<String>,
     output_dir: PathBuf,
+    /// Paths already registered with their per-line byte-length tables
+    /// via `register_path_with_line_lengths`.  Tracked so we only emit
+    /// the Layout A `paths.dat` record once per source file (the first
+    /// registration wins per the Nim writer's semantics — see
+    /// `codetracer_trace_writer_nim::NimTraceWriter::register_path_with_line_lengths`).
+    paths_with_line_lengths: HashSet<PathBuf>,
+}
+
+/// Compute the per-line UTF-8 byte-length table required by the
+/// `paths.dat` Layout A record (column-aware mode).
+///
+/// `line_lengths[i]` is the byte count of source line `i+1` (1-based,
+/// matching the CTFS spec), excluding the trailing `\n`.  An `\r\n`
+/// terminator contributes its `\r` to the line's byte count, which
+/// keeps the table consistent with the column offsets the solc source
+/// map emits (byte offsets into the file).  A file that doesn't end
+/// with `\n` still has its final line counted.
+///
+/// See `codetracer-trace-format-spec/trace-events.md` §"paths.dat
+/// per-line offset table — Layout A".
+fn compute_line_lengths(source: &str) -> Vec<u32> {
+    let mut lengths: Vec<u32> = Vec::new();
+    let mut line_start: usize = 0;
+    for (i, b) in source.bytes().enumerate() {
+        if b == b'\n' {
+            let line_len = (i - line_start) as u32;
+            lengths.push(line_len);
+            line_start = i + 1;
+        }
+    }
+    if line_start < source.len() {
+        lengths.push((source.len() - line_start) as u32);
+    }
+    lengths
 }
 
 impl EvmRecorder {
@@ -318,6 +353,7 @@ impl EvmRecorder {
             writer,
             type_names: Vec::new(),
             output_dir: output_dir.to_path_buf(),
+            paths_with_line_lengths: HashSet::new(),
         })
     }
 
@@ -331,8 +367,48 @@ impl EvmRecorder {
         TraceWriter::begin_writing_trace_events(&mut *self.writer, &events_path)
             .map_err(|e| eyre::eyre!("{}", e))?;
 
+        // M14: opt the canonical CTFS writer into column-aware step
+        // encoding *before* the first `register_step` / `start` call.
+        // `enable_column_aware_steps` is sticky for the lifetime of the
+        // trace and gates the writer's `DeltaColumn` (tag 0x07)
+        // emission path plus the `meta.dat` bit 4 flag
+        // (`FLAG_HAS_COLUMN_AWARE_STEPS`).  On legacy backends this is
+        // a trait-default no-op; the EVM recorder is pinned to the Nim
+        // multi-stream writer so the call lands on the real
+        // implementation.  See the JS recorder's
+        // `recorder_native::lib::write_trace` for the reference
+        // pattern.
+        TraceWriter::enable_column_aware_steps(&mut *self.writer);
+
         self.register_evm_types();
         Ok(())
+    }
+
+    /// Register `path` with its per-line UTF-8 byte-length table via the
+    /// `paths.dat` Layout A entry point, once per recorder lifetime.
+    /// Subsequent calls for the same path are no-ops.
+    ///
+    /// Required by the column-aware mode: the reader maps the
+    /// writer-side global byte position back to a (line, column) pair
+    /// using these tables.  Soft-fails (logged to stderr) if the FFI
+    /// rejects the call — the trace remains usable, but columns on
+    /// that file fall back to `None` at read time.
+    fn ensure_path_with_line_lengths(&mut self, path: &Path, source: &str) {
+        if self.paths_with_line_lengths.contains(path) {
+            return;
+        }
+        let line_lengths = compute_line_lengths(source);
+        if let Err(err) =
+            TraceWriter::register_path_with_line_lengths(&mut *self.writer, path, &line_lengths)
+        {
+            eprintln!(
+                "[codetracer-evm-recorder] register_path_with_line_lengths failed for {}: {} \
+                 (column resolution will fall back to None for this file)",
+                path.display(),
+                err,
+            );
+        }
+        self.paths_with_line_lengths.insert(path.to_path_buf());
     }
 
     /// Register the standard EVM/Solidity types with the trace writer.
@@ -407,13 +483,28 @@ impl EvmRecorder {
         } else {
             source_paths[0]
         };
+        // M14: register the main source path with its per-line byte
+        // counts BEFORE `TraceWriter::start`.  `start` internally
+        // interns the path (without line-length data), and a later
+        // `register_path_with_line_lengths` for an already-interned
+        // path is silently dropped by the Nim writer — that drops the
+        // line-length table needed by the reader's
+        // `decodeGlobalPositionIndex`, so the per-step column field
+        // never surfaces in ct-print.  Registering up front populates
+        // `pathLineLengths` on the writer side and keeps the
+        // subsequent `start` a no-op (path id already interned).
+        if !source_paths.is_empty()
+            && let Some(src) = source_contents.first().copied()
+        {
+            self.ensure_path_with_line_lengths(main_path, src);
+        }
         TraceWriter::start(&mut *self.writer, main_path, Line(1));
 
         // The uint256 type id (first registered type) for storage values
         let uint256_type_id =
             TypeId(TraceWriter::ensure_type_id(&mut *self.writer, TypeKind::Int, "uint256").0);
 
-        let mut prev_line: Option<(i32, u32)> = None; // (file_index, line)
+        let mut prev_line: Option<(i32, u32, u32)> = None; // (file_index, line, column)
         let mut prev_depth: u64 = 1;
 
         // --- First internal call merging ---
@@ -477,10 +568,10 @@ impl EvmRecorder {
                 // Entering an external call (CALL/DELEGATECALL/STATICCALL)
                 let fn_name = format!("external_call_depth_{}", log.depth);
                 let call_path = prev_line
-                    .and_then(|(fi, _)| source_paths.get(fi as usize))
+                    .and_then(|(fi, _, _)| source_paths.get(fi as usize))
                     .copied()
                     .unwrap_or(main_path);
-                let call_line = prev_line.map(|(_, l)| Line(l as i64)).unwrap_or(Line(0));
+                let call_line = prev_line.map(|(_, l, _)| Line(l as i64)).unwrap_or(Line(0));
                 let fn_id = TraceWriter::ensure_function_id(
                     &mut *self.writer,
                     &fn_name,
@@ -566,26 +657,52 @@ impl EvmRecorder {
             if let Some(location) = source_map.resolve_pc(pc, &pc_to_idx, source_contents) {
                 let file_idx = location.file_index;
                 let line = location.line;
-                let current = (file_idx, line);
+                let column = location.column;
+                // The source map stores the (line, column) pair derived
+                // from the byte offset (`offset_to_line_col` in
+                // `source_map.rs`).  Track (file, line, column) so
+                // multi-statement-per-line moves still surface as
+                // distinct steps under column-aware navigation.
+                let current = (file_idx, line, column);
 
-                // Emit a step if the source line changed
+                // Emit a step if the source location changed
                 if prev_line != Some(current) {
                     let step_path = source_paths
                         .get(file_idx as usize)
                         .copied()
                         .unwrap_or(main_path);
-                    TraceWriter::register_step(&mut *self.writer, step_path, Line(line as i64));
+                    // Register the source path with its per-line byte
+                    // counts (paths.dat Layout A) on first contact —
+                    // required by the column-aware reader to map the
+                    // writer-side global position back to (line, col).
+                    if let Some(src) = source_contents.get(file_idx as usize).copied() {
+                        self.ensure_path_with_line_lengths(step_path, src);
+                    }
+                    // M14: column-aware step emission.  `column` from
+                    // `SourceLocation` is 0-based (byte offset within
+                    // the line); the CTFS wire uses 1-based columns,
+                    // so we forward `column + 1`.
+                    TraceWriter::register_step_with_column(
+                        &mut *self.writer,
+                        step_path,
+                        Line(line as i64),
+                        Some(Line(column as i64 + 1)),
+                    );
+                    let line_changed = prev_line.map(|(f, l, _)| (f, l)) != Some((file_idx, line));
                     prev_line = Some(current);
 
-                    // Re-emit all cached storage variables so they remain visible
-                    // in the debugger at every source-line step, not just at the
-                    // SSTORE opcode.
-                    for (svar_name, svar_val) in &storage_state {
-                        TraceWriter::register_variable_with_full_value(
-                            &mut *self.writer,
-                            svar_name,
-                            svar_val.clone(),
-                        );
+                    // Re-emit all cached storage variables on line transitions
+                    // so they remain visible in the debugger at every
+                    // source-line step.  Same-line column transitions skip
+                    // re-emission — the variable state has not changed.
+                    if line_changed {
+                        for (svar_name, svar_val) in &storage_state {
+                            TraceWriter::register_variable_with_full_value(
+                                &mut *self.writer,
+                                svar_name,
+                                svar_val.clone(),
+                            );
+                        }
                     }
                 }
 
@@ -1141,6 +1258,17 @@ impl EvmRecorder {
         } else {
             Path::new("<unknown>")
         };
+        // M14: register the main source path with its per-line byte
+        // counts BEFORE `TraceWriter::start` — see the matching
+        // single-contract path in `record_from_structlog` for the
+        // rationale (start() interns the path with empty line-lengths
+        // and subsequent line-length registrations are silently
+        // dropped).
+        if !init_source_paths.is_empty()
+            && let Some(src) = init_source_contents.first()
+        {
+            self.ensure_path_with_line_lengths(main_path, src.as_str());
+        }
         TraceWriter::start(&mut *self.writer, main_path, Line(1));
 
         let uint256_type_id =
@@ -1179,7 +1307,7 @@ impl EvmRecorder {
 
         let mut call_tree = CallTree::new(contract_address);
         let mut prev_depth: u64 = 1;
-        let mut prev_line: Option<(i32, u32)> = None;
+        let mut prev_line: Option<(i32, u32, u32)> = None; // (file_index, line, column)
         let mut stack_trackers: Vec<StackTracker> = Vec::new();
         // Parallel memory trackers, indexed identically to `stack_trackers`.
         let mut memory_trackers: Vec<MemoryTracker> = Vec::new();
@@ -1278,7 +1406,7 @@ impl EvmRecorder {
                 // Emit a trace call event for the new frame.
                 let fn_name = format!("external_call_depth_{}", log.depth);
                 let call_path = prev_line
-                    .and_then(|(fi, _)| {
+                    .and_then(|(fi, _, _)| {
                         // Use the source paths from the *caller* frame (still at prev_depth).
                         let caller_addr = frame_stack
                             .get(frame_stack.len().saturating_sub(2))
@@ -1290,7 +1418,7 @@ impl EvmRecorder {
                             .map(|p| p.as_path())
                     })
                     .unwrap_or(main_path);
-                let call_line = prev_line.map(|(_, l)| Line(l as i64)).unwrap_or(Line(0));
+                let call_line = prev_line.map(|(_, l, _)| Line(l as i64)).unwrap_or(Line(0));
                 let fn_id = TraceWriter::ensure_function_id(
                     &mut *self.writer,
                     &fn_name,
@@ -1446,25 +1574,45 @@ impl EvmRecorder {
             if let Some(location) = resolved_location {
                 let file_idx = location.file_index;
                 let line = location.line;
-                let current = (file_idx, line);
+                let column = location.column;
+                // (file_index, line, column) — track the column too so
+                // multi-statement-per-line moves emit distinct steps
+                // under column-aware navigation.
+                let current = (file_idx, line, column);
 
                 if prev_line != Some(current) {
                     let step_path = source_paths_paths
                         .get(file_idx as usize)
                         .copied()
                         .unwrap_or(main_path);
-                    TraceWriter::register_step(&mut *self.writer, step_path, Line(line as i64));
+                    // Register the source path with its per-line byte
+                    // counts (paths.dat Layout A) on first contact.
+                    if let Some(src) = source_contents_strs.get(file_idx as usize).copied() {
+                        self.ensure_path_with_line_lengths(step_path, src);
+                    }
+                    // M14: 0-based column → 1-based on the wire.
+                    TraceWriter::register_step_with_column(
+                        &mut *self.writer,
+                        step_path,
+                        Line(line as i64),
+                        Some(Line(column as i64 + 1)),
+                    );
+                    let line_changed = prev_line.map(|(f, l, _)| (f, l)) != Some((file_idx, line));
                     prev_line = Some(current);
 
-                    // Re-emit all cached storage variables for the current frame.
-                    let ss_idx = (log.depth as usize).saturating_sub(1);
-                    if let Some(ss) = storage_states.get(ss_idx) {
-                        for (svar_name, svar_val) in ss {
-                            TraceWriter::register_variable_with_full_value(
-                                &mut *self.writer,
-                                svar_name,
-                                svar_val.clone(),
-                            );
+                    // Re-emit all cached storage variables for the current
+                    // frame on line transitions only; same-line column
+                    // transitions share the prior step's variable state.
+                    if line_changed {
+                        let ss_idx = (log.depth as usize).saturating_sub(1);
+                        if let Some(ss) = storage_states.get(ss_idx) {
+                            for (svar_name, svar_val) in ss {
+                                TraceWriter::register_variable_with_full_value(
+                                    &mut *self.writer,
+                                    svar_name,
+                                    svar_val.clone(),
+                                );
+                            }
                         }
                     }
                 }
