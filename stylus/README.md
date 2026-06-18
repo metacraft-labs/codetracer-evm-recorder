@@ -43,3 +43,22 @@ on the `value-origin` branch until the parity tests have been
 exercised end-to-end against a live Stylus toolchain. See M28 in
 `codetracer-specs/Planned-Features/Value-Origin-Tracking.milestones.org`
 for the migration plan.
+
+The static surface is pinned in three places (M27 plan, hand-extracted
+fixture, and — added 2026-06-18 — the live Go source parsed at test
+time) by the parity tests in
+`codetracer-wasm-instrumenter/crates/codetracer-wasm-host-module-framework/tests/stylus_parity.rs`.
+What still needs a live host is the *runtime* three-way parity
+(legacy Go path vs M27-on-wazero vs `ct instrument` rewriter); that
+is driven by the one-shot runner at
+
+```
+codetracer-specs/Planned-Features/value-origin-ci-scripts/run-m28-stylus-runner.sh
+```
+
+Prereqs: `cargo-stylus`, a running `nitro-devnode` at `:8547`,
+`go` >= 1.21, `rustup` `wasm32-unknown-unknown` target, `jq`.
+Exit 0 from the runner is the gating signal for opening the PR
+against `codetracer-wasm-recorder` that retires
+`internal/stylus/{stylus.go,stylus_funcs.go,stylus_trace.go}` and
+the `cmd/wazero --stylus` flag plumbing.
