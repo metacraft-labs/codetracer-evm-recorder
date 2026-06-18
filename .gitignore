@@ -5,3 +5,6 @@ Cargo.lock
 
 # Nix-generated pre-commit config
 .pre-commit-config.yaml
+
+# reprobuild build artifacts
+.repro/
