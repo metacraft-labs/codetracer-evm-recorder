@@ -5,6 +5,10 @@ A recorder of EVM/Solidity smart contract executions that produces [CodeTracer](
 > [!WARNING]
 > Currently it is in a very early phase: we're welcoming contribution and discussion!
 
+New to CodeTracer? See [`examples/`](./examples/) for small Solidity
+programs you can record and replay with `ct run`, including a
+walkthrough of the recorder's column-aware step-over.
+
 ### Overview
 
 codetracer-evm-recorder compiles Solidity programs with solc, deploys them to a local Anvil node, executes a target function, and captures `debug_traceTransaction` structlogs. It resolves source mappings and reconstructs variable values from the EVM stack, emitting a CodeTracer multi-stream CTFS bundle compatible with the rest of CodeTracer.
