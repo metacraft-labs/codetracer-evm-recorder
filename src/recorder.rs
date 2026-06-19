@@ -387,8 +387,8 @@ impl EvmRecorder {
         // its M6 Alt+click breakpoint UI and sub-statement step
         // controls.  See spec `internal-files.md` §"Column-Aware
         // Capability Flags".
-        TraceWriter::enable_column_breakpoints_support(&mut *self.writer);
-        TraceWriter::enable_column_motions_support(&mut *self.writer);
+        self.writer.enable_column_breakpoints_support();
+        self.writer.enable_column_motions_support();
 
         self.register_evm_types();
         Ok(())
