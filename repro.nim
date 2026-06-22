@@ -81,11 +81,11 @@ package codetracer_evm_recorder:
     # NB: ``locked = false`` because codetracer-evm-recorder's
     # ``.gitignore`` excludes ``Cargo.lock`` (the repo treats itself
     # as a library by convention). Cargo regenerates the lock file on
-    # the first build; for byte-reproducibility it's pinned by
-    # ``codetracer-evm-recorder/.github/sibling-pins`` rather than a
-    # committed lock file. Other recorders (cairo, fuel, leo, …) do
-    # check Cargo.lock in and set ``locked = true`` to gate against
-    # accidental drift.
+    # the first build; cross-repo sibling revisions are pinned by the
+    # repo-workspaces workspace lock (resolved in CI via
+    # ``scripts/resolve-sibling-rev.sh``) rather than a committed lock
+    # file. Other recorders (cairo, fuel, leo, …) do check Cargo.lock
+    # in and set ``locked = true`` to gate against accidental drift.
     let recorderBuild = cargo.build(
       release = true,
       actionId = "codetracer-evm-recorder.cargo-build",
