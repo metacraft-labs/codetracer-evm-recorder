@@ -50,7 +50,7 @@ assert_absent() {
   local needle="$1"
   local desc="$2"
   local haystack="$3"
-  if grep -qF -- "${needle}" <<< "${haystack}"; then
+  if [[ "${haystack}" == *"${needle}"* ]]; then
     echo "FAIL: ${desc} must NOT contain '${needle}'" >&2
     echo "----- ${desc} -----" >&2
     echo "${haystack}" >&2
@@ -65,7 +65,7 @@ assert_present() {
   local needle="$1"
   local desc="$2"
   local haystack="$3"
-  if ! grep -qF -- "${needle}" <<< "${haystack}"; then
+  if [[ "${haystack}" != *"${needle}"* ]]; then
     echo "FAIL: ${desc} must contain '${needle}'" >&2
     echo "----- ${desc} -----" >&2
     echo "${haystack}" >&2
