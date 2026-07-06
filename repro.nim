@@ -211,24 +211,31 @@ package codetracer_evm_recorder:
     # surface complies with ``Recorder-CLI-Conventions.md``. It is not a
     # cargo target, so it is modelled as its own ``sh.shell`` execute
     # edge rather than dropped — reproducing the repo's full ``just test``
-    # set. The script builds the debug binary and inspects its ``--help``
-    # text, so it is re-run every ``repro test`` pass (matching ``just
-    # test``); ``after`` the cargo test-build edge guarantees the binary
-    # exists before the script runs.
+    # set. The repro edge points the script at the already materialised
+    # release binary so it does not re-enter a fresh cargo build from the
+    # shell action; that keeps the trace-format Nim build.rs path inside
+    # the typed cargo edges where the sandbox has the expected VCS
+    # context. It is re-run every ``repro test`` pass (matching ``just
+    # test``).
+    let cliVerifyBinEnv =
+      "CODETRACER_EVM_RECORDER_BIN=" & recorderBinary & " "
     let cliVerifyCommand =
       when defined(windows):
-        "bash tests/verify-cli-convention-no-silent-skip.sh"
+        cliVerifyBinEnv & "bash tests/verify-cli-convention-no-silent-skip.sh"
       elif defined(macosx):
-        "CC=clang bash tests/verify-cli-convention-no-silent-skip.sh"
+        "CC=clang " & cliVerifyBinEnv &
+          "bash tests/verify-cli-convention-no-silent-skip.sh"
       else:
-        "CC=gcc bash tests/verify-cli-convention-no-silent-skip.sh"
+        "CC=gcc " & cliVerifyBinEnv &
+          "bash tests/verify-cli-convention-no-silent-skip.sh"
     let cliVerify = shell(
       command = cliVerifyCommand,
       actionId = "codetracer-evm-recorder.verify-cli-convention",
-      after = @[testsBuild.action],
+      after = @[testsBuild.action, recorderBuild],
       extraInputs = @[
         "tests/verify-cli-convention-no-silent-skip.sh",
-        "Cargo.toml", "src"
+        "Cargo.toml", "src",
+        recorderBinary
       ],
       cacheable = false)
 
