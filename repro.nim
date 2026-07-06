@@ -95,10 +95,15 @@ package codetracer_evm_recorder:
     # pkg-config + OpenSSL — openssl-sys consults pkg-config to find
     # OpenSSL on Linux/macOS. The Windows build uses the rustls-tls
     # feature instead so neither is on the windows toolchain floor.
-    when not defined(windows):
+    when defined(linux):
+      # Nim staticlib builds invoked from cargo expect a GNU archiver on
+      # Linux. Use gcc so Nim selects ``ar`` instead of ``llvm-ar``.
+      "gcc"
+    when defined(macosx):
       # Cargo build scripts look for ``cc`` by default; pass ``CC=clang``
-      # below and make clang part of the Unix dev environment.
+      # below and make clang part of the macOS dev environment.
       "clang"
+    when not defined(windows):
       "pkg-config"
       "openssl"
 
@@ -146,7 +151,8 @@ package codetracer_evm_recorder:
       "target/release/codetracer-evm-recorder" & binarySuffix
     let cargoCompilerEnv: seq[(string, string)] =
       when defined(windows): @[]
-      else: @[("CC", "clang")]
+      elif defined(macosx): @[("CC", "clang")]
+      else: @[("CC", "gcc")]
 
     let recorderBuild = cargo.build(
       release = true,
@@ -211,8 +217,10 @@ package codetracer_evm_recorder:
     let cliVerifyCommand =
       when defined(windows):
         "bash tests/verify-cli-convention-no-silent-skip.sh"
-      else:
+      elif defined(macosx):
         "CC=clang bash tests/verify-cli-convention-no-silent-skip.sh"
+      else:
+        "CC=gcc bash tests/verify-cli-convention-no-silent-skip.sh"
     let cliVerify = shell(
       command = cliVerifyCommand,
       actionId = "codetracer-evm-recorder.verify-cli-convention",
