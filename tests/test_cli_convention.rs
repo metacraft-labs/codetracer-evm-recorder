@@ -477,9 +477,19 @@ fn test_recorded_trace_via_ct_print_json() {
     );
 
     // ----- Step / call counts ----------------------------------------
-    // The EVM recorder produces one step per source-line transition in
-    // `compute()` and `add()`, plus the dispatcher's prologue lines and
-    // a few post-call return-site steps.  4 call_entry events are
+    // The EVM recorder emits column-aware step events: one step per
+    // distinct `(line, column)` transition rather than one per source
+    // line (recorder commit 0f39133, "emit column-aware step events for
+    // Solidity sources"; Column-Aware-Navigation.status.org).  Each
+    // sub-expression that occupies its own byte offset on a line lands
+    // as its own step, so multi-part lines in `compute()` / `add()`
+    // (e.g. `uint256 result = add(a, b);` → the assignment target at
+    // col 9, the `add(...)` call at col 26, and the `a` / `b` argument
+    // loads at cols 30 / 33) surface as distinct consecutive steps.
+    // 33 = the exact column-aware step count for this fixture; the
+    // pre-column-aware line-only count was 15 (which equals the number
+    // of distinct source *lines* visited — collapse consecutive
+    // same-line steps and 33 → 15).  4 call_entry events are
     // emitted: the external `compute()` dispatcher frame
     // (fn_at_pc_384), the internal `add` invocation (fn_at_pc_314),
     // a second `fn_at_pc_314` frame for the post-call return path
@@ -498,8 +508,9 @@ fn test_recorded_trace_via_ct_print_json() {
     let counts = &doc["counts"];
     assert_eq!(
         counts["steps"].as_u64(),
-        Some(15),
-        "expected 15 step events for FlowTest.sol; counts={counts}",
+        Some(33),
+        "expected 33 column-aware step events for FlowTest.sol \
+         (one per distinct (line, column)); counts={counts}",
     );
     assert_eq!(
         counts["calls"].as_u64(),
