@@ -26,7 +26,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 run_recorder() {
-  ( cd "${REPO_ROOT}" && cargo run --locked --quiet -- "$@" )
+  local bin="${CODETRACER_EVM_RECORDER_BIN:-}"
+  if [[ -n "${bin}" ]]; then
+    if [[ "${bin}" != /* && ! "${bin}" =~ ^[A-Za-z]: ]]; then
+      bin="${REPO_ROOT}/${bin}"
+    fi
+    if [[ ! -x "${bin}" ]]; then
+      echo "ERROR: recorder binary not found at ${bin}" >&2
+      exit 1
+    fi
+    ( cd "${REPO_ROOT}" && "${bin}" "$@" )
+  else
+    ( cd "${REPO_ROOT}" && cargo run --locked --quiet -- "$@" )
+  fi
 }
 
 # ---------------------------------------------------------------------------
