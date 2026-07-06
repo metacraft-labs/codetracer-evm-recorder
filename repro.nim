@@ -50,6 +50,9 @@ package codetracer_evm_recorder:
     # OpenSSL on Linux/macOS. The Windows build uses the rustls-tls
     # feature instead so neither is on the windows toolchain floor.
     when not defined(windows):
+      # Cargo build scripts look for ``cc`` by default; pass ``CC=clang``
+      # below and make clang part of the Unix dev environment.
+      "clang"
       "pkg-config"
       "openssl"
 
@@ -77,6 +80,9 @@ package codetracer_evm_recorder:
     const binarySuffix = (when defined(windows): ".exe" else: "")
     const recorderBinary =
       "target/release/codetracer-evm-recorder" & binarySuffix
+    let cargoCompilerEnv: seq[(string, string)] =
+      when defined(windows): @[]
+      else: @[("CC", "clang")]
 
     # NB: ``locked = false`` because codetracer-evm-recorder's
     # ``.gitignore`` excludes ``Cargo.lock`` (the repo treats itself
@@ -93,7 +99,8 @@ package codetracer_evm_recorder:
         "Cargo.toml",
         "src", "build.rs"
       ],
-      extraOutputs = @[recorderBinary])
+      extraOutputs = @[recorderBinary],
+      extraEnv = cargoCompilerEnv)
     discard collect("default", @[recorderBuild])
 
     # ---- Test-binary build + run edges (the `test` collection) -------
@@ -120,7 +127,8 @@ package codetracer_evm_recorder:
         "Cargo.toml",
         "src", "build.rs", "tests"
       ],
-      extraOutputs = @["target/debug/deps"])
+      extraOutputs = @["target/debug/deps"],
+      extraEnv = cargoCompilerEnv)
 
     let testsRun = cargo.test(
       actionId = "codetracer-evm-recorder.cargo-test-run",
@@ -129,6 +137,7 @@ package codetracer_evm_recorder:
         "Cargo.toml",
         "src", "tests",
         "target/debug/deps"
-      ])
+      ],
+      extraEnv = cargoCompilerEnv)
 
     discard collect("test", @[testsRun.action])
