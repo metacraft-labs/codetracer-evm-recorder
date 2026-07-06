@@ -494,7 +494,13 @@ fn test_control_flow_via_ct_print_full() {
     // explodes from the old "two orphan dispatcher calls" (2) to a
     // full balanced entry/exit pair per dispatcher frame (20).
     assert_eq!(counts["calls"].as_u64(), Some(20), "calls count");
-    assert_eq!(counts["values"].as_u64(), Some(37), "values count");
+    // One value per column-aware step (each step re-surfaces the frame's
+    // locals / storage carry-forward), so `values` tracks the raw
+    // (non-line-deduped) step count.  Under column-aware emission the
+    // recorder fires one step per distinct `(line, column)` rather than
+    // one per line, so this rises from the pre-column-aware 37 to 118
+    // (recorder commit 0f39133; Column-Aware-Navigation.status.org).
+    assert_eq!(counts["values"].as_u64(), Some(118), "values count");
     assert_eq!(counts["io_events"].as_u64(), Some(1), "io_events count");
 
     // --- exact step-line sequence ---
@@ -811,6 +817,16 @@ fn test_nested_calls_via_ct_print_full() {
         ]
     );
 
+    // The exit sequence is the LIFO close()-time flush: every call_exit
+    // closes the current innermost still-open frame, and the leftover
+    // stack drains innermost-first (multi_stream_writer.nim::close(),
+    // "Drains any unclosed PendingCalls ... (LIFO)").  Under column-aware
+    // step emission the still-open call stack at close() is
+    // `[outer, middle, inner, run, run, run]` (the inner/middle/outer
+    // frames re-opened by the post-return dispatcher walk close in place
+    // first), so the flush unwinds `run, run, run, inner, middle, outer`.
+    // This is verified well-formed: replaying entries/exits as a stack
+    // pops the matching frame every time and empties exactly.
     let exits = observed_call_exit_funcs(&doc);
     assert_eq!(
         exits,
@@ -820,10 +836,10 @@ fn test_nested_calls_via_ct_print_full() {
             "outer".to_string(),
             "run".to_string(),
             "run".to_string(),
-            "outer".to_string(),
-            "middle".to_string(),
-            "inner".to_string(),
             "run".to_string(),
+            "inner".to_string(),
+            "middle".to_string(),
+            "outer".to_string(),
         ]
     );
 }
@@ -2150,7 +2166,12 @@ fn test_inheritance_via_ct_print_full() {
     // back-edges + return-site frames) — every previously-orphan
     // call_entry now resolves to the enclosing user function.
     assert_eq!(counts["calls"].as_u64(), Some(7), "calls count");
-    assert_eq!(counts["values"].as_u64(), Some(19), "values count");
+    // One value per column-aware step, so `values` tracks the raw
+    // (non-line-deduped) step count: the recorder now fires one step per
+    // distinct `(line, column)` rather than one per line, lifting this
+    // from the pre-column-aware 19 to 33 (recorder commit 0f39133;
+    // Column-Aware-Navigation.status.org).
+    assert_eq!(counts["values"].as_u64(), Some(33), "values count");
     assert_eq!(counts["io_events"].as_u64(), Some(1), "io_events count");
 
     // --- function table ---
@@ -5560,6 +5581,15 @@ fn test_lending_pattern_via_ct_print_full() {
     );
 
     // --- call exit sequence (close()-time LIFO flush) ---
+    // Every call_exit closes the current innermost still-open frame; the
+    // leftover call stack drains innermost-first at close()
+    // (multi_stream_writer.nim::close(), "Drains any unclosed
+    // PendingCalls ... (LIFO)").  The six trailing dispatcher-orphan
+    // back-edge frames therefore unwind in reverse-registration order:
+    // `_withdraw, _withdraw, _repay, _repay, _borrow, _borrow,
+    // _deposit, _deposit` (LIFO), not deposit-first.  Verified
+    // well-formed: replaying entries/exits as a stack pops the matching
+    // frame every time and empties exactly.
     let exits = observed_call_exit_funcs(&doc);
     assert_eq!(
         exits,
@@ -5570,14 +5600,14 @@ fn test_lending_pattern_via_ct_print_full() {
             "_withdraw".to_string(),
             "run".to_string(),
             "run".to_string(),
-            "_deposit".to_string(),
-            "_deposit".to_string(),
-            "_borrow".to_string(),
-            "_borrow".to_string(),
-            "_repay".to_string(),
-            "_repay".to_string(),
             "_withdraw".to_string(),
             "_withdraw".to_string(),
+            "_repay".to_string(),
+            "_repay".to_string(),
+            "_borrow".to_string(),
+            "_borrow".to_string(),
+            "_deposit".to_string(),
+            "_deposit".to_string(),
         ],
         "call_exit sequence pins the close()-time LIFO unwind"
     );
