@@ -75,6 +75,28 @@ assert_present() {
   echo "ok: '${needle}' present in ${desc}"
 }
 
+assert_tree_contains() {
+  # assert_tree_contains <needle> <directory> <description>
+  local needle="$1"
+  local dir="$2"
+  local desc="$3"
+  local path line
+
+  shopt -s globstar nullglob
+  for path in "${dir}"/**/*; do
+    [[ -f "${path}" ]] || continue
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+      if [[ "${line}" == *"${needle}"* ]]; then
+        echo "ok: ${needle} referenced in ${desc}"
+        return 0
+      fi
+    done < "${path}"
+  done
+
+  echo "FAIL: ${needle} must be referenced in ${desc}" >&2
+  exit 1
+}
+
 # ---------------------------------------------------------------------------
 # Top-level --help
 # ---------------------------------------------------------------------------
@@ -110,17 +132,8 @@ assert_present "codetracer-evm-recorder" "--version output" "${VERSION_OUT}"
 
 # The recorder must reference CODETRACER_EVM_RECORDER_OUT_DIR in
 # source (otherwise the env-var fallback either doesn't exist or has
-# been silently removed).  We grep recursively under src/.
-if ! grep -rqF "CODETRACER_EVM_RECORDER_OUT_DIR" "${REPO_ROOT}/src"; then
-  echo "FAIL: CODETRACER_EVM_RECORDER_OUT_DIR must be referenced in src/" >&2
-  exit 1
-fi
-echo "ok: CODETRACER_EVM_RECORDER_OUT_DIR referenced in src/"
-
-if ! grep -rqF "CODETRACER_EVM_RECORDER_DISABLED" "${REPO_ROOT}/src"; then
-  echo "FAIL: CODETRACER_EVM_RECORDER_DISABLED must be referenced in src/" >&2
-  exit 1
-fi
-echo "ok: CODETRACER_EVM_RECORDER_DISABLED referenced in src/"
+# been silently removed).
+assert_tree_contains "CODETRACER_EVM_RECORDER_OUT_DIR" "${REPO_ROOT}/src" "src/"
+assert_tree_contains "CODETRACER_EVM_RECORDER_DISABLED" "${REPO_ROOT}/src" "src/"
 
 echo "verify-cli-convention-no-silent-skip: all checks passed"
