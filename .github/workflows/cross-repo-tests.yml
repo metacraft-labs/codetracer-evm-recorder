@@ -161,6 +161,34 @@ jobs:
             cp media/ct_vscode.js out/ct_vscode.js
           fi
 
+      - name: Patch recorder_exec for CI
+        run: |
+          cd "$GITHUB_WORKSPACE/../codetracer-vscode-extension"
+          # Replace recorder_exec to bypass direnv. The direnv-nix-flake-overrides
+          # plugin overrides NIX_CONFIG, which drops the access-tokens needed for
+          # private flake inputs.
+          cat > scripts/recorder-shell-exec.sh << HEREDOC
+          #!/usr/bin/env bash
+          recorder_exec() {
+            local repo_dir="\$1"
+            shift
+            if [ -f "\$repo_dir/flake.nix" ] && command -v nix >/dev/null 2>&1; then
+              nix develop "\$repo_dir" --accept-flake-config -c "\$@"
+            else
+              "\$@"
+            fi
+          }
+
+          recorder_target_dir() {
+            local repo_dir="\$1"
+            if [ -n "\${CARGO_TARGET_DIR:-}" ]; then
+              printf '%s\n' "\$CARGO_TARGET_DIR"
+            else
+              printf '%s\n' "\$repo_dir/target"
+            fi
+          }
+          HEREDOC
+
       - name: Patch runnablePath for CI
         run: |
           CT_BIN="$GITHUB_WORKSPACE/../codetracer/combined-bin/ct"
@@ -172,10 +200,6 @@ jobs:
       - name: Record Solidity trace fixture
         run: |
           cd "$GITHUB_WORKSPACE/../codetracer-vscode-extension"
-          # Strip direnv from PATH so recorder_exec uses 'nix develop' directly.
-          # The direnv-nix-flake-overrides plugin overrides NIX_CONFIG, which
-          # drops the access-tokens needed for private flake inputs.
-          export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v direnv | tr '\n' ':' | sed 's/:$//')
           FORCE=1 bash scripts/prepare-solidity-fixture.sh
 
       - name: Run Solidity smoke tests
