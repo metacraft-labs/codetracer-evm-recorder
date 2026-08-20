@@ -110,6 +110,11 @@ package codetracer_evm_recorder:
     # node the integration tests drive against.
     "solc"
     "foundry"
+    # `choco pack` / `choco push` in .github/workflows/publish-chocolatey.yml.
+    # Windows-guarded because Chocolatey is a Windows package manager with no
+    # POSIX build, so an unguarded entry would fail to resolve on Linux/macOS.
+    when defined(windows):
+      "chocolatey"
 
   executable codetracerEvmRecorder:
     name: "codetracer-evm-recorder"
