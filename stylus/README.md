@@ -40,9 +40,8 @@ algorithm (M29) without any Stylus-specific Go shim.
 This file is the **single source of truth** for the Stylus import
 list. The legacy Go code is retained in `codetracer-wasm-recorder`
 on the `value-origin` branch until the parity tests have been
-exercised end-to-end against a live Stylus toolchain. See M28 in
-`codetracer-specs/Planned-Features/Value-Origin-Tracking.milestones.org`
-for the migration plan.
+exercised end-to-end against a live Stylus toolchain. The M28 migration
+plan lives with the CodeTracer specs, which are maintained internally.
 
 The static surface is pinned in three places (M27 plan, hand-extracted
 fixture, and — added 2026-06-18 — the live Go source parsed at test
@@ -50,11 +49,8 @@ time) by the parity tests in
 `codetracer-wasm-instrumenter/crates/codetracer-wasm-host-module-framework/tests/stylus_parity.rs`.
 What still needs a live host is the *runtime* three-way parity
 (legacy Go path vs M27-on-wazero vs `ct instrument` rewriter); that
-is driven by the one-shot runner at
-
-```
-codetracer-specs/Planned-Features/value-origin-ci-scripts/run-m28-stylus-runner.sh
-```
+is driven by a one-shot runner script kept with the CodeTracer specs,
+which are maintained internally.
 
 Prereqs: `cargo-stylus`, a running `nitro-devnode` at `:8547`,
 `go` >= 1.21, `rustup` `wasm32-unknown-unknown` target, `jq`.
