@@ -13,7 +13,7 @@ walkthrough of the recorder's column-aware step-over.
 
 codetracer-evm-recorder compiles Solidity programs with solc, deploys them to a local Anvil node, executes a target function, and captures `debug_traceTransaction` structlogs. It resolves source mappings and reconstructs variable values from the EVM stack, emitting a CodeTracer multi-stream CTFS bundle compatible with the rest of CodeTracer.
 
-The recorder is CTFS-only — see [`Recorder-CLI-Conventions.md`](https://github.com/metacraft-labs/codetracer-specs/blob/main/Recorder-CLI-Conventions.md) §4. To convert a recorded `.ct` bundle to JSON or text for inspection, use `ct print` from [`codetracer-trace-format-nim`](https://github.com/metacraft-labs/codetracer-trace-format-nim); the recorder itself never produces these forms.
+The recorder is CTFS-only — see `Recorder-CLI-Conventions.md` §4. To convert a recorded `.ct` bundle to JSON or text for inspection, use `ct print` from [`codetracer-trace-format-nim`](https://github.com/metacraft-labs/codetracer-trace-format-nim); the recorder itself never produces these forms.
 
 ### Building
 
