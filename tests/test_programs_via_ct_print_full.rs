@@ -496,14 +496,19 @@ fn test_control_flow_via_ct_print_full() {
     // each loop / branch as a separate call frame, so the count
     // explodes from the old "two orphan dispatcher calls" (2) to a
     // full balanced entry/exit pair per dispatcher frame (20).
-    assert_eq!(counts["calls"].as_u64(), Some(20), "calls count");
-    // One value per column-aware step (each step re-surfaces the frame's
-    // locals / storage carry-forward), so `values` tracks the raw
-    // (non-line-deduped) step count.  Under column-aware emission the
-    // recorder fires one step per distinct `(line, column)` rather than
-    // one per line, so this rises from the pre-column-aware 37 to 118
-    // (recorder commit 0f39133; Column-Aware-Navigation.status.org).
-    assert_eq!(counts["values"].as_u64(), Some(118), "values count");
+    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
+    // as the call tree's root, before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(counts["calls"].as_u64(), Some(21), "calls count");
+    // One value record per step: `values.dat` is indexed in parallel
+    // with `steps.dat`, record N to step N (trace-events.md, §"Value
+    // Stream (`values.dat`)").  Under column-aware emission the recorder
+    // fires one step per distinct `(line, column)` rather than one per
+    // line, so this tracks the raw (non-line-deduped) step count: the 115
+    // steps the recorder registers plus the entry step `start` emits
+    // (trace-events.md, §"The entry step is part of `start`, not the
+    // recorder's first `register_step`").
+    assert_eq!(counts["values"].as_u64(), Some(116), "values count");
     assert_eq!(counts["io_events"].as_u64(), Some(1), "io_events count");
 
     // --- exact step-line sequence ---
@@ -586,9 +591,13 @@ fn test_control_flow_via_ct_print_full() {
     // tail-call back-edges plus their matching exits flushed by
     // codetracer-trace-format-nim commit 1834c1b
     // ("feat(multi-stream): flush unclosed call stack at close()").
+    // `<toplevel>` opens first: it is the call tree's root, which `start`
+    // opens at depth 0 before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_call_entry_funcs(&doc),
         vec![
+            "<toplevel>".to_string(),
             "run".to_string(),
             "run".to_string(),
             "run".to_string(),
@@ -611,8 +620,12 @@ fn test_control_flow_via_ct_print_full() {
             "run".to_string(),
         ],
         "ControlFlow.run() emits 20 dispatcher call_entries (per-branch \
-         JUMPDEST frames) all resolved to the enclosing `run` function"
+         JUMPDEST frames) all resolved to the enclosing `run` function, \
+         inside the `<toplevel>` root frame"
     );
+    // `<toplevel>` closes last: it is the call tree's root, which `start`
+    // opens at depth 0, so every other frame unwinds inside it
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_call_exit_funcs(&doc),
         vec![
@@ -636,12 +649,16 @@ fn test_control_flow_via_ct_print_full() {
             "run".to_string(),
             "run".to_string(),
             "run".to_string(),
+            "<toplevel>".to_string(),
         ],
     );
     let counts_calls = &doc["counts"]["calls"];
+    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
+    // as the call tree's root, before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         counts_calls.as_u64(),
-        Some(20),
+        Some(21),
         "calls count matches the entry/exit vector lengths"
     );
 }
@@ -3037,7 +3054,10 @@ fn test_visibility_via_ct_print_full() {
     );
     // 15 = 2 `external_call_depth_2` frames (one per `this.*`) + 4
     // AST-resolved user-function frames + 9 dispatcher-orphan frames.
-    assert_eq!(counts["calls"].as_u64(), Some(15), "calls count");
+    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
+    // as the call tree's root, before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(counts["calls"].as_u64(), Some(16), "calls count");
     // EXACTLY 5 varnames: a, b, c, d, total — one local per
     // visibility-bearing call plus the accumulator.
     assert_eq!(
@@ -3057,9 +3077,13 @@ fn test_visibility_via_ct_print_full() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
+    // `<toplevel>` heads the table: it is the call tree's root, which
+    // `start` registers before any function the recorder resolves
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         functions,
         vec![
+            "<toplevel>",
             "caller",
             "external_call_depth_2",
             "publicFn",
@@ -3134,9 +3158,13 @@ fn test_visibility_via_ct_print_full() {
     // four visibility-bearing user-function entries come in the
     // canonical interleaved order documented in the function table.
     let entries = observed_call_entry_funcs(&doc);
+    // `<toplevel>` opens first: it is the call tree's root, which `start`
+    // opens at depth 0 before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         entries,
         vec![
+            "<toplevel>".to_string(),
             "external_call_depth_2".to_string(),
             "publicFn".to_string(),
             "publicFn".to_string(),
@@ -3722,7 +3750,10 @@ fn test_interface_via_ct_print_full() {
     // + 3 nested `run` re-entry frames (the call-tree treats each
     // inner CALL as recursive into the run() frame because the
     // source map is single-contract).
-    assert_eq!(counts["calls"].as_u64(), Some(13), "calls count");
+    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
+    // as the call tree's root, before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(counts["calls"].as_u64(), Some(14), "calls count");
     // EXACTLY two io_events: the `Transfer(from, to, 7)` event from
     // the inner `token.transfer(...)` call AND the consumer's own
     // `Done(7)` event.
@@ -3739,9 +3770,12 @@ fn test_interface_via_ct_print_full() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
+    // `<toplevel>` heads the table: it is the call tree's root, which
+    // `start` registers before any function the recorder resolves
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         functions,
-        vec!["run", "external_call_depth_2"],
+        vec!["<toplevel>", "run", "external_call_depth_2"],
         "function table — entry-point first, then dispatcher orphans \
          interleaved with the EXTERNAL-call placeholder"
     );
@@ -4378,7 +4412,10 @@ fn test_function_pointer_via_ct_print_full() {
         40,
         "steps count (deduped by line)"
     );
-    assert_eq!(counts["calls"].as_u64(), Some(17), "calls count");
+    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
+    // as the call tree's root, before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(counts["calls"].as_u64(), Some(18), "calls count");
     assert_eq!(
         counts["varnames"].as_u64(),
         Some(3),
@@ -4394,9 +4431,18 @@ fn test_function_pointer_via_ct_print_full() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
+    // `<toplevel>` heads the table: it is the call tree's root, which
+    // `start` registers before any function the recorder resolves
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         functions,
-        vec!["run", "external_call_depth_2", "fn_at_0:31", "fn_at_0:32"],
+        vec![
+            "<toplevel>",
+            "run",
+            "external_call_depth_2",
+            "fn_at_0:31",
+            "fn_at_0:32"
+        ],
         "function table — entry-point + dispatcher orphans + the \
          EXTERNAL CALL placeholder (registered once, reused for both \
          the `new Target()` constructor call and the `f(7)` pointer \
@@ -4487,7 +4533,10 @@ fn test_create2_via_ct_print_full() {
         38,
         "steps count (deduped by line)"
     );
-    assert_eq!(counts["calls"].as_u64(), Some(13), "calls count");
+    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
+    // as the call tree's root, before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(counts["calls"].as_u64(), Some(14), "calls count");
     assert_eq!(
         counts["varnames"].as_u64(),
         Some(5),
@@ -4502,9 +4551,12 @@ fn test_create2_via_ct_print_full() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
+    // `<toplevel>` heads the table: it is the call tree's root, which
+    // `start` registers before any function the recorder resolves
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         functions,
-        vec!["run", "external_call_depth_2", "fn_at_0:41"],
+        vec!["<toplevel>", "run", "external_call_depth_2", "fn_at_0:41"],
         "function table — entry-point + dispatcher orphans + the \
          EXTERNAL CALL placeholder (registered once, reused for both \
          CREATE and CREATE2 deployments)"
@@ -5034,7 +5086,10 @@ fn test_vyper_hashmap_via_ct_print_full() {
         15,
         "steps count (deduped by line)"
     );
-    assert_eq!(counts["calls"].as_u64(), Some(5), "calls count");
+    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
+    // as the call tree's root, before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(counts["calls"].as_u64(), Some(6), "calls count");
     // 5 = four mapping-slot synthetic names (one per SSTORE'd derived
     // slot, surfacing as `storage[<huge slot index>]` because they're
     // computed via `keccak256(key . parentSlot)`) + the `total` local.
@@ -5048,9 +5103,12 @@ fn test_vyper_hashmap_via_ct_print_full() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
+    // `<toplevel>` heads the table: it is the call tree's root, which
+    // `start` registers before any function the recorder resolves
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         functions,
-        vec!["run"],
+        vec!["<toplevel>", "run"],
         "function table -- entry-point + two dispatcher-orphan placeholders"
     );
 
@@ -5158,7 +5216,10 @@ fn test_vyper_raw_call_via_ct_print_full() {
         43,
         "steps count (deduped by line)"
     );
-    assert_eq!(counts["calls"].as_u64(), Some(13), "calls count");
+    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
+    // as the call tree's root, before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(counts["calls"].as_u64(), Some(14), "calls count");
     assert_eq!(
         counts["varnames"].as_u64(),
         Some(5),
@@ -5173,9 +5234,12 @@ fn test_vyper_raw_call_via_ct_print_full() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
+    // `<toplevel>` heads the table: it is the call tree's root, which
+    // `start` registers before any function the recorder resolves
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         functions,
-        vec!["run", "external_call_depth_2"],
+        vec!["<toplevel>", "run", "external_call_depth_2"],
         "function table -- entry-point + the EXTERNAL CALL placeholder \
          + four dispatcher-orphan placeholders.  Crucially \
          `external_call_depth_2` is registered ONCE and reused for \
@@ -5266,7 +5330,10 @@ fn test_vyper_decorator_via_ct_print_full() {
         28,
         "steps count (deduped by line)"
     );
-    assert_eq!(counts["calls"].as_u64(), Some(11), "calls count");
+    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
+    // as the call tree's root, before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(counts["calls"].as_u64(), Some(12), "calls count");
     assert_eq!(
         counts["varnames"].as_u64(),
         Some(6),
@@ -5286,9 +5353,13 @@ fn test_vyper_decorator_via_ct_print_full() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
+    // `<toplevel>` heads the table: it is the call tree's root, which
+    // `start` registers before any function the recorder resolves
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         functions,
         vec![
+            "<toplevel>",
             "run",
             "pureView",
             "stateMut",
