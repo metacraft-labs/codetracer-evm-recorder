@@ -512,17 +512,23 @@ fn test_recorded_trace_via_ct_print_json() {
         "expected 33 column-aware step events for FlowTest.sol \
          (one per distinct (line, column)); counts={counts}",
     );
+    // `<toplevel>` is one of the five: `start` opens the call tree's root
+    // frame at depth 0 before the recorder makes any call of its own
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         counts["calls"].as_u64(),
-        Some(4),
-        "expected 4 call events (dispatcher + add + repeated post-call \
-         dispatcher + absorbed add); counts={counts}",
+        Some(5),
+        "expected 5 call events (<toplevel> + dispatcher + add + repeated \
+         post-call dispatcher + absorbed add); counts={counts}",
     );
 
     let events = doc["events"].as_array().expect("events array");
 
-    // ----- Call sequence: 4 frames, all must resolve ------------------
-    // The recorder emits 4 call_entry events:
+    // ----- Call sequence: 5 frames, all must resolve ------------------
+    // The recorder emits 5 call_entry events:
+    //   0. `<toplevel>` — the call tree's root, opened by `start` at depth
+    //      0 before the recorder makes any call of its own
+    //      (trace-events.md, "Recorder Integration — Starting a Recording").
     //   1. fn_at_pc_384 — solc dispatcher / external `compute()` frame
     //   2. fn_at_pc_314 — solc internal jump (the AST-aware fix in
     //      `AUDIT-CTFS-2026-05.md` §3 names this `add` in the function
@@ -541,8 +547,8 @@ fn test_recorded_trace_via_ct_print_json() {
         .collect();
     assert_eq!(
         call_entries.len(),
-        4,
-        "expected exactly 4 call_entry events; got {:?}",
+        5,
+        "expected exactly 5 call_entry events; got {:?}",
         call_entries
             .iter()
             .map(|e| e["function"].as_str().unwrap_or("<unresolved>"))

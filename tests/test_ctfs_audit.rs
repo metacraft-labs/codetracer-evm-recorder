@@ -394,9 +394,22 @@ fn audit_ctfs_linked_writer_staged_args_roundtrip() {
     drop(writer);
 
     let reader = open_reader(tmp_dir.path());
-    assert_eq!(reader.call_count(), 1, "expected the completed add call");
+    // Two calls: `<toplevel>`, which `start` opens at depth 0 as the call
+    // tree's root (trace-events.md, "Recorder Integration — Starting a
+    // Recording"), and then `add`.  `<toplevel>` takes no arguments, so
+    // the staged x/y pair belongs to call 1.
+    assert_eq!(
+        reader.call_count(),
+        2,
+        "expected the <toplevel> root plus the completed add call"
+    );
     assert_eq!(
         call_arg_count(&reader, 0),
+        0,
+        "the <toplevel> root frame is opened with no arguments"
+    );
+    assert_eq!(
+        call_arg_count(&reader, 1),
         2,
         "the linked writer failed to attach staged x/y args in a minimal trace"
     );
