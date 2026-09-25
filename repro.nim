@@ -64,6 +64,7 @@
 ## EVM: tests spawn anvil + invoke solc through Foundry.
 
 import repro_project_dsl
+import repro_dsl_stdlib/foreign_env
 import repro_dsl_stdlib/packages/sh
 
 package codetracer_evm_recorder:
@@ -120,6 +121,9 @@ package codetracer_evm_recorder:
     name: "codetracer-evm-recorder"
 
   devEnv:
+    when not defined(windows):
+      useFlakeDevShell()
+
     activity "default"
 
   build:
