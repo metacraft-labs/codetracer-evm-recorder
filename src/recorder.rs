@@ -18,6 +18,94 @@ use crate::structlog::StructLog;
 
 const INTERNAL_CALL_LOOKAHEAD: usize = 5;
 
+/// What an internal `[in]` jump opened, so that the matching `[out]` jump
+/// closes the same thing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JumpFrame {
+    /// The dispatcher's jump into the entry-point function, folded into
+    /// `<toplevel>` rather than recorded as a call.
+    Absorbed,
+    /// A jump into a user function, recorded as a call.
+    User,
+    /// A jump into, or within, code solc generated (checked arithmetic,
+    /// ABI coding, ...). solc emits these as `[in]`/`[out]` jumps like any
+    /// internal call, but there is no user function to enter: the source
+    /// line that performs the operation is still executing.
+    Generated,
+}
+
+/// Whether the jump at `current_index` lands in code solc generated rather
+/// than in a user function: the instruction executed right after it maps to
+/// no user source (a source index past the user sources, where solc numbers
+/// its generated Yul, or no source at all), and no instruction in the
+/// lookahead window lands inside a user function either. The second check
+/// keeps a user function whose entry JUMPDEST carries no source mapping a
+/// user call.
+fn jump_lands_in_generated_code(
+    struct_logs: &[StructLog],
+    current_index: usize,
+    source_map: &SourceMap,
+    pc_to_idx: &[usize],
+    user_source_count: usize,
+    solidity_ast: Option<&SolidityAst>,
+) -> bool {
+    let next_in_user_source = struct_logs
+        .get(current_index + 1)
+        .and_then(|next| source_map.get_entry_for_pc(next.pc as usize, pc_to_idx))
+        .is_some_and(|e| e.file_index >= 0 && (e.file_index as usize) < user_source_count);
+    !next_in_user_source
+        && resolve_internal_call_target(
+            struct_logs,
+            current_index,
+            source_map,
+            pc_to_idx,
+            solidity_ast,
+        )
+        .is_none()
+}
+
+/// Drop every label and size the symbolic stack to the concrete stack left
+/// by the JUMP whose pre-execution stack is `stack_before_jump` (the JUMP
+/// pops its destination). Slots are indexed from the stack bottom, so the
+/// depth must match the concrete stack for later labels to read the right
+/// values.
+fn resync_tracker_after_jump(
+    tracker: &mut StackTracker,
+    stack_before_jump: Option<&[alloy::primitives::U256]>,
+) {
+    match stack_before_jump {
+        Some(stack) => tracker.seed_top_labels(stack.len().saturating_sub(1), &[]),
+        None => tracker.reset(),
+    }
+}
+
+/// Close the frame an `[out]` jump returns from. A user call gets its
+/// return; an absorbed entry point and generated code have none. An `[out]`
+/// with no open frame is recorded as a return, as before frames were tracked.
+///
+/// Returning from generated code leaves the tracker alone: it followed the
+/// helper's instructions, so the caller's labels are still in place.
+fn close_jump_frame(
+    frames: &mut Vec<JumpFrame>,
+    writer: &mut dyn TraceWriter,
+    tracker: &mut StackTracker,
+    stack_before_jump: Option<&[alloy::primitives::U256]>,
+    return_type_id: TypeId,
+) {
+    match frames.pop() {
+        Some(JumpFrame::Generated) => {}
+        Some(JumpFrame::Absorbed) => resync_tracker_after_jump(tracker, stack_before_jump),
+        Some(JumpFrame::User) | None => {
+            let ret_val = ValueRecord::Raw {
+                r: "0x".to_string(),
+                type_id: return_type_id,
+            };
+            TraceWriter::register_return(writer, ret_val);
+            resync_tracker_after_jump(tracker, stack_before_jump);
+        }
+    }
+}
+
 /// Map a Solidity type name to the appropriate CodeTracer `TypeKind`.
 fn type_kind_for_solidity_type(type_name: &str) -> TypeKind {
     match type_name {
@@ -531,9 +619,10 @@ impl EvmRecorder {
         // emitting a register_call for it, and skip the matching OutOf return.
         // This keeps the target function's steps at depth 0.
         let mut first_internal_call_absorbed = false;
-        // Track the call nesting depth relative to the absorbed call so we
-        // know when the matching return (OutOf) happens.
-        let mut absorbed_call_nesting: i32 = 0;
+        // Per EVM call depth (depth 1 = index 0), one entry per `[in]` jump
+        // still open, so each `[out]` closes what its `[in]` opened (see
+        // `JumpFrame`). A contract's jumps never pair with another's.
+        let mut jump_frames: Vec<Vec<JumpFrame>> = Vec::new();
 
         // --- Local variable tracking (M5) ---
         // One StackTracker per call-stack depth.  We keep a small Vec indexed
@@ -633,6 +722,17 @@ impl EvmRecorder {
 
                 let depth_diff = prev_depth - log.depth;
                 for _ in 0..depth_diff {
+                    // User calls the exited contract left open end with it,
+                    // innermost first, before the external call itself.
+                    for frame in jump_frames.pop().unwrap_or_default().into_iter().rev() {
+                        if frame == JumpFrame::User {
+                            let ret_val = ValueRecord::Raw {
+                                r: "0x".to_string(),
+                                type_id: uint256_type_id,
+                            };
+                            TraceWriter::register_return(&mut *self.writer, ret_val);
+                        }
+                    }
                     let ret_val = ValueRecord::Raw {
                         r: "0x".to_string(),
                         type_id: uint256_type_id,
@@ -651,8 +751,12 @@ impl EvmRecorder {
             while memory_trackers.len() < log.depth as usize {
                 memory_trackers.push(MemoryTracker::new());
             }
+            while jump_frames.len() < log.depth as usize {
+                jump_frames.push(Vec::new());
+            }
             let tracker_idx = (log.depth as usize).saturating_sub(1);
             let tracker = &mut stack_trackers[tracker_idx];
+            let jump_frames = &mut jump_frames[tracker_idx];
 
             // Decode the opcode byte (first byte of log.op hex, or look up by name).
             let opcode: Option<u8> = opcode_from_name(log.op.as_ref());
@@ -791,14 +895,27 @@ impl EvmRecorder {
                 if let Some(entry) = source_map.get_entry_for_pc(pc, &pc_to_idx) {
                     match entry.jump_type {
                         JumpType::Into => {
-                            if !first_internal_call_absorbed {
+                            if jump_lands_in_generated_code(
+                                struct_logs,
+                                i,
+                                source_map,
+                                &pc_to_idx,
+                                source_contents.len(),
+                                solidity_ast,
+                            ) {
+                                jump_frames.push(JumpFrame::Generated);
+                            } else if !first_internal_call_absorbed {
                                 // Absorb the first internal call (dispatcher → target
                                 // function) into <toplevel>. This keeps the target
                                 // function's steps at depth 0 so step-over works.
                                 first_internal_call_absorbed = true;
-                                absorbed_call_nesting = 1;
-                                // Still reset the tracker for a clean start.
-                                tracker.reset();
+                                jump_frames.push(JumpFrame::Absorbed);
+                                // Start the entry point with no labelled slots,
+                                // but as deep as the concrete stack it runs on:
+                                // slots are indexed from the stack bottom, so an
+                                // empty symbolic stack would read every local from
+                                // the wrong slot.
+                                resync_tracker_after_jump(tracker, log.stack.as_deref());
 
                                 // Even though we don't emit a `register_call`
                                 // for the absorbed dispatcher → entry-point
@@ -831,10 +948,7 @@ impl EvmRecorder {
                                     );
                                 }
                             } else {
-                                // Track nesting within the absorbed scope.
-                                if absorbed_call_nesting > 0 {
-                                    absorbed_call_nesting += 1;
-                                }
+                                jump_frames.push(JumpFrame::User);
 
                                 // Internal function call.
                                 //
@@ -924,31 +1038,15 @@ impl EvmRecorder {
                             }
                         }
                         JumpType::OutOf => {
-                            if absorbed_call_nesting > 0 {
-                                absorbed_call_nesting -= 1;
-                                if absorbed_call_nesting == 0 {
-                                    // This is the return from the absorbed call.
-                                    // Don't emit register_return — the <toplevel>
-                                    // call will be closed by finalize().
-                                    tracker.reset();
-                                } else {
-                                    // Return from a nested call within the absorbed scope.
-                                    let ret_val = ValueRecord::Raw {
-                                        r: "0x".to_string(),
-                                        type_id: uint256_type_id,
-                                    };
-                                    TraceWriter::register_return(&mut *self.writer, ret_val);
-                                    tracker.reset();
-                                }
-                            } else {
-                                // Internal function return outside the absorbed scope.
-                                let ret_val = ValueRecord::Raw {
-                                    r: "0x".to_string(),
-                                    type_id: uint256_type_id,
-                                };
-                                TraceWriter::register_return(&mut *self.writer, ret_val);
-                                tracker.reset();
-                            }
+                            // The return from the absorbed entry point gets no
+                            // register_return: finalize() closes <toplevel>.
+                            close_jump_frame(
+                                jump_frames,
+                                &mut *self.writer,
+                                tracker,
+                                log.stack.as_deref(),
+                                uint256_type_id,
+                            );
                         }
                         JumpType::Regular => {}
                     }
@@ -957,6 +1055,22 @@ impl EvmRecorder {
                 // No source location — still advance the tracker.
                 if let Some(op) = opcode {
                     let _ = tracker.process_step(op, pc, source_offset, &[]);
+                }
+                // Jumps inside code with no user source (solc's generated
+                // helpers) still open and close frames: the `[out]` of a
+                // helper entered from user code is here.
+                if let Some(entry) = source_map.get_entry_for_pc(pc, &pc_to_idx) {
+                    match entry.jump_type {
+                        JumpType::Into => jump_frames.push(JumpFrame::Generated),
+                        JumpType::OutOf => close_jump_frame(
+                            jump_frames,
+                            &mut *self.writer,
+                            tracker,
+                            log.stack.as_deref(),
+                            uint256_type_id,
+                        ),
+                        JumpType::Regular => {}
+                    }
                 }
             }
 

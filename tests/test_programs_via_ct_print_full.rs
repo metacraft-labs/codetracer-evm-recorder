@@ -489,17 +489,12 @@ fn test_control_flow_via_ct_print_full() {
         37,
         "steps count (deduped by line)"
     );
-    // Re-pinned after codetracer-trace-format-nim commit 1834c1b
-    // ("feat(multi-stream): flush unclosed call stack at close()"),
-    // which now flushes every previously-unclosed call_entry as a
-    // matching call_exit at trace close time.  The dispatcher keeps
-    // each loop / branch as a separate call frame, so the count
-    // explodes from the old "two orphan dispatcher calls" (2) to a
-    // full balanced entry/exit pair per dispatcher frame (20).
-    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
-    // as the call tree's root, before any call the recorder makes
+    // `run` makes no internal call: its body is absorbed into
+    // `<toplevel>`, and the loops and checked arithmetic are jumps
+    // within it, not calls.  `<toplevel>` is the only frame: `start`
+    // opens it at depth 0 as the call tree's root
     // (trace-events.md, "Recorder Integration — Starting a Recording").
-    assert_eq!(counts["calls"].as_u64(), Some(21), "calls count");
+    assert_eq!(counts["calls"].as_u64(), Some(1), "calls count");
     // One value record per step: `values.dat` is indexed in parallel
     // with `steps.dat`, record N to step N (trace-events.md, §"Value
     // Stream (`values.dat`)").  Under column-aware emission the recorder
@@ -583,83 +578,19 @@ fn test_control_flow_via_ct_print_full() {
     );
 
     // --- call sequence ---
-    // Post-M11 every dispatcher-orphan JUMP that previously
-    // surfaced as a `fn_at_pc_<n>` placeholder is now resolved
-    // back to `run` (its enclosing user function — see the
-    // `resolve_enclosing_function_for_jump` fallback in
-    // `recorder.rs`).  The 20 entries are the loop / branch /
-    // tail-call back-edges plus their matching exits flushed by
-    // codetracer-trace-format-nim commit 1834c1b
-    // ("feat(multi-stream): flush unclosed call stack at close()").
-    // `<toplevel>` opens first: it is the call tree's root, which `start`
-    // opens at depth 0 before any call the recorder makes
-    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    // `run` is absorbed into `<toplevel>`; the if/else, both loops and
+    // the checked `+=` / `++` arithmetic are jumps inside it, none of
+    // them a call.  `<toplevel>` is the call tree's root, which `start`
+    // opens at depth 0 (trace-events.md, "Recorder Integration —
+    // Starting a Recording").
     assert_eq!(
         observed_call_entry_funcs(&doc),
-        vec![
-            "<toplevel>".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-        ],
-        "ControlFlow.run() emits 20 dispatcher call_entries (per-branch \
-         JUMPDEST frames) all resolved to the enclosing `run` function, \
-         inside the `<toplevel>` root frame"
+        vec!["<toplevel>".to_string()],
+        "ControlFlow.run() makes no call: only the `<toplevel>` root frame"
     );
-    // `<toplevel>` closes last: it is the call tree's root, which `start`
-    // opens at depth 0, so every other frame unwinds inside it
-    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_call_exit_funcs(&doc),
-        vec![
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "<toplevel>".to_string(),
-        ],
-    );
-    let counts_calls = &doc["counts"]["calls"];
-    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
-    // as the call tree's root, before any call the recorder makes
-    // (trace-events.md, "Recorder Integration — Starting a Recording").
-    assert_eq!(
-        counts_calls.as_u64(),
-        Some(21),
-        "calls count matches the entry/exit vector lengths"
+        vec!["<toplevel>".to_string()],
     );
 }
 
@@ -735,10 +666,9 @@ fn test_nested_calls_via_ct_print_full() {
     // --- counts ---
     let counts = &doc["counts"];
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
-    // 6 = `run` (registered when the dispatcher → entry-point JUMP is
+    // `run` (registered when the dispatcher → entry-point JUMP is
     // absorbed) + the 3 AST-resolved internal calls (`outer`,
-    // `middle`, `inner`) + 2 dispatcher-orphan `fn_at_pc_*`
-    // placeholders.
+    // `middle`, `inner`).
     // One function more than the program declares: `<toplevel>`, the call
     // tree's root that `start` registers first
     // (trace-events.md, "Recorder Integration — Starting a Recording").
@@ -748,16 +678,13 @@ fn test_nested_calls_via_ct_print_full() {
         26,
         "steps count (deduped by line)"
     );
-    // Re-pinned after codetracer-trace-format-nim commit 1834c1b
-    // ("feat(multi-stream): flush unclosed call stack at close()"):
-    // every previously-unclosed call_entry now has a matching
-    // call_exit emitted at trace close.  3 AST-resolved internal
-    // call_entries (outer/middle/inner) + 6 dispatcher-orphan
-    // entries (4 at pc 410, 2 at pc 340) = 9 calls total.
+    // 3 internal calls (outer/middle/inner); `run` itself is absorbed
+    // into `<toplevel>`, and the checked additions are jumps into
+    // compiler-generated code, not calls.
     // One call more than the program makes: `<toplevel>`, the call tree's
     // root that `start` opens at depth 0
     // (trace-events.md, "Recorder Integration — Starting a Recording").
-    assert_eq!(counts["calls"].as_u64(), Some(10), "calls count");
+    assert_eq!(counts["calls"].as_u64(), Some(4), "calls count");
     assert_eq!(counts["io_events"].as_u64(), Some(1), "io_events count");
 
     // --- function table ---
@@ -819,60 +746,23 @@ fn test_nested_calls_via_ct_print_full() {
     assert_eq!(ios[0].0, "ioStderr");
 
     // --- call entry/exit sequence ---
-    // Re-pinned after codetracer-trace-format-nim commit 1834c1b
-    // ("feat(multi-stream): flush unclosed call stack at close()"):
-    // every previously-unclosed call_entry now surfaces with its
-    // resolved function name (the old `null`/`<unnamed>` slots are
-    // now filled in via the function table) AND every entry now has
-    // a matching exit at trace close.  The first three entries are
-    // the AST-resolved internals (outer, middle, inner) — the
-    // recorder now resolves `inner` too.  The remaining six are
-    // dispatcher-orphan frames keyed by their JUMPDEST PC
-    // (`fn_at_pc_410` × 4 then `fn_at_pc_340` × 2).  The exit
-    // sequence is the close()-time flush in LIFO unwinding order.
-    let entries = observed_call_entry_funcs(&doc);
-    // `<toplevel>` opens first: it is the call tree's root, which `start`
-    // opens at depth 0 before any call the recorder makes
-    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    // Exactly the program's call chain: run → outer → middle → inner,
+    // each returning before its caller does.  `<toplevel>` opens first
+    // and closes last: it is the call tree's root, which `start` opens
+    // at depth 0 (trace-events.md, "Recorder Integration — Starting a
+    // Recording").
     assert_eq!(
-        entries,
+        observed_call_entry_funcs(&doc),
         vec![
             "<toplevel>".to_string(),
             "outer".to_string(),
             "middle".to_string(),
             "inner".to_string(),
-            "inner".to_string(),
-            "middle".to_string(),
-            "outer".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
         ]
     );
-
-    // The exit sequence is the LIFO close()-time flush: every call_exit
-    // closes the current innermost still-open frame, and the leftover
-    // stack drains innermost-first (multi_stream_writer.nim::close(),
-    // "Drains any unclosed PendingCalls ... (LIFO)").  Under column-aware
-    // step emission the still-open call stack at close() is
-    // `[outer, middle, inner, run, run, run]` (the inner/middle/outer
-    // frames re-opened by the post-return dispatcher walk close in place
-    // first), so the flush unwinds `run, run, run, inner, middle, outer`.
-    // This is verified well-formed: replaying entries/exits as a stack
-    // pops the matching frame every time and empties exactly.
-    let exits = observed_call_exit_funcs(&doc);
-    // `<toplevel>` closes last: it is the call tree's root, which `start`
-    // opens at depth 0, so every other frame unwinds inside it
-    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
-        exits,
+        observed_call_exit_funcs(&doc),
         vec![
-            "inner".to_string(),
-            "middle".to_string(),
-            "outer".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "run".to_string(),
             "inner".to_string(),
             "middle".to_string(),
             "outer".to_string(),
@@ -903,6 +793,90 @@ fn test_nested_calls_function_names_resolved() {
             "function table should include `{name}`; got {functions:?}"
         );
     }
+}
+
+// ===========================================================================
+// flow_test/FlowTest.sol
+// ===========================================================================
+
+/// The `Int` value of `varname` on one step event, if the step carries it.
+fn step_int_var(step: &serde_json::Value, varname: &str) -> Option<i64> {
+    step["vars"]
+        .as_array()?
+        .iter()
+        .rev()
+        .find(|v| v["varname"] == varname)
+        .and_then(|v| v["value"]["i"].as_i64())
+}
+
+/// Records `FlowTest.sol::compute()`, whose body is straight-line checked
+/// arithmetic (`a + b`, `sum_val * 2`, `doubled + a`) with no internal
+/// function call.
+///
+/// solc implements each checked operator as a jump into a generated Yul
+/// helper (`checked_add_t_uint256`, ...): the JUMP into it is tagged `[in]`
+/// in user source, its return `[out]` sits in the generated source. Those
+/// helpers are not user calls. Recorded as calls, each operator opened a
+/// frame that never closed, so the line computing `final_result` began in
+/// one call and the step that sees `final_result == 94` landed in another,
+/// and a flow view of that line read `final_result` as 0.
+#[test]
+fn test_flow_test_checked_arithmetic_stays_in_one_call() {
+    let Some(doc) = record_and_dump_full(
+        "test_flow_test_checked_arithmetic_stays_in_one_call",
+        "flow_test",
+        "FlowTest.sol",
+        "compute",
+    ) else {
+        return;
+    };
+
+    // `compute` is absorbed into `<toplevel>` (see the recorder's
+    // "first internal call merging"); the program makes no other call.
+    assert_eq!(
+        observed_call_entry_funcs(&doc),
+        vec!["<toplevel>".to_string()],
+        "checked-arithmetic helpers must not be recorded as calls"
+    );
+    assert_eq!(
+        observed_call_exit_funcs(&doc),
+        vec!["<toplevel>".to_string()],
+        "call exits"
+    );
+
+    let steps: Vec<&serde_json::Value> = doc["events"]
+        .as_array()
+        .expect("events array")
+        .iter()
+        .filter(|e| e["kind"] == "step")
+        .collect();
+    let first_on = |line: i64| {
+        steps
+            .iter()
+            .position(|s| s["line"] == line)
+            .unwrap_or_else(|| panic!("no step on line {line}"))
+    };
+    // Line 13: `uint256 final_result = doubled + a;`
+    // Line 14: `storedA = a;`, the first step after it.
+    let assign = first_on(13);
+    let after = first_on(14);
+    assert!(assign < after, "line 13 must run before line 14");
+    for s in &steps[assign..=after] {
+        assert_eq!(
+            s["depth"], steps[assign]["depth"],
+            "the steps from the final_result assignment to the next line \
+             must stay in one call; step {} is at depth {}",
+            s["step_index"], s["depth"]
+        );
+    }
+    assert_eq!(
+        step_int_var(steps[after], "final_result"),
+        Some(94),
+        "final_result after `doubled + a` must be 94 (84 + 10); step {}",
+        steps[after]
+    );
+    assert_eq!(step_int_var(steps[after], "doubled"), Some(84), "doubled");
+    assert_eq!(step_int_var(steps[after], "sum_val"), Some(42), "sum_val");
 }
 
 // ===========================================================================
@@ -942,15 +916,13 @@ fn test_storage_ops_via_ct_print_full() {
         12,
         "steps count (deduped by line)"
     );
-    // Re-pinned after codetracer-trace-format-nim commit 1834c1b
-    // ("feat(multi-stream): flush unclosed call stack at close()"):
-    // every previously-unclosed call_entry now has a matching
-    // call_exit emitted at trace close, doubling the bookkeeping
-    // pair count from 2 to 4 for StorageOps.run().
-    // One call more than the program makes: `<toplevel>`, the call tree's
-    // root that `start` opens at depth 0
+    // Calls, in entry order: `<toplevel>`.
+    // Only real calls are frames: the entry point is absorbed into
+    // `<toplevel>`, and jumps into compiler-generated helpers
+    // (checked arithmetic, ABI coding) are not calls.  `<toplevel>` is
+    // the call tree's root that `start` opens at depth 0
     // (trace-events.md, "Recorder Integration — Starting a Recording").
-    assert_eq!(counts["calls"].as_u64(), Some(5), "calls count");
+    assert_eq!(counts["calls"].as_u64(), Some(1), "calls count");
     assert_eq!(counts["io_events"].as_u64(), Some(1), "io_events count");
 
     // --- varnames ---
@@ -1089,10 +1061,13 @@ fn test_events_test_via_ct_print_full() {
         9,
         "steps count (deduped by line)"
     );
-    // One call more than the program makes: `<toplevel>`, the call tree's
-    // root that `start` opens at depth 0
+    // Calls, in entry order: `<toplevel>`.
+    // Only real calls are frames: the entry point is absorbed into
+    // `<toplevel>`, and jumps into compiler-generated helpers
+    // (checked arithmetic, ABI coding) are not calls.  `<toplevel>` is
+    // the call tree's root that `start` opens at depth 0
     // (trace-events.md, "Recorder Integration — Starting a Recording").
-    assert_eq!(counts["calls"].as_u64(), Some(3), "calls count");
+    assert_eq!(counts["calls"].as_u64(), Some(1), "calls count");
     // EXACT three io_events — one per `emit` statement.  This is
     // the headline assertion for this program: an off-by-one in the
     // recorder's LOG-opcode handling would surface here.
@@ -1217,10 +1192,13 @@ fn test_require_revert_happy_path_via_ct_print_full() {
         13,
         "steps count (deduped by line)"
     );
-    // One call more than the program makes: `<toplevel>`, the call tree's
-    // root that `start` opens at depth 0
+    // Calls, in entry order: `<toplevel>`, `safe`.
+    // Only real calls are frames: the entry point is absorbed into
+    // `<toplevel>`, and jumps into compiler-generated helpers
+    // (checked arithmetic, ABI coding) are not calls.  `<toplevel>` is
+    // the call tree's root that `start` opens at depth 0
     // (trace-events.md, "Recorder Integration — Starting a Recording").
-    assert_eq!(counts["calls"].as_u64(), Some(4), "calls count");
+    assert_eq!(counts["calls"].as_u64(), Some(2), "calls count");
     assert_eq!(counts["io_events"].as_u64(), Some(1), "io_events count");
 
     // --- function table ---
@@ -1274,20 +1252,17 @@ fn test_require_revert_happy_path_via_ct_print_full() {
     assert_eq!(ios[0].0, "ioStderr");
 
     // --- call sequence ---
-    // safe() is the only resolved internal call; the other two are
-    // dispatcher orphans.
-    let entries = observed_call_entry_funcs(&doc);
-    // `<toplevel>` opens first: it is the call tree's root, which `start`
-    // opens at depth 0 before any call the recorder makes
-    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    // safe() is the only call run() makes.  `<toplevel>` opens first and
+    // closes last: it is the call tree's root, which `start` opens at
+    // depth 0 (trace-events.md, "Recorder Integration — Starting a
+    // Recording").
     assert_eq!(
-        entries,
-        vec![
-            "<toplevel>".to_string(),
-            "safe".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-        ]
+        observed_call_entry_funcs(&doc),
+        vec!["<toplevel>".to_string(), "safe".to_string()]
+    );
+    assert_eq!(
+        observed_call_exit_funcs(&doc),
+        vec!["safe".to_string(), "<toplevel>".to_string()]
     );
 }
 
@@ -1373,15 +1348,13 @@ fn test_map_struct_arr_via_ct_print_full() {
         11,
         "steps count (deduped by line)"
     );
-    // Re-pinned after codetracer-trace-format-nim commit 1834c1b
-    // ("feat(multi-stream): flush unclosed call stack at close()"):
-    // every previously-unclosed call_entry now has a matching
-    // call_exit emitted at trace close, doubling the bookkeeping
-    // pair count from 2 to 4 for MapStructArr.run().
-    // One call more than the program makes: `<toplevel>`, the call tree's
-    // root that `start` opens at depth 0
+    // Calls, in entry order: `<toplevel>`.
+    // Only real calls are frames: the entry point is absorbed into
+    // `<toplevel>`, and jumps into compiler-generated helpers
+    // (checked arithmetic, ABI coding) are not calls.  `<toplevel>` is
+    // the call tree's root that `start` opens at depth 0
     // (trace-events.md, "Recorder Integration — Starting a Recording").
-    assert_eq!(counts["calls"].as_u64(), Some(5), "calls count");
+    assert_eq!(counts["calls"].as_u64(), Some(1), "calls count");
     assert_eq!(counts["io_events"].as_u64(), Some(1), "io_events count");
 
     // --- varnames ---
@@ -1712,17 +1685,16 @@ fn test_erc20_via_ct_print_full() {
         ios[2].1
     );
 
-    // --- call_entry: `_transfer` surfaces as four call_entries —
-    // one canonical call from `run()` plus three intra-`_transfer`
-    // continuation back-edges (post-M11 the recorder maps each
-    // continuation JUMP to its enclosing user function instead of a
-    // `fn_at_pc_*` placeholder, so back-edges in `_transfer`'s body
-    // pick up the `_transfer` name).
-    let entries = observed_call_entry_funcs(&doc);
-    let transfer_entries = entries.iter().filter(|n| n == &"_transfer").count();
+    // --- calls: `_transfer` is entered once, from `run()` ---
+    // The checked balance arithmetic inside it jumps into
+    // compiler-generated helpers, which are not calls.
     assert_eq!(
-        transfer_entries, 4,
-        "_transfer entries (1 canonical + 3 continuation back-edges); got entries {entries:?}"
+        observed_call_entry_funcs(&doc),
+        vec!["<toplevel>".to_string(), "_transfer".to_string()]
+    );
+    assert_eq!(
+        observed_call_exit_funcs(&doc),
+        vec!["_transfer".to_string(), "<toplevel>".to_string()]
     );
 }
 
@@ -1967,16 +1939,16 @@ fn test_modifier_via_ct_print_full() {
         ios[0].1
     );
 
-    // --- call_entry: setValue surfaces twice — one canonical
-    // call from run() plus one intra-`setValue` modifier-continuation
-    // JUMP that solc marks as `JumpType::Into` (post-M11 the recorder
-    // maps the JUMP source's enclosing function to `setValue` instead
-    // of a `fn_at_pc_*` placeholder).
-    let entries = observed_call_entry_funcs(&doc);
-    let setvalue_entries = entries.iter().filter(|n| n == &"setValue").count();
+    // --- calls: exactly the one call run() makes, to setValue ---
+    // The `onlyOwner` modifier is inlined into setValue's body, so it
+    // opens no frame of its own; `<toplevel>` is the call tree's root.
     assert_eq!(
-        setvalue_entries, 2,
-        "setValue entries (1 canonical + 1 modifier-continuation back-edge); got entries {entries:?}"
+        observed_call_entry_funcs(&doc),
+        vec!["<toplevel>".to_string(), "setValue".to_string()]
+    );
+    assert_eq!(
+        observed_call_exit_funcs(&doc),
+        vec!["setValue".to_string(), "<toplevel>".to_string()]
     );
 }
 
@@ -2249,13 +2221,14 @@ fn test_inheritance_via_ct_print_full() {
         19,
         "steps count (deduped by line)"
     );
-    // 7 = the canonical inheritance super-chain frames (3 foo +
-    // back-edges + return-site frames) — every previously-orphan
-    // call_entry now resolves to the enclosing user function.
-    // One call more than the program makes: `<toplevel>`, the call tree's
-    // root that `start` opens at depth 0
+    // Calls, in entry order:
+    //    `<toplevel>`, `Inheritance.foo`, `Mid.foo`, `Base.foo`.
+    // Only real calls are frames: the entry point is absorbed into
+    // `<toplevel>`, and jumps into compiler-generated helpers
+    // (checked arithmetic, ABI coding) are not calls.  `<toplevel>` is
+    // the call tree's root that `start` opens at depth 0
     // (trace-events.md, "Recorder Integration — Starting a Recording").
-    assert_eq!(counts["calls"].as_u64(), Some(8), "calls count");
+    assert_eq!(counts["calls"].as_u64(), Some(4), "calls count");
     // One value per column-aware step, so `values` tracks the raw
     // (non-line-deduped) step count: the recorder now fires one step per
     // distinct `(line, column)` rather than one per line, lifting this
@@ -2320,65 +2293,40 @@ fn test_inheritance_via_ct_print_full() {
          super-chain unwind"
     );
 
-    // --- balanced 5 Call/Return pairs for `foo` ---
-    // Three of the call_entries are the canonical super-chain calls
-    // (Inheritance.foo → Mid.foo → Base.foo at depths 0/1/2); the
-    // remaining two are continuation back-edges within the
-    // `Inheritance.foo` / `Mid.foo` bodies that solc marks as
-    // `JumpType::Into` — post-M11 the recorder maps the JUMP source
-    // site's enclosing function to the matching `<Contract>.foo`
-    // override (instead of surfacing them as `fn_at_pc_*`
-    // placeholders).
-    let is_foo_override = |fname: &str| matches!(fname, "Inheritance.foo" | "Mid.foo" | "Base.foo");
-    let foo_entries = doc["events"]
-        .as_array()
-        .expect("events array")
-        .iter()
-        .filter(|e| {
-            e["kind"] == "call_entry"
-                && e["function"].as_str().map(is_foo_override).unwrap_or(false)
-        })
-        .count();
-    let foo_exits = doc["events"]
-        .as_array()
-        .expect("events array")
-        .iter()
-        .filter(|e| {
-            e["kind"] == "call_exit" && e["function"].as_str().map(is_foo_override).unwrap_or(false)
-        })
-        .count();
+    // --- the super chain, and nothing else, as calls ---
+    // Inheritance.foo → Mid.foo → Base.foo at depths 1, 2, 3 (depth 0 is
+    // `<toplevel>`, the call tree's root that `start` opens —
+    // trace-events.md, "Recorder Integration — Starting a Recording"),
+    // unwinding innermost first.
     assert_eq!(
-        foo_entries, 5,
-        "expected 5 `<Contract>.foo` call_entries (3 super-chain calls \
-         + 2 continuation back-edges resolved to their enclosing override)"
+        observed_call_entry_funcs(&doc),
+        vec![
+            "<toplevel>".to_string(),
+            "Inheritance.foo".to_string(),
+            "Mid.foo".to_string(),
+            "Base.foo".to_string(),
+        ]
     );
     assert_eq!(
-        foo_exits, 5,
-        "expected 5 `<Contract>.foo` call_exits balancing the call_entries"
+        observed_call_exit_funcs(&doc),
+        vec![
+            "Base.foo".to_string(),
+            "Mid.foo".to_string(),
+            "Inheritance.foo".to_string(),
+            "<toplevel>".to_string(),
+        ]
     );
-
-    // --- depth pattern: the *first three* foo frames are the canonical
-    // super-chain at depths 1, 2, 3 (Leaf → Mid → Base).  The trailing
-    // two foo entries are continuation back-edges at depth 3.  Depth 0 is
-    // `<toplevel>`, the call tree's root that `start` opens
-    // (trace-events.md, "Recorder Integration — Starting a Recording"),
-    // so the chain starts one frame down.
-    let foo_entry_depths: Vec<i64> = doc["events"]
+    let entry_depths: Vec<i64> = doc["events"]
         .as_array()
         .expect("events array")
         .iter()
-        .filter(|e| {
-            e["kind"] == "call_entry"
-                && e["function"].as_str().map(is_foo_override).unwrap_or(false)
-        })
+        .filter(|e| e["kind"] == "call_entry")
         .map(|e| e["depth"].as_i64().expect("depth must be present"))
         .collect();
     assert_eq!(
-        foo_entry_depths,
-        vec![1, 2, 3, 3, 3],
-        "first three depths pin the canonical super-chain (Leaf=1, Mid=2, \
-         Base=3, all nested inside the depth-0 `<toplevel>` root); the \
-         remaining two are continuation back-edges at depth 3"
+        entry_depths,
+        vec![0, 1, 2, 3],
+        "the super chain nests Leaf=1, Mid=2, Base=3 inside `<toplevel>`"
     );
 
     // --- no DELEGATECALL placeholder appears ---
@@ -2451,10 +2399,13 @@ fn test_custom_errors_insufficient_via_ct_print_full() {
         7,
         "steps count (deduped by line)"
     );
-    // One call more than the program makes: `<toplevel>`, the call tree's
-    // root that `start` opens at depth 0
+    // Calls, in entry order: `<toplevel>`, `withdraw`.
+    // Only real calls are frames: the entry point is absorbed into
+    // `<toplevel>`, and jumps into compiler-generated helpers
+    // (checked arithmetic, ABI coding) are not calls.  `<toplevel>` is
+    // the call tree's root that `start` opens at depth 0
     // (trace-events.md, "Recorder Integration — Starting a Recording").
-    assert_eq!(counts["calls"].as_u64(), Some(3), "calls count");
+    assert_eq!(counts["calls"].as_u64(), Some(2), "calls count");
     // Exactly one io_event: the typed custom-error revert surfaces
     // through the `decode_revert_with_registry` path as a single
     // `ioError`.
@@ -2593,8 +2544,7 @@ fn test_library_via_ct_print_full() {
     // --- counts ---
     let counts = &doc["counts"];
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
-    // 7 = `run` + `compute` + `add` + `mul` + 3 dispatcher-orphan
-    // `fn_at_pc_*` placeholders for the inlined library jumps.
+    // `run` + `compute` + `add` + `mul`.
     // One function more than the program declares: `<toplevel>`, the call
     // tree's root that `start` registers first
     // (trace-events.md, "Recorder Integration — Starting a Recording").
@@ -2604,12 +2554,14 @@ fn test_library_via_ct_print_full() {
         19,
         "steps count (deduped by line)"
     );
-    // 7 = `compute` + `add` + `mul` (3 AST-resolved internals) + 4
-    // orphan dispatcher entries from the post-return walking.
-    // One call more than the program makes: `<toplevel>`, the call tree's
-    // root that `start` opens at depth 0
+    // Calls, in entry order:
+    //    `<toplevel>`, `compute`, `SafeMath.add`, `SafeMath.mul`.
+    // Only real calls are frames: the entry point is absorbed into
+    // `<toplevel>`, and jumps into compiler-generated helpers
+    // (checked arithmetic, ABI coding) are not calls.  `<toplevel>` is
+    // the call tree's root that `start` opens at depth 0
     // (trace-events.md, "Recorder Integration — Starting a Recording").
-    assert_eq!(counts["calls"].as_u64(), Some(8), "calls count");
+    assert_eq!(counts["calls"].as_u64(), Some(4), "calls count");
     assert_eq!(counts["io_events"].as_u64(), Some(1), "io_events count");
 
     // --- function table contains both library functions ---
@@ -2667,14 +2619,19 @@ fn test_library_via_ct_print_full() {
             "<toplevel>".to_string(),
             "compute".to_string(),
             "SafeMath.add".to_string(),
+            "SafeMath.mul".to_string(),
+        ],
+        "compute first, then add, then mul, each a call inside compute"
+    );
+    assert_eq!(
+        observed_call_exit_funcs(&doc),
+        vec![
             "SafeMath.add".to_string(),
             "SafeMath.mul".to_string(),
-            "SafeMath.mul".to_string(),
-            "run".to_string(),
-            "run".to_string(),
+            "compute".to_string(),
+            "<toplevel>".to_string(),
         ],
-        "compute first, then add (with one inlined helper jump), then \
-         mul (same), then dispatcher orphans"
+        "add returns before mul is called; compute returns last"
     );
 
     // --- io: Result(30 = 0x1e) ---
@@ -2738,10 +2695,13 @@ fn test_block_tx_context_via_ct_print_full() {
         18,
         "steps count (deduped by line)"
     );
-    // One call more than the program makes: `<toplevel>`, the call tree's
-    // root that `start` opens at depth 0
+    // Calls, in entry order: `<toplevel>`.
+    // Only real calls are frames: the entry point is absorbed into
+    // `<toplevel>`, and jumps into compiler-generated helpers
+    // (checked arithmetic, ABI coding) are not calls.  `<toplevel>` is
+    // the call tree's root that `start` opens at depth 0
     // (trace-events.md, "Recorder Integration — Starting a Recording").
-    assert_eq!(counts["calls"].as_u64(), Some(3), "calls count");
+    assert_eq!(counts["calls"].as_u64(), Some(1), "calls count");
     // EXACTLY 12 varnames: 6 transient locals captured from the
     // context globals + 6 storage carry-forward slots written from
     // them.  An off-by-one would surface here.
@@ -2892,10 +2852,13 @@ fn test_payable_deposit_via_ct_print_full() {
         7,
         "steps count (deduped by line)"
     );
-    // One call more than the program makes: `<toplevel>`, the call tree's
-    // root that `start` opens at depth 0
+    // Calls, in entry order: `<toplevel>`.
+    // Only real calls are frames: the entry point is absorbed into
+    // `<toplevel>`, and jumps into compiler-generated helpers
+    // (checked arithmetic, ABI coding) are not calls.  `<toplevel>` is
+    // the call tree's root that `start` opens at depth 0
     // (trace-events.md, "Recorder Integration — Starting a Recording").
-    assert_eq!(counts["calls"].as_u64(), Some(4), "calls count");
+    assert_eq!(counts["calls"].as_u64(), Some(1), "calls count");
     // Exactly one io_event: the `Deposited(amount, newBalance)` LOG.
     assert_eq!(counts["io_events"].as_u64(), Some(1), "io_events count");
 
@@ -3052,12 +3015,15 @@ fn test_visibility_via_ct_print_full() {
         29,
         "steps count (deduped by line)"
     );
-    // 15 = 2 `external_call_depth_2` frames (one per `this.*`) + 4
-    // AST-resolved user-function frames + 9 dispatcher-orphan frames.
-    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
-    // as the call tree's root, before any call the recorder makes
+    // Calls, in entry order:
+    //    `<toplevel>`, `external_call_depth_2`, `publicFn`,
+    //    `external_call_depth_2`, `externalFn`, `internalFn`, `privateFn`.
+    // Only real calls are frames: the entry point is absorbed into
+    // `<toplevel>`, and jumps into compiler-generated helpers
+    // (checked arithmetic, ABI coding) are not calls.  `<toplevel>` is
+    // the call tree's root that `start` opens at depth 0
     // (trace-events.md, "Recorder Integration — Starting a Recording").
-    assert_eq!(counts["calls"].as_u64(), Some(16), "calls count");
+    assert_eq!(counts["calls"].as_u64(), Some(7), "calls count");
     // EXACTLY 5 varnames: a, b, c, d, total — one local per
     // visibility-bearing call plus the accumulator.
     assert_eq!(
@@ -3153,38 +3119,38 @@ fn test_visibility_via_ct_print_full() {
     assert_step_value_kinds_eq(&doc, &["Int", "Raw"]);
 
     // --- call sequence: pin EXTERNAL-vs-INTERNAL placement ---
-    // The first two `external_call_depth_2` entries are the dispatcher
-    // re-entries for `this.publicFn()` / `this.externalFn()`.  The
-    // four visibility-bearing user-function entries come in the
-    // canonical interleaved order documented in the function table.
-    let entries = observed_call_entry_funcs(&doc);
-    // `<toplevel>` opens first: it is the call tree's root, which `start`
-    // opens at depth 0 before any call the recorder makes
-    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    // Each `this.*` invocation is an external call, inside which the
+    // dispatcher's jump into the function is its call; internalFn and
+    // privateFn are plain internal calls at caller's depth, with no
+    // external frame around them.  `<toplevel>` is the call tree's root,
+    // which `start` opens at depth 0 (trace-events.md, "Recorder
+    // Integration — Starting a Recording").
     assert_eq!(
-        entries,
+        observed_call_entry_funcs(&doc),
         vec![
             "<toplevel>".to_string(),
             "external_call_depth_2".to_string(),
             "publicFn".to_string(),
-            "publicFn".to_string(),
-            "caller".to_string(),
             "external_call_depth_2".to_string(),
             "externalFn".to_string(),
-            "externalFn".to_string(),
-            "caller".to_string(),
             "internalFn".to_string(),
             "privateFn".to_string(),
-            "caller".to_string(),
-            "caller".to_string(),
-            "caller".to_string(),
-            "caller".to_string(),
-            "caller".to_string(),
         ],
         "call_entry sequence: both this.* invocations land as \
-         external_call_depth_2 placeholders BEFORE their resolved \
-         user-function entry; internalFn/privateFn appear with NO \
-         preceding external_call_* (same-depth JUMP)"
+         external_call_depth_2 frames around their function's entry; \
+         internalFn/privateFn appear with NO external frame (same-depth JUMP)"
+    );
+    assert_eq!(
+        observed_call_exit_funcs(&doc),
+        vec![
+            "publicFn".to_string(),
+            "external_call_depth_2".to_string(),
+            "externalFn".to_string(),
+            "external_call_depth_2".to_string(),
+            "internalFn".to_string(),
+            "privateFn".to_string(),
+            "<toplevel>".to_string(),
+        ]
     );
 
     // --- io / event emission: Result(15) ---
@@ -3234,25 +3200,25 @@ fn test_receive_fallback_receive_path_via_ct_print_full() {
     // --- counts ---
     let counts = &doc["counts"];
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
-    // 6 = `triggerReceive` (entry-point) + `external_call_depth_2`
-    // (the inner CALL placeholder for `address(this).call`) + 4
-    // dispatcher-orphan `fn_at_pc_*` placeholders (one for the
-    // `receive()` selector-zero dispatcher target plus three for the
-    // post-return walking).
-    // One function more than the program declares: `<toplevel>`, the call
-    // tree's root that `start` registers first
-    // (trace-events.md, "Recorder Integration — Starting a Recording").
-    assert_eq!(counts["functions"].as_u64(), Some(4), "functions count");
+    // `<toplevel>` (the call tree's root that `start` registers first —
+    // trace-events.md, "Recorder Integration — Starting a Recording"),
+    // `triggerReceive` (the entry point) and `external_call_depth_2`
+    // (the frame for `address(this).call`).  The dispatcher reaches
+    // `receive()` without an internal call, so the external frame is
+    // the one that runs its body.
+    assert_eq!(counts["functions"].as_u64(), Some(3), "functions count");
     assert_eq!(
         observed_step_lines(&doc).len() as u64,
         13,
         "steps count (deduped by line)"
     );
-    // 5 = 1 external_call_depth_2 + 4 dispatcher-orphan frames.
-    // One call more than the program makes: `<toplevel>`, the call tree's
-    // root that `start` opens at depth 0
+    // Calls, in entry order: `<toplevel>`, `external_call_depth_2`.
+    // Only real calls are frames: the entry point is absorbed into
+    // `<toplevel>`, and jumps into compiler-generated helpers
+    // (checked arithmetic, ABI coding) are not calls.  `<toplevel>` is
+    // the call tree's root that `start` opens at depth 0
     // (trace-events.md, "Recorder Integration — Starting a Recording").
-    assert_eq!(counts["calls"].as_u64(), Some(6), "calls count");
+    assert_eq!(counts["calls"].as_u64(), Some(2), "calls count");
     assert_eq!(
         counts["varnames"].as_u64(),
         Some(3),
@@ -3265,9 +3231,6 @@ fn test_receive_fallback_receive_path_via_ct_print_full() {
     assert_eq!(counts["io_events"].as_u64(), Some(1), "io_events count");
 
     // --- function table ---
-    // The recorder doesn't AST-resolve `receive` (no name in the AST
-    // body resolver — special-form function); it surfaces as a
-    // dispatcher-orphan `fn_at_pc_*` placeholder.
     let functions: Vec<&str> = doc["functions"]
         .as_array()
         .expect("functions array")
@@ -3279,15 +3242,8 @@ fn test_receive_fallback_receive_path_via_ct_print_full() {
     // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         functions,
-        vec![
-            "<toplevel>",
-            "triggerReceive",
-            "external_call_depth_2",
-            "receive"
-        ],
-        "function table — entry-point first, then a dispatcher-orphan \
-         placeholder for the `receive()` selector-zero target, then the \
-         EXTERNAL-call placeholder, then post-return dispatcher orphans"
+        vec!["<toplevel>", "triggerReceive", "external_call_depth_2"],
+        "function table — root, entry point, then the EXTERNAL-call frame"
     );
 
     // --- varnames: just the `ok` bool + the touched storage slots ---
@@ -3405,19 +3361,25 @@ fn test_receive_fallback_fallback_path_via_ct_print_full() {
     // --- counts ---
     let counts = &doc["counts"];
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
-    // One function more than the program declares: `<toplevel>`, the call
-    // tree's root that `start` registers first
-    // (trace-events.md, "Recorder Integration — Starting a Recording").
-    assert_eq!(counts["functions"].as_u64(), Some(4), "functions count");
+    // `<toplevel>` (the call tree's root that `start` registers first —
+    // trace-events.md, "Recorder Integration — Starting a Recording"),
+    // `triggerFallback` (the entry point) and `external_call_depth_2`
+    // (the frame for `address(this).call`).  The dispatcher reaches
+    // `fallback()` without an internal call, so the external frame is
+    // the one that runs its body.
+    assert_eq!(counts["functions"].as_u64(), Some(3), "functions count");
     assert_eq!(
         observed_step_lines(&doc).len() as u64,
         13,
         "steps count (deduped by line)"
     );
-    // One call more than the program makes: `<toplevel>`, the call tree's
-    // root that `start` opens at depth 0
+    // Calls, in entry order: `<toplevel>`, `external_call_depth_2`.
+    // Only real calls are frames: the entry point is absorbed into
+    // `<toplevel>`, and jumps into compiler-generated helpers
+    // (checked arithmetic, ABI coding) are not calls.  `<toplevel>` is
+    // the call tree's root that `start` opens at depth 0
     // (trace-events.md, "Recorder Integration — Starting a Recording").
-    assert_eq!(counts["calls"].as_u64(), Some(6), "calls count");
+    assert_eq!(counts["calls"].as_u64(), Some(2), "calls count");
     assert_eq!(
         counts["varnames"].as_u64(),
         Some(3),
@@ -3437,15 +3399,8 @@ fn test_receive_fallback_fallback_path_via_ct_print_full() {
     // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         functions,
-        vec![
-            "<toplevel>",
-            "triggerFallback",
-            "external_call_depth_2",
-            "fallback"
-        ],
-        "function table — entry-point first, then a dispatcher-orphan \
-         placeholder for the `fallback()` no-match target, then the \
-         EXTERNAL-call placeholder, then post-return dispatcher orphans"
+        vec!["<toplevel>", "triggerFallback", "external_call_depth_2"],
+        "function table — root, entry point, then the EXTERNAL-call frame"
     );
 
     // --- varnames ---
@@ -3564,10 +3519,13 @@ fn test_selfdestruct_via_ct_print_full() {
         7,
         "steps count (deduped by line)"
     );
-    // One call more than the program makes: `<toplevel>`, the call tree's
-    // root that `start` opens at depth 0
+    // Calls, in entry order: `<toplevel>`, `destroy`.
+    // Only real calls are frames: the entry point is absorbed into
+    // `<toplevel>`, and jumps into compiler-generated helpers
+    // (checked arithmetic, ABI coding) are not calls.  `<toplevel>` is
+    // the call tree's root that `start` opens at depth 0
     // (trace-events.md, "Recorder Integration — Starting a Recording").
-    assert_eq!(counts["calls"].as_u64(), Some(3), "calls count");
+    assert_eq!(counts["calls"].as_u64(), Some(2), "calls count");
     assert_eq!(
         counts["varnames"].as_u64(),
         Some(1),
@@ -3620,12 +3578,8 @@ fn test_selfdestruct_via_ct_print_full() {
     // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         entries,
-        vec![
-            "<toplevel>".to_string(),
-            "destroy".to_string(),
-            "destroy".to_string(),
-        ],
-        "call_entry sequence: destroy() resolved internal + dispatcher orphan"
+        vec!["<toplevel>".to_string(), "destroy".to_string()],
+        "call_entry sequence: the one internal call, to destroy()"
     );
 
     // --- io events: BeforeDestroy LOG + SELFDESTRUCT opcode ---
@@ -3745,15 +3699,18 @@ fn test_interface_via_ct_print_full() {
         24,
         "steps count (deduped by line)"
     );
-    // 13 = 3 external_call_depth_2 frames (one per `new Token()` /
-    // `t.transfer(...)` / `t.balanceOf(...)`) + 7 dispatcher orphans
-    // + 3 nested `run` re-entry frames (the call-tree treats each
-    // inner CALL as recursive into the run() frame because the
-    // source map is single-contract).
-    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
-    // as the call tree's root, before any call the recorder makes
+    // Calls, in entry order:
+    //    `<toplevel>`, `external_call_depth_2`, `run`,
+    //    `external_call_depth_2`, `run`, `external_call_depth_2`, `run`.
+    // In this contract's own code only real calls are frames: the entry
+    // point is absorbed into `<toplevel>`, and jumps into
+    // compiler-generated helpers are not calls.  The frames at depth 2 and
+    // below are KNOWN WRONG: the recorder reads another contract's
+    // bytecode through this contract's source map, so jumps there are
+    // misattributed (`run`, `fn_at_*`).  `<toplevel>` is the call tree's
+    // root that `start` opens at depth 0
     // (trace-events.md, "Recorder Integration — Starting a Recording").
-    assert_eq!(counts["calls"].as_u64(), Some(14), "calls count");
+    assert_eq!(counts["calls"].as_u64(), Some(7), "calls count");
     // EXACTLY two io_events: the `Transfer(from, to, 7)` event from
     // the inner `token.transfer(...)` call AND the consumer's own
     // `Done(7)` event.
@@ -3895,10 +3852,13 @@ fn test_ecrecover_via_ct_print_full() {
         11,
         "steps count (deduped by line)"
     );
-    // One call more than the program makes: `<toplevel>`, the call tree's
-    // root that `start` opens at depth 0
+    // Calls, in entry order: `<toplevel>`.
+    // Only real calls are frames: the entry point is absorbed into
+    // `<toplevel>`, and jumps into compiler-generated helpers
+    // (checked arithmetic, ABI coding) are not calls.  `<toplevel>` is
+    // the call tree's root that `start` opens at depth 0
     // (trace-events.md, "Recorder Integration — Starting a Recording").
-    assert_eq!(counts["calls"].as_u64(), Some(4), "calls count");
+    assert_eq!(counts["calls"].as_u64(), Some(1), "calls count");
     assert_eq!(
         counts["varnames"].as_u64(),
         Some(5),
@@ -4139,10 +4099,13 @@ fn test_assembly_via_ct_print_full() {
         13,
         "steps count (deduped by line)"
     );
-    // One call more than the program makes: `<toplevel>`, the call tree's
-    // root that `start` opens at depth 0
+    // Calls, in entry order: `<toplevel>`.
+    // Only real calls are frames: the entry point is absorbed into
+    // `<toplevel>`, and jumps into compiler-generated helpers
+    // (checked arithmetic, ABI coding) are not calls.  `<toplevel>` is
+    // the call tree's root that `start` opens at depth 0
     // (trace-events.md, "Recorder Integration — Starting a Recording").
-    assert_eq!(counts["calls"].as_u64(), Some(3), "calls count");
+    assert_eq!(counts["calls"].as_u64(), Some(1), "calls count");
     assert_eq!(
         counts["varnames"].as_u64(),
         Some(4),
@@ -4269,11 +4232,13 @@ fn test_abstract_via_ct_print_full() {
         11,
         "steps count (deduped by line)"
     );
-    // 3 = `bar` (resolved internal) + 2 dispatcher-orphan entries.
-    // One call more than the program makes: `<toplevel>`, the call tree's
-    // root that `start` opens at depth 0
+    // Calls, in entry order: `<toplevel>`, `Abstract.bar`.
+    // Only real calls are frames: the entry point is absorbed into
+    // `<toplevel>`, and jumps into compiler-generated helpers
+    // (checked arithmetic, ABI coding) are not calls.  `<toplevel>` is
+    // the call tree's root that `start` opens at depth 0
     // (trace-events.md, "Recorder Integration — Starting a Recording").
-    assert_eq!(counts["calls"].as_u64(), Some(4), "calls count");
+    assert_eq!(counts["calls"].as_u64(), Some(2), "calls count");
     assert_eq!(
         counts["varnames"].as_u64(),
         Some(1),
@@ -4412,10 +4377,19 @@ fn test_function_pointer_via_ct_print_full() {
         40,
         "steps count (deduped by line)"
     );
-    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
-    // as the call tree's root, before any call the recorder makes
+    // Calls, in entry order:
+    //    `<toplevel>`, `external_call_depth_2`, `external_call_depth_2`,
+    //    `fn_at_0:31`, `run`, `fn_at_0:31`, `run`, `run`, `run`, `run`,
+    //    `fn_at_0:32`, `run`, `run`.
+    // In this contract's own code only real calls are frames: the entry
+    // point is absorbed into `<toplevel>`, and jumps into
+    // compiler-generated helpers are not calls.  The frames at depth 2 and
+    // below are KNOWN WRONG: the recorder reads another contract's
+    // bytecode through this contract's source map, so jumps there are
+    // misattributed (`run`, `fn_at_*`).  `<toplevel>` is the call tree's
+    // root that `start` opens at depth 0
     // (trace-events.md, "Recorder Integration — Starting a Recording").
-    assert_eq!(counts["calls"].as_u64(), Some(18), "calls count");
+    assert_eq!(counts["calls"].as_u64(), Some(13), "calls count");
     assert_eq!(
         counts["varnames"].as_u64(),
         Some(3),
@@ -4533,10 +4507,18 @@ fn test_create2_via_ct_print_full() {
         38,
         "steps count (deduped by line)"
     );
-    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
-    // as the call tree's root, before any call the recorder makes
+    // Calls, in entry order:
+    //    `<toplevel>`, `external_call_depth_2`, `fn_at_0:41`, `fn_at_0:41`,
+    //    `run`, `external_call_depth_2`, `fn_at_0:41`, `fn_at_0:41`, `run`.
+    // In this contract's own code only real calls are frames: the entry
+    // point is absorbed into `<toplevel>`, and jumps into
+    // compiler-generated helpers are not calls.  The frames at depth 2 and
+    // below are KNOWN WRONG: the recorder reads another contract's
+    // bytecode through this contract's source map, so jumps there are
+    // misattributed (`run`, `fn_at_*`).  `<toplevel>` is the call tree's
+    // root that `start` opens at depth 0
     // (trace-events.md, "Recorder Integration — Starting a Recording").
-    assert_eq!(counts["calls"].as_u64(), Some(14), "calls count");
+    assert_eq!(counts["calls"].as_u64(), Some(9), "calls count");
     assert_eq!(
         counts["varnames"].as_u64(),
         Some(5),
@@ -4933,12 +4915,13 @@ fn test_vyper_struct_via_ct_print_full() {
         13,
         "steps count (deduped by line)"
     );
-    // 4 = `_move` (single AST-resolved entry) + 3 placeholder frames
-    // for the public-getter dispatcher walks.
-    // One call more than the program makes: `<toplevel>`, the call tree's
-    // root that `start` opens at depth 0
+    // Calls, in entry order: `<toplevel>`, `_move`.
+    // Only real calls are frames: the entry point is absorbed into
+    // `<toplevel>`, and jumps into compiler-generated helpers
+    // (checked arithmetic, ABI coding) are not calls.  `<toplevel>` is
+    // the call tree's root that `start` opens at depth 0
     // (trace-events.md, "Recorder Integration — Starting a Recording").
-    assert_eq!(counts["calls"].as_u64(), Some(5), "calls count");
+    assert_eq!(counts["calls"].as_u64(), Some(2), "calls count");
     assert_eq!(
         counts["varnames"].as_u64(),
         Some(5),
@@ -5018,12 +5001,14 @@ fn test_vyper_struct_via_ct_print_full() {
         .iter()
         .filter(|e| e["kind"] == "call_exit" && e["function"] == "_move")
         .count();
-    // Post-M11 the recorder maps each continuation JUMP inside the
-    // `_move` body to its enclosing user function instead of a
-    // `fn_at_pc_*` placeholder, so a back-edge JUMP that solc marked
-    // as `JumpType::Into` shows up here as a second `_move` entry.
-    assert_eq!(move_entries, 2, "_move entries (1 canonical + 1 back-edge)");
-    assert_eq!(move_exits, 2, "_move exits balance the entries");
+    // The checked arithmetic inside `_move` jumps into compiler-generated
+    // helpers, which are not calls.
+    assert_eq!(move_entries, 1, "_move entries: the one call from run()");
+    assert_eq!(move_exits, 1, "_move exits balance the entries");
+    assert_eq!(
+        observed_call_entry_funcs(&doc),
+        vec!["<toplevel>".to_string(), "_move".to_string()]
+    );
 
     // --- io: Moved(3, 4, 10, 20) ---
     // topic0 = keccak256("Moved(uint256,uint256,uint256,uint256)") =
@@ -5086,10 +5071,13 @@ fn test_vyper_hashmap_via_ct_print_full() {
         15,
         "steps count (deduped by line)"
     );
-    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
-    // as the call tree's root, before any call the recorder makes
+    // Calls, in entry order: `<toplevel>`.
+    // Only real calls are frames: the entry point is absorbed into
+    // `<toplevel>`, and jumps into compiler-generated helpers
+    // (checked arithmetic, ABI coding) are not calls.  `<toplevel>` is
+    // the call tree's root that `start` opens at depth 0
     // (trace-events.md, "Recorder Integration — Starting a Recording").
-    assert_eq!(counts["calls"].as_u64(), Some(6), "calls count");
+    assert_eq!(counts["calls"].as_u64(), Some(1), "calls count");
     // 5 = four mapping-slot synthetic names (one per SSTORE'd derived
     // slot, surfacing as `storage[<huge slot index>]` because they're
     // computed via `keccak256(key . parentSlot)`) + the `total` local.
@@ -5216,10 +5204,18 @@ fn test_vyper_raw_call_via_ct_print_full() {
         43,
         "steps count (deduped by line)"
     );
-    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
-    // as the call tree's root, before any call the recorder makes
+    // Calls, in entry order:
+    //    `<toplevel>`, `external_call_depth_2`, `external_call_depth_2`,
+    //    `run`, `run`, `run`, `run`, `run`.
+    // In this contract's own code only real calls are frames: the entry
+    // point is absorbed into `<toplevel>`, and jumps into
+    // compiler-generated helpers are not calls.  The frames at depth 2 and
+    // below are KNOWN WRONG: the recorder reads another contract's
+    // bytecode through this contract's source map, so jumps there are
+    // misattributed (`run`, `fn_at_*`).  `<toplevel>` is the call tree's
+    // root that `start` opens at depth 0
     // (trace-events.md, "Recorder Integration — Starting a Recording").
-    assert_eq!(counts["calls"].as_u64(), Some(14), "calls count");
+    assert_eq!(counts["calls"].as_u64(), Some(8), "calls count");
     assert_eq!(
         counts["varnames"].as_u64(),
         Some(5),
@@ -5330,10 +5326,15 @@ fn test_vyper_decorator_via_ct_print_full() {
         28,
         "steps count (deduped by line)"
     );
-    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
-    // as the call tree's root, before any call the recorder makes
+    // Calls, in entry order:
+    //    `<toplevel>`, `pureView`, `stateMut`, `viewState`,
+    //    `external_call_depth_2`, `payableEntry`.
+    // Only real calls are frames: the entry point is absorbed into
+    // `<toplevel>`, and jumps into compiler-generated helpers
+    // (checked arithmetic, ABI coding) are not calls.  `<toplevel>` is
+    // the call tree's root that `start` opens at depth 0
     // (trace-events.md, "Recorder Integration — Starting a Recording").
-    assert_eq!(counts["calls"].as_u64(), Some(12), "calls count");
+    assert_eq!(counts["calls"].as_u64(), Some(6), "calls count");
     assert_eq!(
         counts["varnames"].as_u64(),
         Some(6),
@@ -5387,39 +5388,34 @@ fn test_vyper_decorator_via_ct_print_full() {
          the `stored` storage slot 0 carry-forward written by stateMut"
     );
 
-    // --- exactly one canonical entry/exit per named decorator
-    // function, except `payableEntry` whose body contains a
-    // continuation back-edge JUMP that solc marks as `JumpType::Into`
-    // — post-M11 the recorder maps that JUMP to its enclosing user
-    // function (`payableEntry`) instead of a `fn_at_pc_*` placeholder,
-    // so `payableEntry` shows up twice (1 canonical + 1 back-edge).
-    let entries = observed_call_entry_funcs(&doc);
-    for (name, want) in [
-        ("pureView", 1),
-        ("stateMut", 1),
-        ("viewState", 1),
-        ("payableEntry", 2),
-    ] {
-        let count = entries.iter().filter(|n| n.as_str() == name).count();
-        assert_eq!(
-            count, want,
-            "{name} entries (canonical + intra-body back-edges); got entries {entries:?}"
-        );
-    }
-
-    let exits = observed_call_exit_funcs(&doc);
-    for (name, want) in [
-        ("pureView", 1),
-        ("stateMut", 1),
-        ("viewState", 1),
-        ("payableEntry", 2),
-    ] {
-        let count = exits.iter().filter(|n| n.as_str() == name).count();
-        assert_eq!(
-            count, want,
-            "{name} exits balance the entries; got exits {exits:?}"
-        );
-    }
+    // --- exactly one entry/exit per named decorator function ---
+    // pureView / stateMut / viewState are internal calls from run();
+    // `this.payableEntry{value: ...}()` is an external call, inside
+    // which the dispatcher's jump into `payableEntry` is its call.
+    // `<toplevel>` is the call tree's root, which `start` opens at depth
+    // 0 (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(
+        observed_call_entry_funcs(&doc),
+        vec![
+            "<toplevel>".to_string(),
+            "pureView".to_string(),
+            "stateMut".to_string(),
+            "viewState".to_string(),
+            "external_call_depth_2".to_string(),
+            "payableEntry".to_string(),
+        ]
+    );
+    assert_eq!(
+        observed_call_exit_funcs(&doc),
+        vec![
+            "pureView".to_string(),
+            "stateMut".to_string(),
+            "viewState".to_string(),
+            "payableEntry".to_string(),
+            "external_call_depth_2".to_string(),
+            "<toplevel>".to_string(),
+        ]
+    );
 
     // --- io: Total(100 + 50 + 11) = Total(161 = 0xa1) ---
     // pureView() = 100; stateMut(50) writes stored = 50; viewState()
@@ -5474,10 +5470,14 @@ fn test_vyper_implements_via_ct_print_full() {
         13,
         "steps count (deduped by line)"
     );
-    // One call more than the program makes: `<toplevel>`, the call tree's
-    // root that `start` opens at depth 0
+    // Calls, in entry order:
+    //    `<toplevel>`, `external_call_depth_2`, `Implements.act`.
+    // Only real calls are frames: the entry point is absorbed into
+    // `<toplevel>`, and jumps into compiler-generated helpers
+    // (checked arithmetic, ABI coding) are not calls.  `<toplevel>` is
+    // the call tree's root that `start` opens at depth 0
     // (trace-events.md, "Recorder Integration — Starting a Recording").
-    assert_eq!(counts["calls"].as_u64(), Some(10), "calls count");
+    assert_eq!(counts["calls"].as_u64(), Some(3), "calls count");
     assert_eq!(
         counts["varnames"].as_u64(),
         Some(3),
@@ -5541,15 +5541,19 @@ fn test_vyper_implements_via_ct_print_full() {
         .iter()
         .filter(|e| e["kind"] == "call_exit" && e["function"] == "Implements.act")
         .count();
-    // Post-M11 the recorder maps each continuation JUMP inside the
-    // `Implements.act` body to its enclosing user function instead of
-    // a `fn_at_pc_*` placeholder, so `Implements.act` shows up five
-    // times (1 canonical call + 4 intra-body back-edges).
+    // `self.act(5)` is an external call; inside it the dispatcher's jump
+    // into `act` is the one call.  The checked arithmetic in its body
+    // jumps into compiler-generated helpers, which are not calls.
+    assert_eq!(act_entries, 1, "Implements.act entries: the one call");
+    assert_eq!(act_exits, 1, "Implements.act exits balance the entries");
     assert_eq!(
-        act_entries, 5,
-        "Implements.act entries (1 canonical + 4 back-edges)"
+        observed_call_entry_funcs(&doc),
+        vec![
+            "<toplevel>".to_string(),
+            "external_call_depth_2".to_string(),
+            "Implements.act".to_string(),
+        ]
     );
-    assert_eq!(act_exits, 5, "Implements.act exits balance the entries");
 
     // --- exactly one external_call_depth_2 entry ---
     // `self.act(5)` lowers to a CALL opcode (depth +1).
@@ -5616,10 +5620,13 @@ fn test_amm_pattern_via_ct_print_full() {
         18,
         "steps count (deduped by line)"
     );
-    // One call more than the program makes: `<toplevel>`, the call tree's
-    // root that `start` opens at depth 0
+    // Calls, in entry order: `<toplevel>`, `_swap`.
+    // Only real calls are frames: the entry point is absorbed into
+    // `<toplevel>`, and jumps into compiler-generated helpers
+    // (checked arithmetic, ABI coding) are not calls.  `<toplevel>` is
+    // the call tree's root that `start` opens at depth 0
     // (trace-events.md, "Recorder Integration — Starting a Recording").
-    assert_eq!(counts["calls"].as_u64(), Some(8), "calls count");
+    assert_eq!(counts["calls"].as_u64(), Some(2), "calls count");
     assert_eq!(
         counts["varnames"].as_u64(),
         Some(7),
@@ -5708,16 +5715,14 @@ fn test_amm_pattern_via_ct_print_full() {
         .iter()
         .filter(|e| e["kind"] == "call_exit" && e["function"] == "_swap")
         .count();
-    // Post-M11 the recorder maps each continuation JUMP inside the
-    // `_swap` body to its enclosing user function instead of a
-    // `fn_at_pc_*` placeholder, so `_swap` shows up six times
-    // (1 canonical call + 5 intra-`_swap` storage / arithmetic
-    // back-edges).
+    // The checked arithmetic inside `_swap` jumps into compiler-generated
+    // helpers; those are not calls, so `_swap` is entered exactly once.
+    assert_eq!(swap_entries, 1, "_swap entries: the one call from run()");
+    assert_eq!(swap_exits, 1, "_swap exits balance the entries");
     assert_eq!(
-        swap_entries, 6,
-        "_swap entries (1 canonical + 5 back-edges)"
+        observed_call_entry_funcs(&doc),
+        vec!["<toplevel>".to_string(), "_swap".to_string()]
     );
-    assert_eq!(swap_exits, 6, "_swap exits balance the entries");
 
     // --- io: Swap(100, 91) ---
     // amountIn = 100 = 0x64; amountOut = 1000 - (1000*1000 / 1100) =
@@ -5783,15 +5788,14 @@ fn test_lending_pattern_via_ct_print_full() {
         37,
         "steps count (deduped by line)"
     );
-    // 14 = 4 AST-resolved internal call_entries (one per helper) +
-    // 10 dispatcher-orphan call_entries threaded through the
-    // `mapping(address => uint256)` slot-derivation helpers.  Each
-    // entry has a matching close()-time exit (codetracer-trace-format-nim
-    // commit 1834c1b).
-    // One call more than the program makes: `<toplevel>`, the call tree's
-    // root that `start` opens at depth 0
+    // Calls, in entry order:
+    //    `<toplevel>`, `_deposit`, `_borrow`, `_repay`, `_withdraw`.
+    // Only real calls are frames: the entry point is absorbed into
+    // `<toplevel>`, and jumps into compiler-generated helpers
+    // (checked arithmetic, ABI coding) are not calls.  `<toplevel>` is
+    // the call tree's root that `start` opens at depth 0
     // (trace-events.md, "Recorder Integration — Starting a Recording").
-    assert_eq!(counts["calls"].as_u64(), Some(15), "calls count");
+    assert_eq!(counts["calls"].as_u64(), Some(5), "calls count");
     // 4 = one LOG3 per lifecycle step (Deposit, Borrow, Repay, Withdraw).
     assert_eq!(counts["io_events"].as_u64(), Some(4), "io_events count");
 
@@ -5909,73 +5913,34 @@ fn test_lending_pattern_via_ct_print_full() {
          -> _withdraw lifecycle and final return"
     );
 
-    // --- call entry sequence ---
-    // The four AST-resolved internals interleave with two
-    // dispatcher-orphan helper frames per call (the
-    // mapping-slot keccak helpers).  `_repay` and `_withdraw` reuse
-    // the already-registered `fn_at_pc_1980` placeholder.
-    let entries = observed_call_entry_funcs(&doc);
-    // `<toplevel>` opens first: it is the call tree's root, which `start`
-    // opens at depth 0 before any call the recorder makes
-    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    // --- call sequence ---
+    // run() calls the four lifecycle helpers one after another; each
+    // returns before the next is called.  The mapping-slot hashing and
+    // checked arithmetic inside them are jumps into compiler-generated
+    // code, not calls.  `<toplevel>` is the call tree's root, which
+    // `start` opens at depth 0 (trace-events.md, "Recorder Integration —
+    // Starting a Recording").
     assert_eq!(
-        entries,
+        observed_call_entry_funcs(&doc),
         vec![
             "<toplevel>".to_string(),
             "_deposit".to_string(),
-            "_deposit".to_string(),
-            "_deposit".to_string(),
-            "_borrow".to_string(),
-            "_borrow".to_string(),
             "_borrow".to_string(),
             "_repay".to_string(),
-            "_repay".to_string(),
-            "_repay".to_string(),
             "_withdraw".to_string(),
-            "_withdraw".to_string(),
-            "_withdraw".to_string(),
-            "run".to_string(),
-            "run".to_string(),
         ],
-        "call_entry sequence pins the four lifecycle helpers \
-         (each plus 2 intra-body back-edges resolved to the same \
-         enclosing function), then 2 trailing back-edges in run()"
+        "call_entry sequence pins the four lifecycle helpers, in order"
     );
-
-    // --- call exit sequence (close()-time LIFO flush) ---
-    // Every call_exit closes the current innermost still-open frame; the
-    // leftover call stack drains innermost-first at close()
-    // (multi_stream_writer.nim::close(), "Drains any unclosed
-    // PendingCalls ... (LIFO)").  The six trailing dispatcher-orphan
-    // back-edge frames therefore unwind in reverse-registration order:
-    // `_withdraw, _withdraw, _repay, _repay, _borrow, _borrow,
-    // _deposit, _deposit` (LIFO), not deposit-first.  Verified
-    // well-formed: replaying entries/exits as a stack pops the matching
-    // frame every time and empties exactly.
-    let exits = observed_call_exit_funcs(&doc);
-    // `<toplevel>` closes last: it is the call tree's root, which `start`
-    // opens at depth 0, so every other frame unwinds inside it
-    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
-        exits,
+        observed_call_exit_funcs(&doc),
         vec![
             "_deposit".to_string(),
             "_borrow".to_string(),
             "_repay".to_string(),
             "_withdraw".to_string(),
-            "run".to_string(),
-            "run".to_string(),
-            "_withdraw".to_string(),
-            "_withdraw".to_string(),
-            "_repay".to_string(),
-            "_repay".to_string(),
-            "_borrow".to_string(),
-            "_borrow".to_string(),
-            "_deposit".to_string(),
-            "_deposit".to_string(),
             "<toplevel>".to_string(),
         ],
-        "call_exit sequence pins the close()-time LIFO unwind"
+        "each helper returns before the next is called"
     );
 
     // --- io: four LOG3 events, one per lifecycle step ---
