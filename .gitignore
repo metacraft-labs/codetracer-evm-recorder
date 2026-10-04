@@ -3,8 +3,6 @@
 Cargo.lock
 .direnv/
 
-# Nix-generated pre-commit config
-.pre-commit-config.yaml
 
 # reprobuild build artifacts
 .repro/
