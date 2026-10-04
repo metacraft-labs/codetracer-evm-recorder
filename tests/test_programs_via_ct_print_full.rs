@@ -87,26 +87,16 @@ fn has_anvil() -> bool {
         .unwrap_or(false)
 }
 
-/// Skip-helper: returns `Some(path)` to ct-print or logs a clear
-/// `SKIP:` diagnostic and returns `None`.
-///
-/// The `verify-cli-convention-no-silent-skip.sh` script greps for the
-/// literal `SKIP:` token, so silent skips remain forbidden.
-fn ct_print_or_skip(test_name: &str) -> Option<PathBuf> {
-    if !has_solc() || !has_anvil() {
-        eprintln!("SKIP: {test_name} requires solc + anvil on PATH (use the Nix dev shell).");
-        return None;
-    }
+/// Require the real declared compiler, node and decoder before any trace oracle.
+fn ct_print_required(test_name: &str) -> Option<PathBuf> {
+    assert!(has_solc(), "{test_name}: solc required on PATH");
+    assert!(has_anvil(), "{test_name}: anvil required on PATH");
     let p = ct_print_path();
-    if !p.exists() {
-        eprintln!(
-            "SKIP: {test_name} requires ct-print at {} — only available \
-             within the metacraft workspace where codetracer-trace-format-nim \
-             is a sibling.",
-            p.display()
-        );
-        return None;
-    }
+    assert!(
+        p.is_file(),
+        "{test_name}: ct-print required at {}",
+        p.display()
+    );
     Some(p)
 }
 
@@ -167,9 +157,8 @@ fn run_recorder_cli_with_from_and_value(
 }
 
 /// Record one program and return the `ct-print --full --strip-paths`
-/// JSON document.  Returns `None` when the prerequisites
-/// (solc / anvil / ct-print) are absent — the caller has already
-/// emitted a `SKIP:` line via `ct_print_or_skip`.
+/// JSON document. Required solc, Anvil and decoder assertions fail
+/// before recording if a prerequisite is unavailable.
 fn record_and_dump_full(
     test_name: &str,
     group: &str,
@@ -203,7 +192,7 @@ fn record_and_dump_full_with_from_and_value(
     from: Option<&str>,
     value: Option<&str>,
 ) -> Option<serde_json::Value> {
-    let ct_print = ct_print_or_skip(test_name)?;
+    let ct_print = ct_print_required(test_name)?;
 
     let tmp_dir = tempfile::tempdir().expect("tempdir");
     let out_dir = tmp_dir.path().join("traces");

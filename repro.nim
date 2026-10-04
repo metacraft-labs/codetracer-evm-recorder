@@ -41,7 +41,7 @@
 ## ``codetracer_trace_writer_nim``'s ``build.rs`` compiles at cargo
 ## build time (``nim`` + ``nimble`` + ``capnp`` + ``zstd``) is declared
 ## in ``uses:``, and cargo does the cross-crate wiring itself. The lock
-## below is therefore self-only.
+## records the published source closure; explicit source inputs bind the consumed crates.
 ##
 ## **Per-test platform gating.** ``just test`` is ``cargo test``
 ## followed by the CLI-convention shell script — no test FILE in this
@@ -63,9 +63,12 @@
 ##
 ## EVM: tests spawn anvil + invoke solc through Foundry.
 
+import std/os
 import repro_project_dsl
+import tools/source_inputs
 import repro_dsl_stdlib/foreign_env
 import repro_dsl_stdlib/packages/sh
+import "../codetracer-trace-format-nim/build_writer_artifacts"
 
 package codetracer_evm_recorder:
   defaultToolProvisioning "path"
@@ -79,7 +82,7 @@ package codetracer_evm_recorder:
     "cargo >=1.85"
     # C compiler driver — rustc links through `cc`, and build scripts
     # (cc-rs, the Nim FFI) compile C. Declaring it puts its directory on
-    # every cargo edge's PATH. Windows links with MSVC instead.
+    # the declared Cargo edge PATH. Windows links with MSVC instead.
     when defined(linux):
       "gcc"
     elif defined(macosx):
@@ -111,6 +114,13 @@ package codetracer_evm_recorder:
     # the same ``bash tests/verify-cli-convention-no-silent-skip.sh``
     # step ``just test`` runs after ``cargo test``.
     "sh"
+    "bash >=4"
+    "dirname"
+    "grep"
+    "git"
+    when defined(windows):
+      # The owning ctPrint producer uses GCC independently of Cargo MSVC.
+      "gcc"
 
     # Language-specific compiler / runtime tools. ``solc`` compiles the
     # Solidity test fixtures the integration tests record against;
@@ -150,23 +160,50 @@ package codetracer_evm_recorder:
     # Other recorders (circom, cairo, fuel, …) DO check Cargo.lock in and
     # set ``locked = true`` to gate against accidental drift.
     #
-    # The recorder has no ``build.rs`` of its own; the only inputs are
-    # the manifest and the ``src`` tree. The sibling trace-format crates
-    # cargo pulls in via ``path`` deps are tracked per-crate at
-    # action-end by cargo's own ``.d`` depfiles under ``target/*/deps``.
+    # Explicit inputs bind the actual sibling Cargo crates and Nim FFI
+    # source/flags consumed by their build scripts. Cargo depfiles supplement
+    # these declarations; they do not replace cold source closure.
     const binarySuffix = (when defined(windows): ".exe" else: "")
     const recorderBinary =
-      "target/release/codetracer-evm-recorder" & binarySuffix
+      "target/debug/codetracer-evm-recorder" & binarySuffix
+
+    const nimRoot = "../codetracer-trace-format-nim"
+    const traceRoot = "../codetracer-trace-format"
+    let traceInputs = @[traceRoot / "codetracer_trace_types",
+      traceRoot / "codetracer_trace_writer_nim", traceRoot / "codetracer_trace_reader",
+      traceRoot / "codetracer_ctfs", traceRoot / "Cargo.toml", traceRoot / "Cargo.lock",
+      nimRoot / "src", nimRoot / "include", nimRoot / "build_ffi.nims",
+      nimRoot / "build_ffi_flags.nim", nimRoot / "config.nims", nimRoot / "nim.cfg",
+      nimRoot / "codetracer_trace_format.nimble"]
+    # Recognized-format depfiles omit runtime fixture reads. Bind every real
+    # source file and register recursive provider membership observations.
+    let completeTestSourceInputs = completeRegularSourceInputs(
+      packageProjectRoot(currentOwningPackage()),
+      @["src", "tests", "test-programs", "contracts",
+        traceRoot / "codetracer_trace_types", traceRoot / "codetracer_trace_writer_nim",
+        traceRoot / "codetracer_trace_reader", traceRoot / "codetracer_ctfs",
+        nimRoot / "src", nimRoot / "include"])
+    let decoderBuild = buildCtPrint(nimRoot)
+    let decoderBinary = ctPrintPath(nimRoot)
 
     let recorderBuild = cargo.build(
-      release = true,
+      release = false,
       actionId = "codetracer-evm-recorder.cargo-build",
       extraInputs = @[
         "Cargo.toml",
         "src"
-      ],
+      ] & traceInputs,
       extraOutputs = @[recorderBinary])
     discard collect("default", @[recorderBuild])
+
+    let recorderReleaseBuild = cargo.build(
+      release = true,
+      actionId = "codetracer-evm-recorder.cargo-build-release",
+      extraInputs = @["Cargo.toml", "src"] & traceInputs,
+      extraOutputs = @["target/release/codetracer-evm-recorder" & binarySuffix])
+    discard collect("release", @[recorderReleaseBuild])
+
+
 
     # ---- Test-binary build + run edges (the `test` collection) -------
     #
@@ -187,21 +224,22 @@ package codetracer_evm_recorder:
 
     let testsBuild = cargo.test(
       noRun = true,
+      after = @[decoderBuild],
       actionId = "codetracer-evm-recorder.cargo-test-build",
       extraInputs = @[
         "Cargo.toml",
-        "src", "tests", "test-programs", "contracts"
-      ],
+        "src", "tests", "test-programs", "contracts", decoderBinary
+      ] & traceInputs & completeTestSourceInputs,
       extraOutputs = @["target/debug/deps"])
 
     let testsRun = cargo.test(
       actionId = "codetracer-evm-recorder.cargo-test-run",
-      after = @[testsBuild.action],
+      after = @[testsBuild.action, decoderBuild],
       extraInputs = @[
         "Cargo.toml",
         "src", "tests", "test-programs", "contracts",
-        "target/debug/deps"
-      ])
+        "target/debug/deps", decoderBinary
+      ] & traceInputs & completeTestSourceInputs)
 
     # ---- CLI-convention verification edge -----------------------------
     #
@@ -213,16 +251,26 @@ package codetracer_evm_recorder:
     # edge rather than dropped — reproducing the repo's full ``just test``
     # set. The script builds the debug binary and inspects its ``--help``
     # text, so it is re-run every ``repro test`` pass (matching ``just
-    # test``); ``after`` the cargo test-build edge guarantees the binary
+    # test``); ``after`` the cargo test-run edge preserves canonical ordering and guarantees the binary
     # exists before the script runs.
     let cliVerify = shell(
       command = "bash tests/verify-cli-convention-no-silent-skip.sh",
       actionId = "codetracer-evm-recorder.verify-cli-convention",
-      after = @[testsBuild.action],
+      after = @[testsRun.action],
       extraInputs = @[
         "tests/verify-cli-convention-no-silent-skip.sh",
         "Cargo.toml", "src"
-      ],
+      ] & traceInputs & completeTestSourceInputs,
       cacheable = false)
 
+    for action in [recorderBuild, recorderReleaseBuild, testsBuild.action,
+                   testsRun.action, cliVerify]:
+      appendRegisteredActionToolIdentityRefs(action.id,
+        ["cargo", "rustc", "nim", "nimble", "git", "capnp", "zstd"])
+      when defined(linux):
+        appendRegisteredActionToolIdentityRefs(action.id, ["gcc", "pkg-config", "openssl"])
+      elif defined(macosx):
+        appendRegisteredActionToolIdentityRefs(action.id, ["clang", "pkg-config", "openssl"])
+    appendRegisteredActionToolIdentityRefs(testsRun.action.id, ["solc", "foundry"])
+    appendRegisteredActionToolIdentityRefs(cliVerify.id, ["sh", "bash", "dirname", "grep"])
     discard collect("test", @[testsRun.action, cliVerify])

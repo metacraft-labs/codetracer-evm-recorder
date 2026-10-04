@@ -194,10 +194,8 @@ fn call_arg_count(reader: &NimTraceReaderHandle, call_key: u64) -> usize {
 /// one CallRecord in the trace.
 #[tokio::test]
 async fn audit_ctfs_internal_call_emitted() {
-    if !has_solc() || !has_anvil() {
-        eprintln!("skipping: solc/anvil unavailable");
-        return;
-    }
+    assert!(has_solc(), "solc required on PATH");
+    assert!(has_anvil(), "anvil required on PATH");
 
     let tmp_dir = record_flow_test().await;
     let reader = open_reader(tmp_dir.path());
@@ -262,10 +260,8 @@ async fn audit_ctfs_internal_call_emitted() {
 /// `codetracer/src/db-backend/tests/stylus_flow_integration.rs`).
 #[tokio::test]
 async fn audit_ctfs_log_event_kind_is_evmevent() {
-    if !has_solc() || !has_anvil() {
-        eprintln!("skipping: solc/anvil unavailable");
-        return;
-    }
+    assert!(has_solc(), "solc required on PATH");
+    assert!(has_anvil(), "anvil required on PATH");
 
     let tmp_dir = record_flow_test().await;
     let reader = open_reader(tmp_dir.path());
@@ -307,10 +303,8 @@ async fn audit_ctfs_log_event_kind_is_evmevent() {
 /// source line so the frontend's "next line" navigation can land on them.
 #[tokio::test]
 async fn audit_ctfs_step_records_emitted() {
-    if !has_solc() || !has_anvil() {
-        eprintln!("skipping: solc/anvil unavailable");
-        return;
-    }
+    assert!(has_solc(), "solc required on PATH");
+    assert!(has_anvil(), "anvil required on PATH");
 
     let tmp_dir = record_flow_test().await;
     let reader = open_reader(tmp_dir.path());
@@ -413,10 +407,8 @@ fn audit_ctfs_linked_writer_staged_args_roundtrip() {
 /// is now the strict positive assertion the original guard pointed at.
 #[tokio::test]
 async fn audit_ctfs_call_args_writer_attaches_add_xy() {
-    if !has_solc() || !has_anvil() {
-        eprintln!("skipping: solc/anvil unavailable");
-        return;
-    }
+    assert!(has_solc(), "solc required on PATH");
+    assert!(has_anvil(), "anvil required on PATH");
 
     let tmp_dir = record_flow_test().await;
     let reader = open_reader(tmp_dir.path());

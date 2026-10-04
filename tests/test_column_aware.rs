@@ -57,30 +57,22 @@ fn has_anvil() -> bool {
         .unwrap_or(false)
 }
 
-/// Returns the path to ct-print or logs a `SKIP:` diagnostic and
-/// returns `None`.  Mirrors the convention enforced by
-/// `verify-cli-convention-no-silent-skip.sh`.
-fn ct_print_or_skip(test_name: &str) -> Option<PathBuf> {
-    if !has_solc() || !has_anvil() {
-        eprintln!("SKIP: {test_name} requires solc + anvil on PATH (use the Nix dev shell).");
-        return None;
-    }
+/// Require the real declared compiler, node and decoder before any trace oracle.
+fn ct_print_required(test_name: &str) -> Option<PathBuf> {
+    assert!(has_solc(), "{test_name}: solc required on PATH");
+    assert!(has_anvil(), "{test_name}: anvil required on PATH");
     let p = ct_print_path();
-    if !p.exists() {
-        eprintln!(
-            "SKIP: {test_name} requires ct-print at {} — only available \
-             within the metacraft workspace where codetracer-trace-format-nim \
-             is a sibling.",
-            p.display()
-        );
-        return None;
-    }
+    assert!(
+        p.is_file(),
+        "{test_name}: ct-print required at {}",
+        p.display()
+    );
     Some(p)
 }
 
 #[test]
 fn test_column_aware_distinct_columns_on_one_line() {
-    let Some(ct_print) = ct_print_or_skip("test_column_aware_distinct_columns_on_one_line") else {
+    let Some(ct_print) = ct_print_required("test_column_aware_distinct_columns_on_one_line") else {
         return;
     };
 

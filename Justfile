@@ -10,7 +10,10 @@ build:
 build-release:
   cargo build --release
 
-test:
+build-decoder:
+  cd ../codetracer-trace-format-nim && direnv exec . just build-ct-print
+
+test: build-decoder
   cargo test
   bash tests/verify-cli-convention-no-silent-skip.sh
 
