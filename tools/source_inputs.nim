@@ -24,7 +24,7 @@ proc members(directory: string): seq[SourceMember] =
   result.sort(proc(a, b: SourceMember): int = cmp(a.path, b.path))
 
 proc completeRegularSourceInputs*(projectRoot: string;
-                                 roots: openArray[string]): seq[string] =
+                                  roots: openArray[string]): seq[string] =
   if projectRoot.len == 0:
     failSource("missing owning package root")
   let project = absolutePath(projectRoot).normalizedPath

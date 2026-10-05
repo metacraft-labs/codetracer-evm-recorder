@@ -264,7 +264,7 @@ package codetracer_evm_recorder:
       cacheable = false)
 
     for action in [recorderBuild, recorderReleaseBuild, testsBuild.action,
-                   testsRun.action, cliVerify]:
+                    testsRun.action, cliVerify]:
       appendRegisteredActionToolIdentityRefs(action.id,
         ["cargo", "rustc", "nim", "nimble", "git", "capnp", "zstd"])
       when defined(linux):

@@ -20,13 +20,13 @@ on:
   workflow_dispatch:
     inputs:
       codetracer_ref:
-        description: 'Git ref for codetracer repo'
+        description: "Git ref for codetracer repo"
         required: false
-        default: ''
+        default: ""
       vscode_extension_ref:
-        description: 'Git ref for codetracer-vscode-extension repo'
+        description: "Git ref for codetracer-vscode-extension repo"
         required: false
-        default: ''
+        default: ""
 
   repository_dispatch:
     types: [cross-repo-test]

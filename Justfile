@@ -51,6 +51,8 @@ prepare-ci:
     cd "${GITHUB_WORKSPACE}/../codetracer-trace-format-nim"
     nimble install -y stew results
   )
+  just install-hooks "${REPROBUILD_REPRO:-$(command -v repro)}"
+  just check-hooks
 
 # --- M13: Packaging UX Standardization ---
 # These recipes implement Repo-Requirements.md §2.5. The OS-packaged
@@ -244,3 +246,11 @@ verify-scoop:
 
 verify-chocolatey:
     just verify-package chocolatey
+
+# Owning native SDK and matching managed protocol are required.
+install-hooks REPRO:
+  python3 tools/install-canonical-hooks.py --repro "{{REPRO}}" --bootstrap-managed
+  python3 tools/install-canonical-hooks.py --repro "{{REPRO}}"
+
+check-hooks:
+  prek run --all-files
