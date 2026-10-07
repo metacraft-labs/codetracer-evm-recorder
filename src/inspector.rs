@@ -26,6 +26,22 @@ pub struct StepData {
     pub stack: Vec<U256>,
     /// Memory size before the instruction executes.
     pub memory_size: usize,
+    /// Gas remaining before the instruction executes.
+    ///
+    /// Mirrors a `debug_traceTransaction` structLog's `gas` field, which is
+    /// also sampled before the opcode runs.
+    pub gas: u64,
+    /// Contents of the current call frame's memory before the instruction
+    /// executes — `Some` only when the inspector was built with
+    /// [`CodeTracerInspector::with_memory_capture`].
+    ///
+    /// This is the one field the on-chain route cannot reconstruct after the
+    /// fact: the recorder reads memory to decode `string` / `bytes` values
+    /// and `LOG*` payloads, and memory is destroyed as execution proceeds.
+    /// It is opt-in because copying the frame's memory at every step is the
+    /// dominant cost of a replay — the same reason geth gates it behind
+    /// `enableMemory`.
+    pub memory: Option<Vec<u8>>,
 }
 
 /// A call / create event captured by the inspector.
@@ -107,12 +123,30 @@ pub struct CodeTracerInspector {
     data: ExecutionData,
     /// Current call depth (incremented on call/create, decremented on call_end/create_end).
     current_depth: u64,
+    /// Whether to copy the frame's memory into every [`StepData`].
+    capture_memory: bool,
 }
 
 impl CodeTracerInspector {
-    /// Create a new, empty inspector.
+    /// Create a new, empty inspector.  Memory is NOT captured; see
+    /// [`Self::with_memory_capture`].
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create an inspector that copies the executing frame's memory into
+    /// every captured step.
+    ///
+    /// Required by the on-chain route: the structLog shape the recorder
+    /// consumes carries memory, and `debug_traceTransaction` is refused by
+    /// the public endpoints that serve the archive reads the replay needs
+    /// (measured; see `replay.rs`).  So the memory a tracer would have
+    /// supplied has to be captured here instead.
+    pub fn with_memory_capture() -> Self {
+        Self {
+            capture_memory: true,
+            ..Self::default()
+        }
     }
 
     /// Consume the inspector and return the collected execution data.
@@ -151,6 +185,16 @@ where
         // Clone the full stack (bottom-to-top ordering).
         let stack: Vec<U256> = interp.stack.data().to_vec();
         let memory_size = interp.memory.size();
+        let gas = interp.gas.remaining();
+        let memory = if self.capture_memory {
+            Some(if memory_size == 0 {
+                Vec::new()
+            } else {
+                interp.memory.slice(0..memory_size).to_vec()
+            })
+        } else {
+            None
+        };
 
         self.data.steps.push(StepData {
             pc,
@@ -159,6 +203,8 @@ where
             depth: self.current_depth,
             stack,
             memory_size,
+            gas,
+            memory,
         });
     }
 

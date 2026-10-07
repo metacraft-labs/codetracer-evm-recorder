@@ -6,19 +6,27 @@
 //!
 //! This module exposes:
 //!
-//! * [`fetch_sourcify_files`] -- low-level API.  Performs the HTTP GET
-//!   against `https://sourcify.dev/server/files/any/<chain>/<address>`,
+//! * [`fetch_sourcify_files`] -- low-level API.  GETs
+//!   `/v2/contract/<chain>/<address>?fields=sources,compilation,metadata`,
 //!   parses the JSON envelope, and returns a [`SourcifyContract`] value
-//!   holding the verified `.sol` sources plus the raw `metadata.json`
-//!   string.  Returns `Ok(None)` on a 404 (no verified match for that
+//!   holding the verified `.sol` sources plus the `metadata.json`
+//!   document.  Returns `Ok(None)` on a 404 (no verified match for that
 //!   address).  All assertions in the unit tests are strict (exact
 //!   counts and exact string equality on file contents) per the
 //!   recorder's strict-assertions policy.
 //!
-//! * [`parse_sourcify_response`] -- pure function that parses a
-//!   Sourcify JSON envelope into a [`SourcifyContract`].  Exposed so
-//!   tests can pin against a recorded fixture without touching the
-//!   network.
+//!   The older `/files/any/<chain>/<address>` shape is attempted only as a
+//!   fallback.  Measured 2026-10-07: it answers a non-browser client with
+//!   `HTTP 403 {"error":"This compatibility endpoint is only served to
+//!   browsers. Use GET /server/v2/contract/{chainId}/{address}?fields=...
+//!   instead."}`, while the v2 URL returns 200 with the sources in the
+//!   same session.  So the v1-only code this module shipped with could
+//!   not recover source for ANY address on ANY chain.
+//!
+//! * [`parse_sourcify_response`] / [`parse_sourcify_v2_response`] -- pure
+//!   functions that parse the v1 and v2 Sourcify envelopes into a
+//!   [`SourcifyContract`].  Exposed so tests can pin against recorded
+//!   fixtures without touching the network.
 //!
 //! * [`parse_metadata_settings`] -- pure function that extracts the
 //!   compiler version + optimizer + EVM-version fields from a Sourcify
@@ -231,6 +239,84 @@ pub fn parse_sourcify_response(body: &str) -> eyre::Result<SourcifyContract> {
     })
 }
 
+/// Parse a Sourcify **v2** `GET /v2/contract/{chainId}/{address}` response
+/// body into a [`SourcifyContract`].
+///
+/// The v2 envelope is shaped differently from v1: sources arrive as an
+/// object keyed by source path (`{"Token.sol": {"content": "..."}}`)
+/// rather than as a file list, and the metadata document arrives as a
+/// nested object rather than as a `metadata.json` file entry.  It is
+/// re-serialised here so [`parse_metadata_settings`] keeps working against
+/// one shape.
+///
+/// Sources are ordered by path.  Order is load-bearing: the source map's
+/// `file_index` indexes into `source_paths` positionally, and
+/// [`compile_sourcify_bundle`] hands solc the files in this order.
+///
+/// v2's match vocabulary is `exact_match` / `match`, which are v1's `full`
+/// / `partial` under new names.  `runtimeMatch` is preferred over the
+/// summary `match` field because the recorder maps RUNTIME bytecode: a
+/// contract whose creation code matches exactly and whose runtime code
+/// matches only partially is a partial match for this purpose.
+pub fn parse_sourcify_v2_response(body: &str) -> eyre::Result<SourcifyContract> {
+    let raw: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| eyre::eyre!("Sourcify v2 response is not valid JSON: {e}"))?;
+
+    let match_field = raw
+        .get("runtimeMatch")
+        .and_then(|v| v.as_str())
+        .or_else(|| raw.get("match").and_then(|v| v.as_str()))
+        .ok_or_else(|| {
+            eyre::eyre!("Sourcify v2 response carries neither `runtimeMatch` nor `match`")
+        })?;
+    let match_status = match match_field {
+        "exact_match" => SourcifyMatch::Full,
+        "match" => SourcifyMatch::Partial,
+        other => {
+            return Err(eyre::eyre!(
+                "Sourcify v2 response has unknown match `{other}` \
+                 (expected `exact_match` or `match`)"
+            ));
+        }
+    };
+
+    let sources_obj = raw
+        .get("sources")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| eyre::eyre!("Sourcify v2 response has no `sources` object"))?;
+
+    let mut sources: Vec<SourcifySourceFile> = Vec::with_capacity(sources_obj.len());
+    for (path, entry) in sources_obj {
+        let content = entry
+            .get("content")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| eyre::eyre!("Sourcify v2 source `{path}` has no `content`"))?;
+        let name = path.rsplit('/').next().unwrap_or(path).to_string();
+        if !(name.ends_with(".sol") || name.ends_with(".vy")) {
+            continue;
+        }
+        sources.push(SourcifySourceFile {
+            name,
+            path: path.clone(),
+            content: content.to_string(),
+        });
+    }
+    sources.sort_by(|a, b| a.path.cmp(&b.path));
+
+    let metadata_json = raw
+        .get("metadata")
+        .filter(|v| !v.is_null())
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|e| eyre::eyre!("Sourcify v2 metadata could not be re-serialised: {e}"))?;
+
+    Ok(SourcifyContract {
+        match_status,
+        sources,
+        metadata_json,
+    })
+}
+
 /// Parse `metadata.json` from a Sourcify bundle and extract the compiler
 /// settings the contract was verified with.
 ///
@@ -293,6 +379,24 @@ pub fn build_sourcify_url(chain_id: u64, address: Address) -> String {
     format!("{SOURCIFY_BASE_URL}/files/any/{chain_id}/{address}")
 }
 
+/// Build the Sourcify **v2** contract endpoint URL for `(chain_id, address)`.
+///
+/// This is the endpoint the server's own documentation points at, and as of
+/// 2026-10-07 it is the only one that answers a non-browser client: the v1
+/// URL [`build_sourcify_url`] returns
+/// `HTTP 403 {"error":"This compatibility endpoint is only served to
+/// browsers. Use GET /server/v2/contract/{chainId}/{address}?fields=...
+/// instead."}` — measured against mainnet USDT, with the v2 URL answering
+/// 200 and the sources in the same session.
+///
+/// `fields` is explicit because v2 returns only the summary by default;
+/// `sources` and `metadata` are what the recompile needs.
+pub fn build_sourcify_v2_url(chain_id: u64, address: Address) -> String {
+    format!(
+        "{SOURCIFY_BASE_URL}/v2/contract/{chain_id}/{address}?fields=sources,compilation,metadata"
+    )
+}
+
 /// Fetch the verified-contract bundle for `(chain_id, address)` from
 /// Sourcify.
 ///
@@ -307,9 +411,32 @@ pub async fn fetch_sourcify_files(
     chain_id: u64,
     address: Address,
 ) -> eyre::Result<Option<SourcifyContract>> {
-    let url = build_sourcify_url(chain_id, address);
+    // v2 first: it is the documented API, and the v1 compatibility
+    // endpoint is being withdrawn from non-browser clients (403 as of
+    // 2026-10-07).  v1 is still attempted when v2 answers with anything
+    // other than success or 404, so an outage on one shape does not take
+    // the whole path down — and both errors are reported rather than only
+    // the second.
+    let v2_error = match fetch_one(&build_sourcify_v2_url(chain_id, address), true).await {
+        Ok(outcome) => return Ok(outcome),
+        Err(err) => err,
+    };
+
+    match fetch_one(&build_sourcify_url(chain_id, address), false).await {
+        Ok(outcome) => Ok(outcome),
+        Err(v1_error) => Err(eyre::eyre!(
+            "Sourcify served neither API shape — v2: {v2_error:#}; v1: {v1_error:#}"
+        )),
+    }
+}
+
+/// GET one Sourcify URL and parse it with the v2 or v1 parser.
+///
+/// `Ok(None)` is reserved for a 404, which Sourcify uses for "no verified
+/// match for this address" — a negative answer rather than a failure.
+async fn fetch_one(url: &str, v2: bool) -> eyre::Result<Option<SourcifyContract>> {
     let resp = reqwest::Client::new()
-        .get(&url)
+        .get(url)
         .send()
         .await
         .map_err(|e| eyre::eyre!("Sourcify GET {url} failed: {e}"))?;
@@ -319,8 +446,10 @@ pub async fn fetch_sourcify_files(
         return Ok(None);
     }
     if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
         return Err(eyre::eyre!(
-            "Sourcify GET {url} returned HTTP status {status}"
+            "Sourcify GET {url} returned HTTP status {status}: {}",
+            body.trim()
         ));
     }
 
@@ -328,7 +457,11 @@ pub async fn fetch_sourcify_files(
         .text()
         .await
         .map_err(|e| eyre::eyre!("failed to read Sourcify response body from {url}: {e}"))?;
-    parse_sourcify_response(&body).map(Some)
+    if v2 {
+        parse_sourcify_v2_response(&body).map(Some)
+    } else {
+        parse_sourcify_response(&body).map(Some)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -623,6 +756,7 @@ pub async fn fetch_contract_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
     /// A minimal but realistic Sourcify response payload.  Captures the
     /// exact envelope shape Sourcify returns for a full-match query
@@ -668,6 +802,133 @@ mod tests {
     "evmVersion": "shanghai"
   }
 }"#;
+
+    /// A Sourcify **v2** envelope, trimmed from the real response for
+    /// mainnet USDT (`0xdAC17F958D2ee523a2206206994597C13D831ec7`)
+    /// recorded 2026-10-07 — the top-level key set, the `sources` map
+    /// keyed by source path with a `{"content": …}` value, the nested
+    /// `metadata` document, and the `exact_match` / `match` vocabulary
+    /// are all as the server sent them.  Source bodies are shortened;
+    /// nothing about their shape is.
+    const FIXTURE_V2_MATCH: &str = r#"{
+  "sources": {
+    "contracts/TetherToken.sol": {"content": "pragma solidity ^0.4.17;\ncontract TetherToken {}\n"},
+    "contracts/SafeMath.sol": {"content": "pragma solidity ^0.4.17;\nlibrary SafeMath {}\n"},
+    "README.md": {"content": "not a source"}
+  },
+  "compilation": {
+    "language": "Solidity",
+    "compiler": "solc",
+    "compilerVersion": "0.4.18+commit.9cf6e910",
+    "name": "TetherToken",
+    "fullyQualifiedName": "contracts/TetherToken.sol:TetherToken"
+  },
+  "metadata": {
+    "compiler": {"version": "0.4.18+commit.9cf6e910"},
+    "language": "Solidity",
+    "settings": {"optimizer": {"enabled": false, "runs": 0}}
+  },
+  "matchId": "1817159",
+  "creationMatch": "match",
+  "runtimeMatch": "match",
+  "verifiedAt": "2024-08-08T13:56:23Z",
+  "match": "match",
+  "chainId": "1",
+  "address": "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+}"#;
+
+    #[test]
+    fn v2_sources_arrive_path_keyed_and_in_path_order() {
+        // Order is load-bearing: the source map's file_index indexes into
+        // source_paths positionally, so the parse must be deterministic.
+        let parsed = parse_sourcify_v2_response(FIXTURE_V2_MATCH).unwrap();
+        assert_eq!(parsed.sources.len(), 2);
+        assert_eq!(parsed.sources[0].path, "contracts/SafeMath.sol");
+        assert_eq!(parsed.sources[0].name, "SafeMath.sol");
+        assert_eq!(
+            parsed.sources[0].content,
+            "pragma solidity ^0.4.17;\nlibrary SafeMath {}\n"
+        );
+        assert_eq!(parsed.sources[1].path, "contracts/TetherToken.sol");
+        assert_eq!(parsed.sources[1].name, "TetherToken.sol");
+        assert_eq!(
+            parsed.sources[1].content,
+            "pragma solidity ^0.4.17;\ncontract TetherToken {}\n"
+        );
+    }
+
+    #[test]
+    fn v2_non_source_entries_are_filtered_out() {
+        let parsed = parse_sourcify_v2_response(FIXTURE_V2_MATCH).unwrap();
+        assert!(
+            !parsed.sources.iter().any(|s| s.name == "README.md"),
+            "a non-.sol entry must not reach the recompile's source list"
+        );
+    }
+
+    #[test]
+    fn v2_metadata_round_trips_into_the_settings_parser() {
+        let parsed = parse_sourcify_v2_response(FIXTURE_V2_MATCH).unwrap();
+        let metadata = parsed
+            .metadata_json
+            .as_deref()
+            .expect("v2 metadata must be re-serialised for the settings parser");
+        let settings = parse_metadata_settings(metadata).unwrap();
+        assert_eq!(settings.solc_version, "0.4.18+commit.9cf6e910");
+        assert_eq!(semver_prefix(&settings.solc_version), "0.4.18");
+        assert!(!settings.optimizer_enabled);
+        assert_eq!(settings.evm_version, None);
+    }
+
+    #[test]
+    fn v2_match_vocabulary_maps_onto_the_v1_full_and_partial_names() {
+        // `match` is v1's `partial`; `exact_match` is v1's `full`.
+        let partial = parse_sourcify_v2_response(FIXTURE_V2_MATCH).unwrap();
+        assert_eq!(partial.match_status, SourcifyMatch::Partial);
+
+        let exact = FIXTURE_V2_MATCH.replace(
+            r#""runtimeMatch": "match""#,
+            r#""runtimeMatch": "exact_match""#,
+        );
+        let parsed = parse_sourcify_v2_response(&exact).unwrap();
+        assert_eq!(parsed.match_status, SourcifyMatch::Full);
+    }
+
+    #[test]
+    fn v2_runtime_match_wins_over_the_summary_match_field() {
+        // The recorder maps RUNTIME bytecode, so a contract whose summary
+        // says `exact_match` while its runtime code matches only partially
+        // must be reported as partial.
+        let body = FIXTURE_V2_MATCH.replace(r#""match": "match""#, r#""match": "exact_match""#);
+        let parsed = parse_sourcify_v2_response(&body).unwrap();
+        assert_eq!(parsed.match_status, SourcifyMatch::Partial);
+    }
+
+    #[test]
+    fn v2_rejects_an_unknown_match_vocabulary_rather_than_guessing() {
+        let body = FIXTURE_V2_MATCH.replace(
+            r#""runtimeMatch": "match""#,
+            r#""runtimeMatch": "probably_fine""#,
+        );
+        let err = parse_sourcify_v2_response(&body).unwrap_err().to_string();
+        assert!(
+            err.contains("probably_fine"),
+            "the error must name the unrecognised match value; got: {err}"
+        );
+    }
+
+    #[test]
+    fn the_v2_url_names_the_fields_the_recompile_needs() {
+        let url = build_sourcify_v2_url(
+            1,
+            Address::from_str("0xdAC17F958D2ee523a2206206994597C13D831ec7").unwrap(),
+        );
+        assert_eq!(
+            url,
+            "https://sourcify.dev/server/v2/contract/1/\
+             0xdAC17F958D2ee523a2206206994597C13D831ec7?fields=sources,compilation,metadata"
+        );
+    }
 
     #[test]
     fn parse_full_match_fixture_extracts_sources_and_metadata() {

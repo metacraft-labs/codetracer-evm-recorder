@@ -26,12 +26,30 @@
 //! Where the recorder's current behaviour deviates from what the
 //! Solidity semantics dictate (e.g. internal-function names not being
 //! resolved via the Solidity AST — the recorder falls back to
-//! `fn_at_pc_<n>` placeholders — or `EvmEvent` records being routed
-//! through the multi-stream `ioStderr` channel rather than a dedicated
-//! EVM event channel), the deviation is documented inline as
+//! `fn_at_pc_<n>` placeholders), the deviation is documented inline as
 //! `RECORDER BUG: ...` and a parallel `#[ignore]`d assertion captures
 //! the spec-correct expectation so it surfaces the moment the recorder
 //! catches up.
+//!
+//! # `io_kind` carries the ORIGINAL event kind (expectation updated)
+//!
+//! Every `io_kind` assertion in this file used to expect the collapsed
+//! multi-stream bucket — `"ioStderr"` for an `EventLogKind::EvmEvent` and
+//! `"ioError"` for an `EventLogKind::Error` — because
+//! `codetracer_trace_writer_ffi.nim`'s `toIOEventKind` folded the
+//! 13-variant kind into four channels and the original was gone by read
+//! time.  The `codetracer-trace-format-nim` sibling now preserves it, so
+//! the reader reports `"EvmEvent"` and `"Error"`, and 39 + 6 literals in
+//! this file were naming a value the reader no longer produces.
+//!
+//! The expectation was stale, not the recorder wrong: the failures
+//! reproduce identically on an unmodified checkout against the current
+//! siblings (39 of 47 tests here, measured).  The new expectations are
+//! STRICTLY STRONGER — `"ioStderr"` also admitted `TraceLogEvent` and
+//! `"ioError"` was one of four buckets, whereas `"EvmEvent"` and
+//! `"Error"` each admit only themselves.  This is the end-to-end kind
+//! check `AUDIT-CTFS-2026-05.md` listed as the open infrastructure
+//! follow-up.
 //!
 //! New programs added in this round (per the recorder-test-requirements
 //! universal checklist):
@@ -456,9 +474,9 @@ fn assert_paths_ends_with_source(doc: &serde_json::Value, source_filename: &str)
 ///   is integer-shaped (see `value_record_for_local`); the storage
 ///   carry-forward of `result` stays `ValueRecord::Raw`.
 /// * The `Done(uint256)` event surfaces as a single `io` event with
-///   `io_kind = "ioStderr"` (the multi-stream layout collapses
-///   `EvmEvent` → `ioStderr`).  See `codetracer_trace_writer_ffi.nim`
-///   `toIOEventKind`.
+///   `io_kind = "EvmEvent"` — the original `EventLogKind`, preserved
+///   through the container rather than collapsed into a channel.  See
+///   the module header, "`io_kind` carries the ORIGINAL event kind".
 #[test]
 fn test_control_flow_via_ct_print_full() {
     let Some(doc) = record_and_dump_full(
@@ -553,7 +571,7 @@ fn test_control_flow_via_ct_print_full() {
     assert_step_value_kinds_eq(&doc, &["Int", "Raw"]);
 
     // --- io / event emission ---
-    // Exactly one Done(uint256) event → one ioStderr line in the
+    // Exactly one Done(uint256) event → one EvmEvent line in the
     // multi-stream IO channel.
     let ios = observed_io_events(&doc);
     assert_eq!(
@@ -562,8 +580,8 @@ fn test_control_flow_via_ct_print_full() {
         "expected exactly one io event for emit Done(...)"
     );
     assert_eq!(
-        ios[0].0, "ioStderr",
-        "io_kind for EvmEvent collapses to ioStderr"
+        ios[0].0, "EvmEvent",
+        "io_kind for an EvmEvent record is EvmEvent"
     );
     // The text payload is the keccak256("Done(uint256)") topic0
     // followed by the ABI-encoded uint256 data (the grand total
@@ -743,7 +761,7 @@ fn test_nested_calls_via_ct_print_full() {
     // --- io / event emission ---
     let ios = observed_io_events(&doc);
     assert_eq!(ios.len(), 1, "expected one Result(uint256) event");
-    assert_eq!(ios[0].0, "ioStderr");
+    assert_eq!(ios[0].0, "EvmEvent");
 
     // --- call entry/exit sequence ---
     // Exactly the program's call chain: run → outer → middle → inner,
@@ -1023,7 +1041,7 @@ fn test_storage_ops_via_ct_print_full() {
         1,
         "Stored(uint256,uint256,uint256) → 1 LOG opcode"
     );
-    assert_eq!(ios[0].0, "ioStderr");
+    assert_eq!(ios[0].0, "EvmEvent");
 }
 
 // ===========================================================================
@@ -1031,8 +1049,8 @@ fn test_storage_ops_via_ct_print_full() {
 // ===========================================================================
 
 /// Records `EventsTest.sol::run()` which fires three distinct `emit`
-/// statements.  Each must surface as exactly one `RecordEvent` (which
-/// the multi-stream layout collapses into an `ioStderr` IO event).
+/// statements.  Each must surface as exactly one `RecordEvent`, read
+/// back as an IO event whose `io_kind` is the original `EvmEvent`.
 #[test]
 fn test_events_test_via_ct_print_full() {
     let Some(doc) = record_and_dump_full(
@@ -1108,21 +1126,21 @@ fn test_events_test_via_ct_print_full() {
     // the non-indexed `value=42` payload from Payload is read from
     // EVM memory and is not surfaced — see the
     // `_io_payload_includes_topics_and_data` ignored sibling.
-    assert_eq!(ios[0].0, "ioStderr");
+    assert_eq!(ios[0].0, "EvmEvent");
     assert!(
         ios[0].1.starts_with("0x") && ios[0].1.len() == 66,
         "Started: only topic0; got {}",
         ios[0].1
     );
 
-    assert_eq!(ios[1].0, "ioStderr");
+    assert_eq!(ios[1].0, "EvmEvent");
     assert!(
         ios[1].1.contains(", 0x7"),
         "Tagged(7) must include indexed arg `7` as topic1; got {}",
         ios[1].1
     );
 
-    assert_eq!(ios[2].0, "ioStderr");
+    assert_eq!(ios[2].0, "EvmEvent");
     assert!(
         ios[2].1.contains(", 0x7"),
         "Payload(7, 42) must include indexed arg `7` as topic1; got {}",
@@ -1249,7 +1267,7 @@ fn test_require_revert_happy_path_via_ct_print_full() {
     // --- io ---
     let ios = observed_io_events(&doc);
     assert_eq!(ios.len(), 1, "happy path emits Ok(uint256) once");
-    assert_eq!(ios[0].0, "ioStderr");
+    assert_eq!(ios[0].0, "EvmEvent");
 
     // --- call sequence ---
     // safe() is the only call run() makes.  `<toplevel>` opens first and
@@ -1270,7 +1288,7 @@ fn test_require_revert_happy_path_via_ct_print_full() {
 /// body is `require(false, "always fails")`.  The recorder must still
 /// produce a `.ct` bundle (the structlog is captured up to the REVERT
 /// opcode) and surface the revert reason as an `EventLogKind::Error`
-/// io_event (multi-stream `ioError`) so consumers can tell *why* the
+/// io_event (multi-stream `Error`) so consumers can tell *why* the
 /// transaction reverted.
 ///
 /// Implementation note: `main.rs` pins an explicit `gas_limit` on the
@@ -1295,18 +1313,18 @@ fn test_require_revert_failing_path_emits_error_event() {
     // `record_and_dump_full` — the recorder CLI succeeded and ct-print
     // produced a JSON document).
 
-    // The reverted transaction must surface as exactly one `ioError`
+    // The reverted transaction must surface as exactly one `Error`
     // io_event whose text carries the revert reason ("always fails").
     let ios = observed_io_events(&doc);
-    let errors: Vec<&(String, String)> = ios.iter().filter(|(kind, _)| kind == "ioError").collect();
+    let errors: Vec<&(String, String)> = ios.iter().filter(|(kind, _)| kind == "Error").collect();
     assert_eq!(
         errors.len(),
         1,
-        "expected exactly one ioError io_event for a reverting tx; got {ios:?}"
+        "expected exactly one Error io_event for a reverting tx; got {ios:?}"
     );
     assert!(
         errors[0].1.contains("always fails"),
-        "ioError text must include the decoded revert reason \"always fails\"; got {:?}",
+        "Error text must include the decoded revert reason \"always fails\"; got {:?}",
         errors[0].1
     );
 }
@@ -1423,7 +1441,7 @@ fn test_map_struct_arr_via_ct_print_full() {
     // --- io ---
     let ios = observed_io_events(&doc);
     assert_eq!(ios.len(), 1, "expected one Done() event");
-    assert_eq!(ios[0].0, "ioStderr");
+    assert_eq!(ios[0].0, "EvmEvent");
 }
 
 #[test]
@@ -1514,7 +1532,7 @@ fn test_indexed_events_via_ct_print_full() {
     let ios = observed_io_events(&doc);
     assert_eq!(ios.len(), 4, "expected four io events");
     for (kind, _) in &ios {
-        assert_eq!(kind, "ioStderr", "EvmEvents collapse to ioStderr");
+        assert_eq!(kind, "EvmEvent", "EvmEvent records keep their kind");
     }
 
     // io[0]: emit Anon() → LOG1, just topic0 = keccak256("Anon()").
@@ -1619,7 +1637,7 @@ fn test_erc20_via_ct_print_full() {
     let ios = observed_io_events(&doc);
     assert_eq!(ios.len(), 3, "expected three io events");
     for (kind, _) in &ios {
-        assert_eq!(kind, "ioStderr", "EvmEvents collapse to ioStderr");
+        assert_eq!(kind, "EvmEvent", "EvmEvent records keep their kind");
     }
     // io[0] = Transfer(address(0), address(this), 1000) → LOG3
     //   topic0 = keccak256("Transfer(address,address,uint256)")
@@ -1828,7 +1846,7 @@ fn test_delegate_call_via_ct_print_full() {
     // --- io: the Result(stored) event surfaces as one EvmEvent ---
     let ios = observed_io_events(&doc);
     assert_eq!(ios.len(), 1, "expected one Result(uint256) event");
-    assert_eq!(ios[0].0, "ioStderr");
+    assert_eq!(ios[0].0, "EvmEvent");
     // The data segment carries `stored = 42 = 0x2a`.
     assert!(
         ios[0]
@@ -1929,7 +1947,7 @@ fn test_modifier_via_ct_print_full() {
     // --- io ---
     let ios = observed_io_events(&doc);
     assert_eq!(ios.len(), 1, "expected one ValueSet event");
-    assert_eq!(ios[0].0, "ioStderr");
+    assert_eq!(ios[0].0, "EvmEvent");
     // Data: v = 7 = 0x7.
     assert!(
         ios[0]
@@ -1979,15 +1997,15 @@ fn test_modifier_failing_path_emits_error_event() {
         return;
     };
     let ios = observed_io_events(&doc);
-    let errors: Vec<&(String, String)> = ios.iter().filter(|(kind, _)| kind == "ioError").collect();
+    let errors: Vec<&(String, String)> = ios.iter().filter(|(kind, _)| kind == "Error").collect();
     assert_eq!(
         errors.len(),
         1,
-        "expected one ioError for the failing modifier"
+        "expected one Error event for the failing modifier"
     );
     assert!(
         errors[0].1.contains("not owner"),
-        "ioError text must include the modifier's revert reason; got {:?}",
+        "Error text must include the modifier's revert reason; got {:?}",
         errors[0].1
     );
 }
@@ -2029,7 +2047,7 @@ fn test_try_catch_via_ct_print_full() {
     let counts = &doc["counts"];
     assert_eq!(counts["paths"].as_u64(), Some(1), "paths count");
     // Three io_events: the final `emit Outcome(okValue, lastPanic)`
-    // plus two `ioError` events for the caught inner-CALL reverts
+    // plus two `Error` events for the caught inner-CALL reverts
     // (`failStr` → `Error("boom")` and `failPanic` → `Panic(0x12)`).
     // The catch-and-surface behaviour is pinned by the
     // `_catches_emit_error_events` sibling — this happy-path test
@@ -2039,7 +2057,7 @@ fn test_try_catch_via_ct_print_full() {
         counts["io_events"].as_u64(),
         Some(3),
         "expected three io_events — the final emit Outcome(...) \
-         and one ioError per caught inner-CALL revert (failStr / failPanic)"
+         and one Error per caught inner-CALL revert (failStr / failPanic)"
     );
 
     // --- function table includes `run` ---
@@ -2101,19 +2119,19 @@ fn test_try_catch_via_ct_print_full() {
          indicates the recorder leaked a caught-revert frame"
     );
 
-    // --- io: the Outcome(...) EvmEvent + 2 caught-revert ioError events ---
+    // --- io: the Outcome(...) EvmEvent + 2 caught-revert Error events ---
     let ios = observed_io_events(&doc);
     assert_eq!(
         ios.len(),
         3,
-        "expected three io_events: one Outcome(uint256,uint256) and two ioError"
+        "expected three io_events: one Outcome(uint256,uint256) and two Error"
     );
     let stderr_events: Vec<&(String, String)> =
-        ios.iter().filter(|(k, _)| k == "ioStderr").collect();
+        ios.iter().filter(|(k, _)| k == "EvmEvent").collect();
     assert_eq!(
         stderr_events.len(),
         1,
-        "exactly one ioStderr (the Outcome emit); got {ios:?}"
+        "exactly one EvmEvent (the Outcome emit); got {ios:?}"
     );
     // Outcome carries non-indexed data only: okValue=1, lastPanic=0x12.
     // The serialised LOG1 payload is topic0 + 64-byte data
@@ -2131,7 +2149,7 @@ fn test_try_catch_via_ct_print_full() {
 /// clauses (`catch Error(string)` and `catch Panic(uint256)`) should
 /// expose the captured `reason` / `code` as typed `ValueRecord`
 /// variables in the per-step `vars` snapshot, AND each caught
-/// revert should surface as a separate `ioError` io_event so
+/// revert should surface as a separate `Error` io_event so
 /// consumers can see *why* the inner CALL failed.
 ///
 /// The recorder now detects inner-CALL REVERTs in the structlog
@@ -2150,12 +2168,12 @@ fn test_try_catch_catches_emit_error_events() {
         return;
     };
     let ios = observed_io_events(&doc);
-    let errors: Vec<&(String, String)> = ios.iter().filter(|(kind, _)| kind == "ioError").collect();
+    let errors: Vec<&(String, String)> = ios.iter().filter(|(kind, _)| kind == "Error").collect();
     // Two caught reverts: `failStr` ("boom") and `failPanic` (0x12).
     assert_eq!(
         errors.len(),
         2,
-        "expected two ioError events (one per caught inner CALL revert)"
+        "expected two Error events (one per caught inner CALL revert)"
     );
     assert!(
         errors.iter().any(|(_, t)| t.contains("boom")),
@@ -2345,7 +2363,7 @@ fn test_inheritance_via_ct_print_full() {
     // --- io / event emission: Result(uint256) carries 111 = 0x6f ---
     let ios = observed_io_events(&doc);
     assert_eq!(ios.len(), 1, "expected one Result(uint256) event");
-    assert_eq!(ios[0].0, "ioStderr", "EvmEvents collapse to ioStderr");
+    assert_eq!(ios[0].0, "EvmEvent", "EvmEvent records keep their kind");
     // topic0 = keccak256("Result(uint256)"); data segment carries
     // the cumulative accumulator value 111 = 0x6f.
     assert_eq!(
@@ -2364,7 +2382,7 @@ fn test_inheritance_via_ct_print_full() {
 /// Records `CustomErrors.sol::triggerInsufficient()` — the
 /// `revert InsufficientBalance(balance, amount)` branch fires
 /// (balance=50 < amount=100), and the recorder must surface the typed
-/// custom error as an `ioError` io_event whose decoded text spells
+/// custom error as an `Error` io_event whose decoded text spells
 /// out the name AND ABI-decoded arguments.
 ///
 /// The previous agent extended `revert_decode` to consult the contract
@@ -2408,7 +2426,7 @@ fn test_custom_errors_insufficient_via_ct_print_full() {
     assert_eq!(counts["calls"].as_u64(), Some(2), "calls count");
     // Exactly one io_event: the typed custom-error revert surfaces
     // through the `decode_revert_with_registry` path as a single
-    // `ioError`.
+    // `Error`.
     assert_eq!(counts["io_events"].as_u64(), Some(1), "io_events count");
 
     // --- function table ---
@@ -2436,12 +2454,9 @@ fn test_custom_errors_insufficient_via_ct_print_full() {
     assert_eq!(
         ios.len(),
         1,
-        "expected one ioError for the typed custom revert"
+        "expected one Error for the typed custom revert"
     );
-    assert_eq!(
-        ios[0].0, "ioError",
-        "custom-error reverts surface as ioError"
-    );
+    assert_eq!(ios[0].0, "Error", "custom-error reverts surface as Error");
     assert_eq!(
         ios[0].1, "InsufficientBalance(available=50, required=100)",
         "custom-error payload must be ABI-decoded with named arguments"
@@ -2503,12 +2518,9 @@ fn test_custom_errors_unauthorized_via_ct_print_full() {
     assert_eq!(
         ios.len(),
         1,
-        "expected one ioError for the unauthorized revert"
+        "expected one Error for the unauthorized revert"
     );
-    assert_eq!(
-        ios[0].0, "ioError",
-        "custom-error reverts surface as ioError"
-    );
+    assert_eq!(ios[0].0, "Error", "custom-error reverts surface as Error");
     assert_eq!(
         ios[0].1, "Unauthorized()",
         "selector-only custom error must be decoded to `Unauthorized()`"
@@ -2637,7 +2649,7 @@ fn test_library_via_ct_print_full() {
     // --- io: Result(30 = 0x1e) ---
     let ios = observed_io_events(&doc);
     assert_eq!(ios.len(), 1, "expected one Result(uint256) event");
-    assert_eq!(ios[0].0, "ioStderr");
+    assert_eq!(ios[0].0, "EvmEvent");
     // topic0 = keccak256("Result(uint256)"); data = 30 = 0x1e
     // (5 + 10 = 15, then 15 * 2 = 30).
     assert_eq!(
@@ -2753,7 +2765,7 @@ fn test_block_tx_context_via_ct_print_full() {
     // --- io: Context(...) packs 6×32 bytes of ABI-encoded data ---
     let ios = observed_io_events(&doc);
     assert_eq!(ios.len(), 1, "expected one Context(...) event");
-    assert_eq!(ios[0].0, "ioStderr");
+    assert_eq!(ios[0].0, "EvmEvent");
     // topic0 = keccak256("Context(address,uint256,uint256,uint256,address,uint256)"),
     // followed by `, 0x` then 6 × 64 hex chars (192 bytes hex = 6×32
     // bytes binary) of non-indexed data.
@@ -2882,7 +2894,7 @@ fn test_payable_deposit_via_ct_print_full() {
     // --- io: Deposited(amount=100, newBalance=100) ---
     let ios = observed_io_events(&doc);
     assert_eq!(ios.len(), 1, "expected one Deposited event");
-    assert_eq!(ios[0].0, "ioStderr");
+    assert_eq!(ios[0].0, "EvmEvent");
     // topic0 = keccak256("Deposited(uint256,uint256)"), followed by
     // 64 bytes of non-indexed data: amount=100 (0x64) and
     // newBalance=100 (0x64), each padded to a 32-byte slot.
@@ -2898,7 +2910,7 @@ fn test_payable_deposit_via_ct_print_full() {
 /// — the `nonpayable` dispatcher inserts a `CALLVALUE != 0 → REVERT`
 /// guard BEFORE any user code runs.  Sending ETH to `withdraw` must
 /// therefore revert at the dispatcher level with an empty payload
-/// (`RevertEmpty`); the recorder surfaces this as an `ioError`
+/// (`RevertEmpty`); the recorder surfaces this as an `Error`
 /// io_event with empty text — distinguishable from a user-level
 /// `revert("...")` (which carries an `Error(string)` payload) by the
 /// absence of any decoded reason.
@@ -2924,7 +2936,7 @@ fn test_payable_withdraw_value_rejected_via_ct_print_full() {
     // 0 functions registered: the dispatcher-level CALLVALUE check
     // reverts before any user code (or even the function-table
     // population path) runs.  The recorder still produces a valid .ct
-    // bundle and an ioError io_event for the revert.
+    // bundle and an Error io_event for the revert.
     // One function more than the program declares: `<toplevel>`, the call
     // tree's root that `start` registers first
     // (trace-events.md, "Recorder Integration — Starting a Recording").
@@ -2940,18 +2952,18 @@ fn test_payable_withdraw_value_rejected_via_ct_print_full() {
     assert_eq!(counts["calls"].as_u64(), Some(1), "calls count");
     assert_eq!(counts["io_events"].as_u64(), Some(1), "io_events count");
 
-    // --- io: dispatcher CALLVALUE REVERT surfaces as empty ioError ---
+    // --- io: dispatcher CALLVALUE REVERT surfaces as empty Error ---
     // `RevertEmpty` carries no payload; the recorder still emits an
-    // ioError io_event with empty text so the trace is never silently
+    // Error io_event with empty text so the trace is never silently
     // empty.  The sentinel "no decoded reason" distinguishes this
     // dispatcher-level revert from a user-level `revert(string)`.
     let ios = observed_io_events(&doc);
     assert_eq!(
         ios.len(),
         1,
-        "expected exactly one ioError for the dispatcher revert"
+        "expected exactly one Error for the dispatcher revert"
     );
-    assert_eq!(ios[0].0, "ioError");
+    assert_eq!(ios[0].0, "Error");
     assert_eq!(
         ios[0].1, "",
         "dispatcher CALLVALUE revert carries no payload (RevertEmpty); \
@@ -3156,7 +3168,7 @@ fn test_visibility_via_ct_print_full() {
     // --- io / event emission: Result(15) ---
     let ios = observed_io_events(&doc);
     assert_eq!(ios.len(), 1, "expected one Result(uint256) event");
-    assert_eq!(ios[0].0, "ioStderr", "EvmEvents collapse to ioStderr");
+    assert_eq!(ios[0].0, "EvmEvent", "EvmEvent records keep their kind");
     // topic0 = keccak256("Result(uint256)"); data = 0xf (1+2+4+8).
     assert_eq!(
         ios[0].1,
@@ -3325,7 +3337,7 @@ fn test_receive_fallback_receive_path_via_ct_print_full() {
     // --- io: ReceiveHit(value=0, totalCount=1) ---
     let ios = observed_io_events(&doc);
     assert_eq!(ios.len(), 1, "expected one ReceiveHit event");
-    assert_eq!(ios[0].0, "ioStderr");
+    assert_eq!(ios[0].0, "EvmEvent");
     // topic0 = keccak256("ReceiveHit(uint256,uint256)"); data = 64
     // bytes (value=0 + totalCount=1).
     assert_eq!(
@@ -3451,7 +3463,7 @@ fn test_receive_fallback_fallback_path_via_ct_print_full() {
     // `msg.data.length == 4`.
     let ios = observed_io_events(&doc);
     assert_eq!(ios.len(), 1, "expected one FallbackHit event");
-    assert_eq!(ios[0].0, "ioStderr");
+    assert_eq!(ios[0].0, "EvmEvent");
     // topic0 = keccak256("FallbackHit(uint256,uint256)"); data =
     // dataLen=4 (0x04) + totalCount=1 each as 32-byte slot.
     assert_eq!(
@@ -3483,9 +3495,9 @@ fn test_receive_fallback_fallback_path_via_ct_print_full() {
 /// `src/recorder.rs`.
 ///
 /// The strict pin asserts both events surface in order:
-///   1. the `BeforeDestroy(address)` LOG → `ioStderr` carrying
+///   1. the `BeforeDestroy(address)` LOG → `EvmEvent` carrying
 ///      topic0 + the 32-byte beneficiary address,
-///   2. the `SELFDESTRUCT` opcode → `ioStderr` carrying just the
+///   2. the `SELFDESTRUCT` opcode → `EvmEvent` carrying just the
 ///      20-byte beneficiary address (no topics, no padding).
 #[test]
 fn test_selfdestruct_via_ct_print_full() {
@@ -3585,16 +3597,16 @@ fn test_selfdestruct_via_ct_print_full() {
     // --- io events: BeforeDestroy LOG + SELFDESTRUCT opcode ---
     let ios = observed_io_events(&doc);
     assert_eq!(ios.len(), 2, "expected exactly two io events");
-    // Both surface as ioStderr (the multi-stream layout collapses
-    // EvmEvent → ioStderr — see `toIOEventKind` in
-    // `codetracer_trace_writer_ffi.nim`).
+    // Both surface with io_kind EvmEvent: the original
+    // `EventLogKind::EvmEvent` is preserved through the container (see
+    // the module header).
     assert_eq!(
-        ios[0].0, "ioStderr",
-        "BeforeDestroy event collapses to ioStderr"
+        ios[0].0, "EvmEvent",
+        "BeforeDestroy event surfaces with io_kind EvmEvent"
     );
     assert_eq!(
-        ios[1].0, "ioStderr",
-        "SELFDESTRUCT opcode collapses to ioStderr"
+        ios[1].0, "EvmEvent",
+        "SELFDESTRUCT opcode surfaces with io_kind EvmEvent"
     );
 
     // io[0] = BeforeDestroy(beneficiary) — LOG1, topic0 +
@@ -3630,8 +3642,8 @@ fn test_selfdestruct_via_ct_print_full() {
     // array to verify the recorder set `metadata = "SELFDESTRUCT"`
     // (the canonical opcode mnemonic).  The `ct-print --full` output
     // exposes metadata under the io event's adjacent fields — for
-    // EvmEvents the multi-stream writer collapses them to ioStderr
-    // but the metadata round-trips through `EventLogKind`.
+    // EvmEvents, so the reader reports io_kind EvmEvent for each and
+    // the metadata round-trips through `EventLogKind`.
     //
     // Spec invariant: the second io event's text is exactly the
     // 20-byte address — which is impossible to produce via the
@@ -3759,8 +3771,14 @@ fn test_interface_via_ct_print_full() {
     const TOKEN_ADDR_LOWER: &str = "5fbdb2315678afecb367f032d93f642f64180aa3";
     let ios = observed_io_events(&doc);
     assert_eq!(ios.len(), 2, "expected exactly two io events");
-    assert_eq!(ios[0].0, "ioStderr", "Transfer event collapses to ioStderr");
-    assert_eq!(ios[1].0, "ioStderr", "Done event collapses to ioStderr");
+    assert_eq!(
+        ios[0].0, "EvmEvent",
+        "Transfer event surfaces with io_kind EvmEvent"
+    );
+    assert_eq!(
+        ios[1].0, "EvmEvent",
+        "Done event surfaces with io_kind EvmEvent"
+    );
 
     // io[0] = Transfer(from=Token, to=0xBEEF, value=7) — LOG3 with
     // canonical ERC-20 Transfer signature.  The fact that the
@@ -3822,7 +3840,7 @@ fn test_interface_via_ct_print_full() {
 /// The strict pin asserts both events surface in order:
 ///   1. the precompile-tagged event with text
 ///      `"ecrecover:0x0000000000000000000000000000000000000001"`,
-///   2. the `Recovered(address)` LOG → `ioStderr` carrying topic0 +
+///   2. the `Recovered(address)` LOG → `EvmEvent` carrying topic0 +
 ///      the 32-byte signer address (recovered to the deterministic
 ///      `0x8581d5e99e70c941f1e415dcaf58d2c81238b19a`).
 #[test]
@@ -3944,10 +3962,13 @@ fn test_ecrecover_via_ct_print_full() {
     let ios = observed_io_events(&doc);
     assert_eq!(ios.len(), 2, "expected exactly two io events");
     assert_eq!(
-        ios[0].0, "ioStderr",
-        "precompile-tagged event collapses to ioStderr"
+        ios[0].0, "EvmEvent",
+        "precompile-tagged event surfaces with io_kind EvmEvent"
     );
-    assert_eq!(ios[1].0, "ioStderr", "Recovered LOG collapses to ioStderr");
+    assert_eq!(
+        ios[1].0, "EvmEvent",
+        "Recovered LOG surfaces with io_kind EvmEvent"
+    );
 
     // io[0] = the precompile-tagged event.  The recorder formats the
     // text as `<name>:0x<20-byte address>` so consumers can verify
@@ -4024,7 +4045,10 @@ fn test_keccak_via_ct_print_full() {
     // deterministic outputs.
     let ios = observed_io_events(&doc);
     assert_eq!(ios.len(), 1, "expected exactly one Hashed(...) event");
-    assert_eq!(ios[0].0, "ioStderr", "Hashed event collapses to ioStderr");
+    assert_eq!(
+        ios[0].0, "EvmEvent",
+        "Hashed event surfaces with io_kind EvmEvent"
+    );
 
     const H1: &str = "beced09521047d05b8960b7e7bcc1d1292cf3e4b2a6b63f48335cbde5f7545d2";
     const H2: &str = "e90b7bceb6e7df5418fb78d8ee546e97c83a08bbccc01a0644d599ccd2a7c2e0";
@@ -4185,7 +4209,7 @@ fn test_assembly_via_ct_print_full() {
     //   0xa9bb0fa194e939eadb11be8d62dd4a16e0f5e89f37fb73fa7f0f8446f1abba61
     let ios = observed_io_events(&doc);
     assert_eq!(ios.len(), 1, "expected one Result(uint256) event");
-    assert_eq!(ios[0].0, "ioStderr");
+    assert_eq!(ios[0].0, "EvmEvent");
     assert_eq!(
         ios[0].1,
         "0xa9bb0fa194e939eadb11be8d62dd4a16e0f5e89f37fb73fa7f0f8446f1abba61, \
@@ -4333,7 +4357,7 @@ fn test_abstract_via_ct_print_full() {
     // --- io: Result(42 = 0x2a) ---
     let ios = observed_io_events(&doc);
     assert_eq!(ios.len(), 1, "expected one Result(uint256) event");
-    assert_eq!(ios[0].0, "ioStderr");
+    assert_eq!(ios[0].0, "EvmEvent");
     assert_eq!(
         ios[0].1,
         "0xa9bb0fa194e939eadb11be8d62dd4a16e0f5e89f37fb73fa7f0f8446f1abba61, \
@@ -4462,7 +4486,7 @@ fn test_function_pointer_via_ct_print_full() {
     // revert or produce a different value).
     let ios = observed_io_events(&doc);
     assert_eq!(ios.len(), 1, "expected one Result(uint256) event");
-    assert_eq!(ios[0].0, "ioStderr");
+    assert_eq!(ios[0].0, "EvmEvent");
     assert_eq!(
         ios[0].1,
         "0xa9bb0fa194e939eadb11be8d62dd4a16e0f5e89f37fb73fa7f0f8446f1abba61, \
@@ -4597,7 +4621,10 @@ fn test_create2_via_ct_print_full() {
 
     let ios = observed_io_events(&doc);
     assert_eq!(ios.len(), 1, "expected one Deployed(...) event");
-    assert_eq!(ios[0].0, "ioStderr", "Deployed event collapses to ioStderr");
+    assert_eq!(
+        ios[0].0, "EvmEvent",
+        "Deployed event surfaces with io_kind EvmEvent"
+    );
     // topic0 = keccak256("Deployed(address,address)") — recorder
     // strips the leading zero nibble via `format!("0x{:x}", U256)`,
     // so the canonical hash `0x09e48d...` surfaces as `0x9e48d...`
@@ -5017,7 +5044,7 @@ fn test_vyper_struct_via_ct_print_full() {
     //   0x...03 ++ 0x...04 ++ 0x...0a ++ 0x...14
     let ios = observed_io_events(&doc);
     assert_eq!(ios.len(), 1, "expected one Moved(...) event");
-    assert_eq!(ios[0].0, "ioStderr");
+    assert_eq!(ios[0].0, "EvmEvent");
     let expected_moved = format!(
         "0x5e3428123447c999946b4eb1fc52841ddcadbb3dcf11ca6b42ccde0fe4eb0d7f, 0x{}{}{}{}",
         "0000000000000000000000000000000000000000000000000000000000000003",
@@ -5158,7 +5185,7 @@ fn test_vyper_hashmap_via_ct_print_full() {
     //   0xbe8396be439ff63ba2ec3820c0c8b49f52bbce98f8dea95fc95e13f224cc35e1
     let ios = observed_io_events(&doc);
     assert_eq!(ios.len(), 1, "expected one Sum(uint256) event");
-    assert_eq!(ios[0].0, "ioStderr");
+    assert_eq!(ios[0].0, "EvmEvent");
     assert_eq!(
         ios[0].1,
         "0xbe8396be439ff63ba2ec3820c0c8b49f52bbce98f8dea95fc95e13f224cc35e1, \
@@ -5277,7 +5304,7 @@ fn test_vyper_raw_call_via_ct_print_full() {
     //   0xa9bb0fa194e939eadb11be8d62dd4a16e0f5e89f37fb73fa7f0f8446f1abba61
     let ios = observed_io_events(&doc);
     assert_eq!(ios.len(), 1, "expected one Result(uint256) event");
-    assert_eq!(ios[0].0, "ioStderr");
+    assert_eq!(ios[0].0, "EvmEvent");
     assert_eq!(
         ios[0].1,
         "0xa9bb0fa194e939eadb11be8d62dd4a16e0f5e89f37fb73fa7f0f8446f1abba61, \
@@ -5424,7 +5451,7 @@ fn test_vyper_decorator_via_ct_print_full() {
     //   0x52943ff53e8b9337883aec1e8f6e90805dcc4243c9cb97464c1500f1b35f0723
     let ios = observed_io_events(&doc);
     assert_eq!(ios.len(), 1, "expected one Total(uint256) event");
-    assert_eq!(ios[0].0, "ioStderr");
+    assert_eq!(ios[0].0, "EvmEvent");
     assert_eq!(
         ios[0].1,
         "0x52943ff53e8b9337883aec1e8f6e90805dcc4243c9cb97464c1500f1b35f0723, \
@@ -5574,7 +5601,7 @@ fn test_vyper_implements_via_ct_print_full() {
     //   0xd8b83002b1bbb255469ed9b0677349a34319c895f2d205b48921537424097259
     let ios = observed_io_events(&doc);
     assert_eq!(ios.len(), 1, "expected one Acted(uint256,uint256) event");
-    assert_eq!(ios[0].0, "ioStderr");
+    assert_eq!(ios[0].0, "EvmEvent");
     assert_eq!(
         ios[0].1,
         "0xd8b83002b1bbb255469ed9b0677349a34319c895f2d205b48921537424097259, \
@@ -5732,7 +5759,7 @@ fn test_amm_pattern_via_ct_print_full() {
     // `0x015fc8...` surfaces as `0x15fc8...` (63 hex chars after `0x`).
     let ios = observed_io_events(&doc);
     assert_eq!(ios.len(), 1, "expected one Swap(uint256,uint256) event");
-    assert_eq!(ios[0].0, "ioStderr");
+    assert_eq!(ios[0].0, "EvmEvent");
     assert_eq!(
         ios[0].1,
         "0x15fc8ee969fd902d9ebd12a31c54446400a2b512a405366fe14defd6081d220, \
@@ -5961,7 +5988,7 @@ fn test_lending_pattern_via_ct_print_full() {
     let ios = observed_io_events(&doc);
     assert_eq!(ios.len(), 4, "expected one event per lifecycle step");
     for (kind, _) in &ios {
-        assert_eq!(kind, "ioStderr", "EvmEvents collapse to ioStderr");
+        assert_eq!(kind, "EvmEvent", "EvmEvent records keep their kind");
     }
 
     // io[0] = Deposit(this, 1000, 1000) -- amount=0x3e8, newBalance=0x3e8

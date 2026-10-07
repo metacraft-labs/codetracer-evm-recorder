@@ -84,7 +84,7 @@ fn flow_test_source() -> PathBuf {
 fn test_no_format_flag_in_help() {
     let bin = env!("CARGO_BIN_EXE_codetracer-evm-recorder");
 
-    for subcmd in [None, Some("record")] {
+    for subcmd in [None, Some("record"), Some("trace-onchain")] {
         let mut cmd = Command::new(bin);
         if let Some(s) = subcmd {
             cmd.arg(s);

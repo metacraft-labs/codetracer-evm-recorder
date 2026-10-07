@@ -276,49 +276,49 @@ async fn audit_ctfs_log_event_kind_is_evmevent() {
         "no Event records emitted — FlowTest::compute() does emit a `Computed(uint256)` log"
     );
 
-    // The Nim multi-stream writer collapses the 13-variant `EventLogKind`
-    // into 4 multi-stream `IOEventKind` buckets (stdout / stderr / fileOp /
-    // error) — see `codetracer_trace_writer_ffi.nim::toIOEventKind`.
-    // The relevant collapse for this audit:
+    // `EvmEvent` now survives the round trip, so this asserts the kind
+    // itself rather than the bucket it used to collapse into.
     //
-    //     EventLogKind::Write      (stdout-style writes)        → "stdout"
-    //     EventLogKind::WriteOther (non-stdout writes)          → "stdout"
-    //     EventLogKind::EvmEvent   (EVM LOG opcodes / Stylus)   → "stderr"
-    //     EventLogKind::TraceLogEvent                            → "stderr"
-    //     EventLogKind::Error                                    → "error"
+    // History, because the expectation moved and the reason belongs next to
+    // it.  The Nim multi-stream writer USED TO collapse the 13-variant
+    // `EventLogKind` into 4 `IOEventKind` buckets (stdout / stderr /
+    // fileOp / error), putting `EvmEvent` and `TraceLogEvent` together in
+    // `stderr`; this test therefore asserted `kind == "stderr"`, and its
+    // own comment named the end-to-end `EvmEvent` check as the open
+    // infrastructure follow-up it could not yet make.  That follow-up has
+    // landed on the `codetracer-trace-format-nim` side: the reader reports
+    // `"EvmEvent"`, and the weaker bucket assertion started failing with
+    // the self-contradictory `non-EvmEvent kinds: ["EvmEvent"]`.
     //
-    // Pre-fix, the EVM recorder emitted LOG opcodes as `Write` →
-    // `stdout`, which mixed them with stdout terminal writes from
-    // recorders like Python/Ruby.  Post-fix (this audit), they emit as
-    // `EvmEvent` → `stderr`, segregating them from stdout.  We assert
-    // every Event record from the EVM recorder lands in the `stderr`
-    // bucket and none in `stdout` — that's the canonical
-    // "EvmEvent-as-the-CTFS-multi-stream-presents-it" check.
-    //
-    // This is necessarily weaker than the JS recorder's audit-time
-    // check (1.38) which compares the raw `RecordEvent.kind` byte
-    // against the upstream enum, because the multi-stream IO format
-    // has discarded the original kind by the time we read it back.
-    // See `AUDIT-CTFS-2026-05.md` for the open infrastructure
-    // follow-up that would preserve `EvmEvent` end-to-end.
-    let mut stderr_count = 0usize;
+    // So the expectation was stale rather than the recorder wrong — the
+    // same failure reproduces on an unmodified checkout against the
+    // current siblings.  Asserting `EvmEvent` directly is the check the
+    // audit wanted all along and is STRICTLY STRONGER than the bucket
+    // test: `stderr` admitted `TraceLogEvent` too, and `EvmEvent` admits
+    // only itself.  A reader that reverts to collapsing will now fail
+    // here, which is the correct verdict for an audit about this kind
+    // being preserved.
+    let mut evm_event_count = 0usize;
     let mut other_kinds = Vec::new();
     for i in 0..event_count {
         let raw = reader.event_json(i).expect("event record JSON missing");
         let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
         let kind = parsed["kind"].as_str().unwrap_or("<missing>").to_string();
-        if kind == "stderr" {
-            stderr_count += 1;
+        if kind == "EvmEvent" {
+            evm_event_count += 1;
         } else {
             other_kinds.push(kind);
         }
     }
     assert!(
         other_kinds.is_empty(),
-        "EVM recorder produced events with non-EvmEvent kinds: {:?}",
+        "EVM recorder produced events whose kind is not EvmEvent: {:?}",
         other_kinds
     );
-    assert!(stderr_count > 0, "no stderr-bucket events found");
+    assert_eq!(
+        evm_event_count, event_count as usize,
+        "every Event record must carry kind EvmEvent"
+    );
 }
 
 /// Audit (e): Step records are emitted for source-line navigation.
