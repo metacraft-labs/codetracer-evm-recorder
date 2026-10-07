@@ -41,9 +41,22 @@
 //!    `eth_getCode` at the target block and mismatching artifacts are
 //!    dropped unless the caller passes `allow_source_mismatch`.
 //!
-//! When an address ends up unmapped the container is still written: the
-//! recorder's multi-contract path accepts an empty registry and emits the
-//! transaction at EVM-opcode granularity.
+//! # Why an unverified address still produces a recording
+//!
+//! The recorder emits a step only where a source map resolves the PC to a
+//! source location, so an address with no artifacts contributes NO steps.
+//! Measured: the first mainnet container, written for an unverified
+//! contract, held exactly the ONE step `TraceWriter::start` emits against a
+//! replay that captured 556 — a container a reader opens and that is not a
+//! recording of anything.
+//!
+//! So an address without usable verified source gets a DISASSEMBLY listing
+//! of its deployed bytecode (see [`disassemble`]) plus a source map
+//! pointing each instruction at its own line of that listing.  That is a
+//! source file built from the bytecode itself, and it makes "recorded at
+//! EVM-opcode granularity" true rather than aspirational: every opcode the
+//! replay stepped through has somewhere to point.  `disassembly_fallback`
+//! turns it off, for a caller who wants verified source or nothing.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -52,7 +65,7 @@ use alloy::primitives::{Address, TxHash};
 use alloy::providers::Provider;
 use eyre::{Context, Result};
 
-use crate::contract_registry::ContractRegistry;
+use crate::contract_registry::{ContractArtifacts, ContractRegistry};
 use crate::inspector::ExecutionData;
 use crate::recorder::EvmRecorder;
 use crate::replay::{
@@ -60,6 +73,7 @@ use crate::replay::{
 };
 use crate::revert_decode;
 use crate::source_fetcher;
+use crate::source_map::{SourceMap, build_pc_to_instruction_index};
 use crate::structlog::StructLog;
 use codetracer_trace_writer_nim::NimTraceReaderHandle;
 
@@ -204,6 +218,106 @@ fn which_on_path(name: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
+// Disassembly fallback
+// ---------------------------------------------------------------------------
+
+/// A disassembly listing of `bytecode`, plus a source map that points each
+/// instruction at its own line of that listing.
+///
+/// This is what makes an unverified address traceable.  The recorder emits a
+/// step only where the source map resolves a PC, so an address with no
+/// artifacts contributes nothing; a listing is a source file the PCs can
+/// resolve INTO, built from the deployed bytecode itself rather than
+/// recovered from anywhere.
+pub struct Disassembly {
+    /// The listing text, one instruction per line.
+    pub listing: String,
+    /// A solc-shaped source map string: one `s:l:f:j:m` entry per
+    /// instruction, in instruction order, pointing at that instruction's
+    /// line in `listing`.
+    pub source_map_raw: String,
+    /// Number of instructions decoded.
+    pub instructions: usize,
+}
+
+/// Disassemble EVM runtime bytecode into a listing and a matching source
+/// map.
+///
+/// Each line is `<pc hex>  <MNEMONIC>` with the immediate appended for
+/// `PUSH1`..`PUSH32`, so the listing reads as a program and a step's line
+/// number identifies the instruction unambiguously.  Unknown opcode bytes
+/// are rendered as `UNKNOWN_0x..` rather than skipped: they occupy a PC the
+/// replay can step onto (data appended after a terminating instruction is
+/// routinely not valid code), and a missing line would shift every line
+/// after it.
+///
+/// The source map's entry for instruction `i` has `offset` = the byte offset
+/// of line `i` in the listing and `length` = that line's length, which is
+/// exactly how solc encodes a span; `SourceMap::resolve_pc` then turns it
+/// into (line, column) with no special case anywhere else.
+pub fn disassemble(bytecode: &[u8]) -> Disassembly {
+    use revm::state::bytecode::opcode::OpCode;
+
+    let mut listing = String::new();
+    let mut entries: Vec<String> = Vec::new();
+    let mut pc = 0usize;
+
+    while pc < bytecode.len() {
+        let opcode = bytecode[pc];
+        let mnemonic = match OpCode::new(opcode) {
+            Some(op) => format!("{op}"),
+            None => format!("UNKNOWN_0x{opcode:02X}"),
+        };
+        // PUSH1 = 0x60 .. PUSH32 = 0x7f carry their immediate inline.
+        let immediate_len = if (0x60..=0x7f).contains(&opcode) {
+            (opcode - 0x60 + 1) as usize
+        } else {
+            0
+        };
+        let mut line = format!("{pc:#06x}  {mnemonic}");
+        if immediate_len > 0 {
+            let end = (pc + 1 + immediate_len).min(bytecode.len());
+            let immediate = &bytecode[(pc + 1).min(bytecode.len())..end];
+            line.push_str(&format!(" 0x{}", alloy::hex::encode(immediate)));
+        }
+
+        let offset = listing.len();
+        entries.push(format!("{}:{}:0:-:0", offset, line.len()));
+        listing.push_str(&line);
+        listing.push('\n');
+
+        pc += 1 + immediate_len;
+    }
+
+    Disassembly {
+        listing,
+        source_map_raw: entries.join(";"),
+        instructions: entries.len(),
+    }
+}
+
+/// Build [`ContractArtifacts`] for `address` from its deployed bytecode
+/// alone, using [`disassemble`].
+///
+/// `source_paths` carries a relative name; `materialise_sources` writes the
+/// listing under the trace directory and rewrites the path to where it
+/// landed, the same way it does for recovered Solidity.
+fn disassembly_artifacts(address: Address, bytecode: &[u8]) -> (ContractArtifacts, usize) {
+    let disassembly = disassemble(bytecode);
+    let artifacts = ContractArtifacts {
+        name: format!("{address:#x}"),
+        source_map: SourceMap::parse(&disassembly.source_map_raw),
+        runtime_bytecode: bytecode.to_vec(),
+        pc_to_idx: build_pc_to_instruction_index(bytecode),
+        source_paths: vec![PathBuf::from(format!("{address:#x}.evmasm"))],
+        source_contents: vec![disassembly.listing],
+        storage_layout: None,
+        solidity_ast: None,
+    };
+    (artifacts, disassembly.instructions)
+}
+
+// ---------------------------------------------------------------------------
 // Public result / options
 // ---------------------------------------------------------------------------
 
@@ -214,6 +328,11 @@ fn which_on_path(name: &str) -> Option<String> {
 pub struct SourceLookup {
     pub address: Address,
     pub outcome: SourceOutcome,
+    /// When the address ended up without verified source, how many
+    /// instructions the disassembly listing registered in its place — the
+    /// thing that keeps the container a recording rather than a header.
+    /// `None` when verified source was used, or when the fallback was off.
+    pub disassembly_instructions: Option<usize>,
 }
 
 /// The outcome of a single Sourcify lookup + recompile + bytecode check.
@@ -271,6 +390,18 @@ pub struct OnchainOptions {
     /// for this route: without it the recorder cannot decode `string` /
     /// `bytes` values or `LOG*` payloads.
     pub capture_memory: bool,
+    /// For an address with no usable verified source, register a
+    /// disassembly listing of its deployed bytecode and map every PC to
+    /// the listing line for that instruction.
+    ///
+    /// On by default, and NOT cosmetic.  The recorder emits a step only
+    /// where a source map resolves the PC to a source location, so an
+    /// address with no artifacts contributes NO steps at all — a container
+    /// written for an unverified mainnet contract held exactly the one step
+    /// `TraceWriter::start` emits, against a replay that captured 556.
+    /// "Recorded at EVM-opcode granularity" has to be made true by giving
+    /// the opcodes somewhere to point.
+    pub disassembly_fallback: bool,
 }
 
 impl OnchainOptions {
@@ -285,6 +416,7 @@ impl OnchainOptions {
             allow_source_mismatch: false,
             max_source_lookups: DEFAULT_MAX_SOURCE_LOOKUPS,
             capture_memory: true,
+            disassembly_fallback: true,
         }
     }
 }
@@ -382,30 +514,29 @@ pub async fn record_onchain_transaction(options: &OnchainOptions) -> Result<Onch
     let mut lookups = Vec::with_capacity(addresses.len());
     let mut mapped = 0usize;
 
-    if !options.skip_source_fetch {
-        // Same provider construction as the replay, so the Sourcify-side
-        // `eth_getCode` reads get the same rate-limit retry.
-        let provider = build_provider(&options.rpc_url)?;
-        for address in &addresses {
-            let outcome = resolve_source_for_address(
-                &provider,
-                *address,
-                replayed.chain_id,
-                replayed.block_number,
-                options,
-                &mut registry,
-            )
-            .await;
-            if matches!(outcome, SourceOutcome::Mapped { .. })
-                || matches!(outcome, SourceOutcome::BytecodeMismatch { kept: true, .. })
-            {
-                mapped += 1;
-            }
-            lookups.push(SourceLookup {
-                address: *address,
-                outcome,
-            });
+    // Same provider construction as the replay, so these reads get the same
+    // rate-limit retry.
+    let provider = build_provider(&options.rpc_url)?;
+    for address in &addresses {
+        let (outcome, disassembly_instructions) = resolve_source_for_address(
+            &provider,
+            *address,
+            replayed.chain_id,
+            replayed.block_number,
+            options,
+            &mut registry,
+        )
+        .await;
+        if matches!(outcome, SourceOutcome::Mapped { .. })
+            || matches!(outcome, SourceOutcome::BytecodeMismatch { kept: true, .. })
+        {
+            mapped += 1;
         }
+        lookups.push(SourceLookup {
+            address: *address,
+            outcome,
+            disassembly_instructions,
+        });
     }
 
     // ------------------------------------------------------------------ //
@@ -541,8 +672,12 @@ fn executed_addresses(replayed: &ReplayedTransaction, limit: usize) -> Vec<Addre
     ordered
 }
 
-/// Look up, recompile and bytecode-check one address, registering it on
-/// success.
+/// Resolve one address's artifacts: verified source where it is usable, a
+/// disassembly listing otherwise, and register whichever won.
+///
+/// Returns the lookup outcome plus the instruction count of the disassembly
+/// listing when the fallback was what got registered, so the caller can say
+/// which kind of recording this address contributed.
 async fn resolve_source_for_address<P: Provider>(
     provider: &P,
     address: Address,
@@ -550,7 +685,7 @@ async fn resolve_source_for_address<P: Provider>(
     block_number: u64,
     options: &OnchainOptions,
     registry: &mut ContractRegistry,
-) -> SourceOutcome {
+) -> (SourceOutcome, Option<usize>) {
     let deployed = match provider
         .get_code_at(address)
         .block_id(block_number.into())
@@ -558,24 +693,53 @@ async fn resolve_source_for_address<P: Provider>(
     {
         Ok(code) => code,
         Err(err) => {
-            return SourceOutcome::RecompileFailed {
-                reason: format!("eth_getCode at block {block_number} failed: {err}"),
-                solc: String::new(),
-            };
+            // Without the deployed code there is no bytecode check and no
+            // listing to fall back to, so this address stays unmapped.
+            return (
+                SourceOutcome::RecompileFailed {
+                    reason: format!("eth_getCode at block {block_number} failed: {err}"),
+                    solc: String::new(),
+                },
+                None,
+            );
         }
     };
     if deployed.is_empty() {
-        return SourceOutcome::NoCode;
+        return (SourceOutcome::NoCode, None);
+    }
+
+    // Registers the disassembly listing and reports how many instructions it
+    // holds.  Used for every path below that does not end in usable verified
+    // source.
+    let fall_back = |registry: &mut ContractRegistry| -> Option<usize> {
+        if !options.disassembly_fallback {
+            return None;
+        }
+        let (artifacts, instructions) = disassembly_artifacts(address, &deployed);
+        registry.register(address, artifacts);
+        Some(instructions)
+    };
+
+    if options.skip_source_fetch {
+        let instructions = fall_back(registry);
+        return (SourceOutcome::NotVerified, instructions);
     }
 
     let bundle = match source_fetcher::fetch_sourcify_files(chain_id, address).await {
         Ok(Some(bundle)) => bundle,
-        Ok(None) => return SourceOutcome::NotVerified,
+        Ok(None) => {
+            let instructions = fall_back(registry);
+            return (SourceOutcome::NotVerified, instructions);
+        }
         Err(err) => {
-            return SourceOutcome::RecompileFailed {
-                reason: format!("Sourcify lookup failed: {err:#}"),
-                solc: String::new(),
-            };
+            let instructions = fall_back(registry);
+            return (
+                SourceOutcome::RecompileFailed {
+                    reason: format!("Sourcify lookup failed: {err:#}"),
+                    solc: String::new(),
+                },
+                instructions,
+            );
         }
     };
 
@@ -591,19 +755,23 @@ async fn resolve_source_for_address<P: Provider>(
     let artifacts = match source_fetcher::compile_sourcify_bundle(&bundle, &solc, None) {
         Ok(artifacts) => artifacts,
         Err(err) => {
-            return SourceOutcome::RecompileFailed {
-                reason: format!(
-                    "recompile with `{solc}` failed (contract was verified with \
-                     `{full_version}`; a version-specific binary was \
-                     {}): {err:#}",
-                    if version_matched {
-                        "found"
-                    } else {
-                        "NOT found, so this is the fallback solc"
-                    }
-                ),
-                solc,
-            };
+            let instructions = fall_back(registry);
+            return (
+                SourceOutcome::RecompileFailed {
+                    reason: format!(
+                        "recompile with `{solc}` failed (contract was verified with \
+                         `{full_version}`; a version-specific binary was \
+                         {}): {err:#}",
+                        if version_matched {
+                            "found"
+                        } else {
+                            "NOT found, so this is the fallback solc"
+                        }
+                    ),
+                    solc,
+                },
+                instructions,
+            );
         }
     };
 
@@ -618,19 +786,25 @@ async fn resolve_source_for_address<P: Provider>(
             deployed_len: deployed.len(),
         };
         registry.register(address, artifacts);
-        return outcome;
+        return (outcome, None);
     }
 
     let recompiled_len = artifacts.runtime_bytecode.len();
+    let mut instructions = None;
     if options.allow_source_mismatch {
         registry.register(address, artifacts);
+    } else {
+        instructions = fall_back(registry);
     }
-    SourceOutcome::BytecodeMismatch {
-        prefix_match,
-        recompiled_len,
-        deployed_len: deployed.len(),
-        kept: options.allow_source_mismatch,
-    }
+    (
+        SourceOutcome::BytecodeMismatch {
+            prefix_match,
+            recompiled_len,
+            deployed_len: deployed.len(),
+            kept: options.allow_source_mismatch,
+        },
+        instructions,
+    )
 }
 
 /// Length of the common prefix of two byte strings.
@@ -817,6 +991,93 @@ mod tests {
         let logs = execution_data_to_struct_logs(&data);
         assert_eq!(logs[0].memory, None);
         assert_eq!(logs[1].memory, Some(vec![]));
+    }
+
+    #[test]
+    fn a_disassembly_listing_has_one_line_per_instruction() {
+        // PUSH1 0x80, PUSH1 0x40, MSTORE, STOP — 4 instructions over 7
+        // bytes, so an instruction count equal to the byte count would be
+        // wrong.
+        let bytecode = vec![0x60, 0x80, 0x60, 0x40, 0x52, 0x00];
+        let d = disassemble(&bytecode);
+        assert_eq!(d.instructions, 4);
+        let lines: Vec<&str> = d.listing.lines().collect();
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0], "0x0000  PUSH1 0x80");
+        assert_eq!(lines[1], "0x0002  PUSH1 0x40");
+        assert_eq!(lines[2], "0x0004  MSTORE");
+        assert_eq!(lines[3], "0x0005  STOP");
+    }
+
+    #[test]
+    fn every_pc_resolves_to_its_own_instruction_line() {
+        // This is the property the whole fallback exists for: the recorder
+        // emits a step only where the source map RESOLVES a PC, so each
+        // instruction's PC must land on its own listing line.
+        let bytecode = vec![0x60, 0x80, 0x60, 0x40, 0x52, 0x00];
+        let d = disassemble(&bytecode);
+        let source_map = SourceMap::parse(&d.source_map_raw);
+        let pc_to_idx = build_pc_to_instruction_index(&bytecode);
+        let listing = d.listing.clone();
+        let contents = [listing.as_str()];
+
+        let resolved: Vec<u32> = [0usize, 2, 4, 5]
+            .iter()
+            .map(|&pc| {
+                source_map
+                    .resolve_pc(pc, &pc_to_idx, &contents)
+                    .unwrap_or_else(|| panic!("pc {pc} must resolve"))
+                    .line
+            })
+            .collect();
+        assert_eq!(
+            resolved,
+            vec![1, 2, 3, 4],
+            "the four instruction PCs must map to the four listing lines in order"
+        );
+    }
+
+    #[test]
+    fn an_unknown_opcode_byte_still_occupies_a_line() {
+        // Bytes appended after a terminating instruction are routinely not
+        // valid code, and the replay can step onto them.  Skipping one
+        // would shift every line after it, so the mapping has to keep the
+        // slot.
+        let bytecode = vec![0x00, 0x0c, 0x5b];
+        let d = disassemble(&bytecode);
+        assert_eq!(d.instructions, 3);
+        let lines: Vec<&str> = d.listing.lines().collect();
+        assert_eq!(lines[1], "0x0001  UNKNOWN_0x0C");
+        assert_eq!(lines[2], "0x0002  JUMPDEST");
+    }
+
+    #[test]
+    fn a_truncated_push_immediate_does_not_panic_or_lose_the_instruction() {
+        // PUSH32 with no immediate bytes at all — the tail of a contract
+        // whose code was cut, which `eth_getCode` can legitimately return.
+        let bytecode = vec![0x7f];
+        let d = disassemble(&bytecode);
+        assert_eq!(d.instructions, 1);
+        assert_eq!(d.listing.lines().next().unwrap(), "0x0000  PUSH32 0x");
+    }
+
+    #[test]
+    fn disassembly_artifacts_carry_the_deployed_bytecode_and_one_source() {
+        let bytecode = vec![0x60, 0x01, 0x00];
+        let address = Address::from([0x11u8; 20]);
+        let (artifacts, instructions) = disassembly_artifacts(address, &bytecode);
+        assert_eq!(instructions, 2);
+        assert_eq!(artifacts.runtime_bytecode, bytecode);
+        assert_eq!(artifacts.source_paths.len(), 1);
+        assert_eq!(artifacts.source_contents.len(), 1);
+        assert_eq!(
+            artifacts.source_paths[0],
+            PathBuf::from("0x1111111111111111111111111111111111111111.evmasm")
+        );
+        // No storage layout or AST can be recovered from bytecode, and
+        // claiming either would be a fabrication.
+        assert!(artifacts.storage_layout.is_none());
+        assert!(artifacts.solidity_ast.is_none());
     }
 
     #[test]

@@ -195,6 +195,17 @@ async fn trace_onchain_writes_a_container_the_nim_reader_opens() {
     );
     assert_eq!(recording.log_count, 1, "the runtime emits exactly one LOG0");
 
+    // The address has no verified source (it is a hand-assembled contract
+    // on a throwaway chain), so the disassembly fallback is what made it
+    // traceable, and it must report how many instructions it registered.
+    assert_eq!(recording.source_lookups.len(), 1);
+    assert_eq!(recording.source_lookups[0].address, contract);
+    assert_eq!(
+        recording.source_lookups[0].disassembly_instructions,
+        Some(10),
+        "the fallback must register the 10 instructions of the 18-byte runtime"
+    );
+
     // ---- the container, through the current reader ----------------------
     // The route reopens its own output, so these assertions pin the
     // reported figures against the file on disk rather than repeating the
@@ -212,10 +223,37 @@ async fn trace_onchain_writes_a_container_the_nim_reader_opens() {
         recording.container_bytes > 0,
         "the container must not be empty"
     );
-    assert!(
-        recording.container_steps_read_back > 0,
-        "the route must have read steps back out of its own container"
+    // The exact figure, not `> 0`.  A container with no source map
+    // registered holds ONLY the step `TraceWriter::start` emits — the first
+    // mainnet container was one step against a 556-step replay — so a
+    // `> 0` assertion passes on a container that records nothing.  The
+    // disassembly fallback gives each of the 10 opcodes its own listing
+    // line, and the reader must see a step for each plus the opening one.
+    assert_eq!(
+        recording.container_steps_read_back,
+        recording.step_count as u64 + 1,
+        "the reader must see one step per replayed opcode plus the opening \
+         step; got {} for {} opcodes",
+        recording.container_steps_read_back,
+        recording.step_count,
     );
+
+    // And the listing it resolved against must be on disk next to the
+    // container, because the db-backend resolves source paths from the
+    // container's own paths stream.
+    let listing = tmp
+        .path()
+        .join("sources")
+        .join(format!("{contract:#x}"))
+        .join(format!("{contract:#x}.evmasm"));
+    let text = std::fs::read_to_string(&listing)
+        .unwrap_or_else(|e| panic!("the disassembly listing must exist at {listing:?}: {e}"));
+    assert_eq!(
+        text.lines().count(),
+        10,
+        "the listing must carry one line per instruction of the 18-byte runtime"
+    );
+    assert_eq!(text.lines().next().unwrap(), "0x0000  PUSH2 0xdead");
 
     let reader = NimTraceReaderHandle::open(ct_path.to_str().unwrap())
         .unwrap_or_else(|e| panic!("the current Nim reader failed to open {ct_path:?}: {e}"));
@@ -377,12 +415,90 @@ async fn the_preceding_transactions_in_the_block_are_replayed() {
         "the transaction at index 1 must have its one predecessor replayed"
     );
 
-    // Both containers must open.
-    for dir in [tmp_first.path(), tmp_second.path()] {
-        let ct = find_ct_container(dir);
+    // Both containers must open AND hold a step per opcode.
+    for recording in [&first, &second] {
+        let ct = find_ct_container(&recording.out_dir);
         NimTraceReaderHandle::open(ct.to_str().unwrap())
             .unwrap_or_else(|e| panic!("the current Nim reader failed to open {ct:?}: {e}"));
+        assert_eq!(
+            recording.container_steps_read_back,
+            recording.step_count as u64 + 1,
+            "one step per replayed opcode plus the opening step"
+        );
     }
+}
+
+/// CONTROL for the disassembly fallback: with it OFF, the same transaction
+/// produces a container the reader still opens but which holds only the
+/// opening step — which is what the fallback exists to prevent, and the
+/// reason `container_steps_read_back > 0` is not a sufficient assertion
+/// anywhere.
+#[tokio::test(flavor = "multi_thread")]
+async fn without_the_disassembly_fallback_the_container_records_no_opcodes() {
+    if !has_anvil() {
+        panic!(
+            "anvil is not on PATH — this test asserts a real chain round trip and \
+             must not be silently skipped; run it inside `nix develop`"
+        );
+    }
+
+    use alloy::node_bindings::Anvil;
+    let anvil = Anvil::new().spawn();
+    let rpc_url = anvil.endpoint();
+
+    let signer: PrivateKeySigner = anvil.keys()[0].clone().into();
+    let deployer = signer.address();
+    let provider = ProviderBuilder::new()
+        .wallet(EthereumWallet::from(signer))
+        .connect_http(rpc_url.parse().unwrap());
+
+    let contract = provider
+        .send_transaction(
+            TransactionRequest::default()
+                .from(deployer)
+                .with_deploy_code(simple_contract_init_code()),
+        )
+        .await
+        .expect("send deploy tx")
+        .get_receipt()
+        .await
+        .expect("deploy receipt")
+        .contract_address
+        .unwrap();
+
+    let tx_hash: TxHash = provider
+        .send_transaction(
+            TransactionRequest::default()
+                .from(deployer)
+                .to(contract)
+                .with_input(alloy::primitives::Bytes::new()),
+        )
+        .await
+        .expect("send call tx")
+        .get_receipt()
+        .await
+        .expect("call receipt")
+        .transaction_hash;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut options = OnchainOptions::new(rpc_url.clone(), tx_hash, tmp.path());
+    options.skip_source_fetch = true;
+    options.disassembly_fallback = false;
+
+    let recording = record_onchain_transaction(&options)
+        .await
+        .expect("the route still writes a container with no artifacts registered");
+
+    assert_eq!(recording.step_count, 10, "the replay still sees 10 opcodes");
+    assert_eq!(
+        recording.source_lookups[0].disassembly_instructions, None,
+        "no listing may be registered when the fallback is off"
+    );
+    assert_eq!(
+        recording.container_steps_read_back, 1,
+        "with nothing for the opcodes to resolve against, the container holds \
+         only the opening step — 10 opcodes recorded as 1 step"
+    );
 }
 
 // ---------------------------------------------------------------------------

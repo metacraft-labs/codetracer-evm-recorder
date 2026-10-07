@@ -197,6 +197,16 @@ struct TraceOnchainArgs {
     /// payloads, so this trades fidelity for time and memory.
     #[arg(long)]
     no_memory: bool,
+
+    /// Do not register a disassembly listing for addresses without usable
+    /// verified source.
+    ///
+    /// The recorder emits a step only where a source map resolves the PC,
+    /// so WITHOUT the listing an unverified address contributes no steps at
+    /// all and the container holds only its header step.  Pass this when
+    /// you want verified source or nothing.
+    #[arg(long)]
+    no_disassembly_fallback: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -361,6 +371,7 @@ async fn trace_onchain(args: TraceOnchainArgs) -> Result<()> {
     options.allow_source_mismatch = args.allow_source_mismatch;
     options.max_source_lookups = args.max_source_lookups;
     options.capture_memory = !args.no_memory;
+    options.disassembly_fallback = !args.no_disassembly_fallback;
 
     eprintln!("Replaying {tx_hash} from {rpc_url}");
     eprintln!("  prestate strategy: replay-preceding (fork pinned at the parent block)");
@@ -403,7 +414,14 @@ async fn trace_onchain(args: TraceOnchainArgs) -> Result<()> {
         recording.source_lookups.len(),
     );
     for lookup in &recording.source_lookups {
-        eprintln!("  {} {}", lookup.address, describe_source(&lookup.outcome));
+        let mut line = format!("  {} {}", lookup.address, describe_source(&lookup.outcome));
+        if let Some(instructions) = lookup.disassembly_instructions {
+            line.push_str(&format!(
+                "; registered a {instructions}-instruction disassembly listing, \
+                 so its opcodes are navigable"
+            ));
+        }
+        eprintln!("{line}");
     }
 
     eprintln!(
@@ -429,7 +447,7 @@ fn describe_source(outcome: &onchain::SourceOutcome) -> String {
             "mapped as {contract_name} ({source_files} source file(s)); \
              recompiled code matches the first {prefix_match} of {deployed_len} deployed bytes"
         ),
-        O::NotVerified => "not verified on Sourcify; recorded at opcode granularity".to_string(),
+        O::NotVerified => "no usable verified source".to_string(),
         O::BytecodeMismatch {
             prefix_match,
             recompiled_len,
@@ -442,7 +460,7 @@ fn describe_source(outcome: &onchain::SourceOutcome) -> String {
             if *kept {
                 "kept anyway (--allow-source-mismatch): source lines may be wrong"
             } else {
-                "dropped; recorded at opcode granularity"
+                "dropped"
             }
         ),
         O::RecompileFailed { reason, solc } => {
