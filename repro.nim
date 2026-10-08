@@ -70,6 +70,9 @@ import repro_dsl_stdlib/foreign_env
 import repro_dsl_stdlib/packages/sh
 import "../codetracer-trace-format-nim/build_writer_artifacts"
 
+when defined(linux):
+  import tools/evm_zstd_development
+
 package codetracer_evm_recorder:
   defaultToolProvisioning "path"
 
@@ -102,6 +105,8 @@ package codetracer_evm_recorder:
     # static library into the cargo build (the FFI's C output
     # ``#include``s ``zstd.h`` and the CBOR+Zstd writer links libzstd).
     "zstd"
+    when defined(linux):
+      "evmZstdDevelopment"
 
     # pkg-config + OpenSSL — openssl-sys consults pkg-config to find
     # OpenSSL on Linux/macOS. The Windows build uses the rustls-tls
@@ -184,6 +189,9 @@ package codetracer_evm_recorder:
         traceRoot / "codetracer_trace_reader", traceRoot / "codetracer_ctfs",
         nimRoot / "src", nimRoot / "include"])
     let decoderBuild = buildCtPrint(nimRoot)
+    when defined(linux):
+      appendRegisteredActionToolIdentityRefs(decoderBuild.id,
+        ["evmZstdDevelopment"])
     let decoderBinary = ctPrintPath(nimRoot)
 
     let recorderBuild = cargo.build(
@@ -271,6 +279,10 @@ package codetracer_evm_recorder:
         appendRegisteredActionToolIdentityRefs(action.id, ["gcc", "pkg-config", "openssl"])
       elif defined(macosx):
         appendRegisteredActionToolIdentityRefs(action.id, ["clang", "pkg-config", "openssl"])
+    when defined(linux):
+      for action in [recorderBuild, recorderReleaseBuild, testsBuild.action]:
+        appendRegisteredActionToolIdentityRefs(action.id,
+          ["evmZstdDevelopment"])
     appendRegisteredActionToolIdentityRefs(testsRun.action.id, ["solc", "foundry"])
     appendRegisteredActionToolIdentityRefs(cliVerify.id, ["sh", "bash", "dirname", "grep"])
     discard collect("test", @[testsRun.action, cliVerify])

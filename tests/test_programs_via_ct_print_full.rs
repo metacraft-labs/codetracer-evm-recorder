@@ -156,6 +156,22 @@ fn run_recorder_cli_with_from_and_value(
     );
 }
 
+/// Keep both genuine decoder projections from the same recorded container.
+/// Stable event/path assertions use stripped output; canonical source identity
+/// uses the separately decoded unstripped metadata, without rewriting either.
+struct DecodedFullTrace {
+    stripped: serde_json::Value,
+    unstripped: serde_json::Value,
+}
+
+impl std::ops::Deref for DecodedFullTrace {
+    type Target = serde_json::Value;
+
+    fn deref(&self) -> &Self::Target {
+        &self.stripped
+    }
+}
+
 /// Record one program and return the `ct-print --full --strip-paths`
 /// JSON document. Required solc, Anvil and decoder assertions fail
 /// before recording if a prerequisite is unavailable.
@@ -164,7 +180,7 @@ fn record_and_dump_full(
     group: &str,
     file: &str,
     function_name: &str,
-) -> Option<serde_json::Value> {
+) -> Option<DecodedFullTrace> {
     record_and_dump_full_with_from(test_name, group, file, function_name, None)
 }
 
@@ -177,7 +193,7 @@ fn record_and_dump_full_with_from(
     file: &str,
     function_name: &str,
     from: Option<&str>,
-) -> Option<serde_json::Value> {
+) -> Option<DecodedFullTrace> {
     record_and_dump_full_with_from_and_value(test_name, group, file, function_name, from, None)
 }
 
@@ -191,7 +207,7 @@ fn record_and_dump_full_with_from_and_value(
     function_name: &str,
     from: Option<&str>,
     value: Option<&str>,
-) -> Option<serde_json::Value> {
+) -> Option<DecodedFullTrace> {
     let ct_print = ct_print_required(test_name)?;
 
     let tmp_dir = tempfile::tempdir().expect("tempdir");
@@ -222,8 +238,24 @@ fn record_and_dump_full_with_from_and_value(
     let doc: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("ct-print --full should emit valid JSON");
 
+    let unstripped_output = Command::new(&ct_print)
+        .arg("--full")
+        .arg(&ct_files[0])
+        .output()
+        .expect("failed to run ct-print --full without path stripping");
+    assert!(
+        unstripped_output.status.success(),
+        "unstripped ct-print --full should succeed; stderr: {}",
+        String::from_utf8_lossy(&unstripped_output.stderr)
+    );
+    let unstripped: serde_json::Value = serde_json::from_slice(&unstripped_output.stdout)
+        .expect("unstripped ct-print --full should emit valid JSON");
+
     drop(tmp_dir);
-    Some(doc)
+    Some(DecodedFullTrace {
+        stripped: doc,
+        unstripped,
+    })
 }
 
 /// Decode the step events into `(step_index, line)` pairs in emission
@@ -384,8 +416,8 @@ fn observed_step_var_pairs(doc: &serde_json::Value) -> Vec<(String, String)> {
 /// path computed exactly the same way the recorder CLI canonicalizes
 /// its `solidity_file` argument, so the assertion is strict in the
 /// `assert_eq!` sense but stays stable across checkouts.
-fn assert_metadata_program_is_source_path(doc: &serde_json::Value, group: &str, file: &str) {
-    let prog = doc["metadata"]["program"]
+fn assert_metadata_program_is_source_path(doc: &DecodedFullTrace, group: &str, file: &str) {
+    let prog = doc.unstripped["metadata"]["program"]
         .as_str()
         .expect("metadata.program str");
     let expected = test_program(group, file)
@@ -396,6 +428,25 @@ fn assert_metadata_program_is_source_path(doc: &serde_json::Value, group: &str, 
         prog, expected_str,
         "metadata.program must be the canonical source-file path \
          (spec: recorder-test-requirements.md §1)"
+    );
+    let workdir = doc.unstripped["metadata"]["workdir"]
+        .as_str()
+        .expect("unstripped metadata.workdir str");
+    let stripped_expected = if !workdir.is_empty() && expected_str.starts_with(workdir) {
+        let rest = &expected_str[workdir.len()..];
+        format!("<workdir>/{}", rest.strip_prefix('/').unwrap_or(rest))
+    } else if expected_str.starts_with("/tmp/") {
+        let parts: Vec<_> = expected_str.split('/').collect();
+        format!("<tmp>/{}", parts[3..].join("/"))
+    } else {
+        expected_str.clone()
+    };
+    assert_eq!(
+        doc.stripped["metadata"]["program"]
+            .as_str()
+            .expect("stripped metadata.program str"),
+        stripped_expected,
+        "stripped decoder projection must honor documented workdir/tmp normalization"
     );
 }
 
