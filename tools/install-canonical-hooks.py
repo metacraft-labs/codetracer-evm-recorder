@@ -114,7 +114,9 @@ KNOWN_GIT_PRE_PUSH_SAMPLE_BODIES = {
 
 KNOWN_GIT_SAMPLES = {'applypatch-msg.sample': ['37ca5da86ab699db4572609ab0fb2d2d072dd254f4d3b5d56c21193ba44eccce', 'eff2c3264abcf88b09cbcd9fdf9e3770c01d2c0932b698f3f2bd5fc50bb8812f'], 'commit-msg.sample': ['2c1bb732a515631875c2b4bb54311077e8028c4efca3ebe596133932fa520340', '3a75e6e4575b274a47d898b2e63de06fceecd125e510231eb1bd84110fd081b1'], 'fsmonitor-watchman.sample': ['3ee619bc7217025d5a9c92785c3e9fd313bedaeb981c4f79f1f1fb802b80fdbf', '6512786c6b67dc73acfb070cc7597c2d09940afaaddcc2ea45b7d39e6f510ab7'], 'post-update.sample': ['f02167601f61d3a7f2725e94c790cf0f56c729bd63d96e0cbbcadca05a33502b', 'f8192e86efc5a8130e7f5cbdd9122872a29880da5cfff51378478080622da332'], 'pre-applypatch.sample': ['cd92ca930f95859f23a676b64bd8e0159519efba814b40f8be01bb523b858494', 'dab0584577cc1f1425637051b252911787dda69ebe77bb5baa09cf5c6eefa5eb'], 'pre-commit.sample': ['338daa45efd853599a97e0c84d0feb5863797ccb8b85572e92d10d8461269ab6', '8648b08f9877b0099aec8d90b92df1b9a292c067744a8964ceb747668e9fbc90'], 'pre-merge-commit.sample': ['474c16b6e8b61c7f590fdb67374b8ceb37b58025897b7e9469a6420f183715d1', '52ce5ef56a85753cb2891c2f1274cd14a287e8ba6e47f1cd4f0e67991238e662'], 'pre-push.sample': ['212424610fb7562dfc6274e127946f529de19bf0c73744860be2c55247925668', 'f35ff977f07f76b61e0ebc047bf500793d22d95fbcf86c6ab95561b6ba339bc8'], 'pre-rebase.sample': ['285f0a7d7d24b6afab04d3bed7513d109604bb4702c995ea23e9018f5c9c5bcf', '48aa7f470363e8ac81bc7707f7b935044f17e37c430a64008ef9ca6760035eb3'], 'pre-receive.sample': ['1289c1d78d0ad7630cf7ea9f19e8e9f991a8d1565116beaf38e169ae946c099f', 'a6a6547077617556bd6a5729575ec0f003c80cac264439968c459c74d00b0020'], 'prepare-commit-msg.sample': ['1704a1edd6fae6c84dda7bbe1b5b1d0f61a860439d7b58e2659f61b7ba6f3418', '880a38d177f8143b5c062ca476ef34f4967c58121251e4648a3e9ec9629f6803'], 'push-to-checkout.sample': ['0ac671c7451352f26be3caabab354fad20bdcc2d2bf7edf026fd0655176a8728', '87760462f0a17b21b294e5a8a34e8d64699af0bd41c91940e2fa6b5251757348'], 'sendemail-validate.sample': ['3e63147e70eee60bb9cf57adafb5ba219cc9e6609ee334d294729658e9b14822', 'a6b824290d15ffe0dbdb4cc856d86ac541ae300cb86b7b183df6a6ca2d35065c'], 'update.sample': ['8b72d6efcbeb4cf670120f40a940ef06b716e8befe4801ede61042bb18738156', 'd8e942bf3c04c29bf6b5ec3f72cc7ea640dcf600e0e8bed97cb71be5500c43e3']}
 
-def complete_hook_inventory(hooks: Path, prek: str) -> dict[str, tuple[bytes, int]]:
+def complete_hook_inventory(hooks: Path, prek: str, factory: SelectedFactory | None = None) -> dict[str, tuple[bytes, int]]:
+    if factory is not None:
+        factory.guard()
     result = {}
     if not hooks.exists():
         return result
@@ -132,7 +134,9 @@ def complete_hook_inventory(hooks: Path, prek: str) -> dict[str, tuple[bytes, in
         if path.name == "pre-commit":
             allowed = allowed or body in (native_generated_body(prek), canonical_body(prek))
         if path.name in KNOWN_GIT_SAMPLES:
-            allowed = digest in KNOWN_GIT_SAMPLES[path.name]
+            allowed = digest in KNOWN_GIT_SAMPLES[path.name] or (
+                factory is not None and factory.samples.get(path.name) == (body, mode)
+            )
         if path.name in ("pre-commit.repro-local", "pre-push.repro-local"):
             hook_type = path.name.removesuffix(".repro-local")
             allowed = body in (native_generated_body(prek, hook_type), canonical_body(prek, hook_type))
@@ -146,7 +150,9 @@ def complete_hook_inventory(hooks: Path, prek: str) -> dict[str, tuple[bytes, in
     return result
 
 
-def pre_push_inventory(hooks: Path, prek: str) -> dict[str, tuple[bytes, int]]:
+def pre_push_inventory(hooks: Path, prek: str, factory: SelectedFactory | None = None) -> dict[str, tuple[bytes, int]]:
+    if factory is not None:
+        factory.guard()
     inventory = {}
     if not hooks.exists():
         return inventory
@@ -165,7 +171,9 @@ def pre_push_inventory(hooks: Path, prek: str) -> dict[str, tuple[bytes, int]]:
         body = path.read_bytes()
         mode = stat.S_IMODE(metadata.st_mode)
         digest = hashlib.sha256(body).hexdigest()
-        qualified_body = digest in KNOWN_GIT_PRE_PUSH_SAMPLE_BODIES if sample else qualified_managed_prior(path.name, digest)
+        qualified_body = (digest in KNOWN_GIT_PRE_PUSH_SAMPLE_BODIES or (
+            factory is not None and factory.samples.get(path.name) == (body, mode)
+        )) if sample else qualified_managed_prior(path.name, digest)
         if path.name == "pre-push.repro-local":
             qualified_body = qualified_body or body in (native_generated_body(prek, "pre-push"), canonical_body(prek, "pre-push"))
         if mode != 0o755 or not qualified_body:
@@ -330,8 +338,8 @@ def install_main() -> None:
                 validate_prior_owned_body(body, stat.S_IMODE(path.stat().st_mode), prek)
             elif not qualified_managed_prior(name, hashlib.sha256(body).hexdigest()) or stat.S_IMODE(path.stat().st_mode) != 0o755:
                 raise RuntimeError(f"unknown or modified managed hook template: {name}")
-    original_pre_push = pre_push_inventory(hooks, prek)
-    complete_before = complete_hook_inventory(hooks, prek)
+    original_pre_push = pre_push_inventory(hooks, prek, factory)
+    complete_before = complete_hook_inventory(hooks, prek, factory)
 
     env = os.environ.copy()
     env["PREK_NO_FAST_PATH"] = "1"
@@ -402,7 +410,7 @@ def install_main() -> None:
         # Separate caller bootstrap: every ownership check above completed before
         # matching ensure creates any hook. Preserve existing pre-push entries.
         guarded_ensure(repro, root, env, factory)
-        current_pre_push = pre_push_inventory(hooks, prek)
+        current_pre_push = pre_push_inventory(hooks, prek, factory)
         expected_names = {"pre-push", "pre-push.repro-managed"} | (set(original_pre_push) & {"pre-push.sample", "pre-push.repro-local"})
         if set(current_pre_push) != expected_names:
             raise RuntimeError("matching bootstrap did not create qualified pre-push hooks")
@@ -429,7 +437,7 @@ def install_main() -> None:
                 raise RuntimeError("bootstrap changed preserved local hook body")
         elif preserved_before is not None:
             raise RuntimeError("bootstrap removed preserved local hook")
-        complete_after = complete_hook_inventory(hooks, prek)
+        complete_after = complete_hook_inventory(hooks, prek, factory)
         for name, value in protected_before.items():
             if complete_after.get(name) != value:
                 raise RuntimeError(f"bootstrap changed protected hook entry: {name}")
@@ -479,7 +487,7 @@ def install_main() -> None:
         guarded_ensure(repro, root, env, factory)
         expected_push = dict(original_pre_push)
         expected_push["pre-push.repro-local"] = (canonical_push, 0o755)
-        if pre_push_inventory(hooks, prek) != expected_push:
+        if pre_push_inventory(hooks, prek, factory) != expected_push:
             raise RuntimeError("unexpected pre-push migration inventory")
         for name, digest in KNOWN_MANAGED_BODIES.items():
             target = hooks / name
@@ -504,7 +512,7 @@ def install_main() -> None:
         local = hooks / (hook_type + ".repro-local")
         if local.is_symlink() or not local.is_file() or stat.S_IMODE(local.stat().st_mode) != 0o755 or local.read_bytes() != expected:
             raise RuntimeError("reconciled local hook did not preserve canonical native script")
-    complete_after = complete_hook_inventory(hooks, prek)
+    complete_after = complete_hook_inventory(hooks, prek, factory)
     for name, value in protected_before.items():
         if complete_after.get(name) != value:
             raise RuntimeError(f"installation changed protected hook entry: {name}")
