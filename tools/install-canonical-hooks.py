@@ -519,7 +519,23 @@ def install_main() -> None:
     BOUNDARY.guard()
     print("Canonical pinned commit and push hooks installed with preserved managed dispatchers")
 
+def local_installer_child_environment(env: dict[str, str]) -> dict[str, str]:
+    # GitHub's authenticated checkout supplies command-config headers. They
+    # belong to the parent network operations, not this local installer.
+    return {key: value for key, value in env.items()
+            if key not in ("GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS")
+            and not key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))}
+
 def main() -> None:
+    inherited = os.environ.copy()
+    isolated = local_installer_child_environment(inherited)
+    if isolated != inherited:
+        # Launch the same actual source/interpreter in a child with only the
+        # command-config family removed. Parent auth/environment is unchanged.
+        # The child runs every existing admission/config/descriptor guard.
+        native_install_to_terminal([sys.executable, str(Path(__file__).resolve()),
+                                    *sys.argv[1:]], Path.cwd(), isolated)
+        return
     try:
         install_main()
     finally:
