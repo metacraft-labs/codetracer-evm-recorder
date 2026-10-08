@@ -35,6 +35,9 @@
           REPROBUILD_NATIVE_PACKAGE = "${reprobuild.packages.${system}.default}";
           REPROBUILD_NATIVE_SOURCE = "${reprobuild.outPath}";
 
+          EVM_CI_GIT = "${pkgs.git}/bin/git";
+          EVM_CI_DIRENV = "${pkgs.direnv}/bin/direnv";
+          EVM_CI_PYTHON = "${pkgs.python3}/bin/python3";
           packages = with pkgs; [
             # Solidity/EVM tools
             # Expected versions: solc 0.8.28+, foundry 1.1.0+ (forge, cast, anvil)

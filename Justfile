@@ -47,6 +47,7 @@ fmt: format
 prepare-ci:
   #!/usr/bin/env bash
   set -euo pipefail
+  "${EVM_CI_PYTHON:?declared native CI Python missing}" -I tools/allow-declared-nim-env.py
   (
     cd "${WORKSPACE_ROOT:-${GITHUB_WORKSPACE}/..}/codetracer-trace-format-nim"
     nimble install -y stew results
