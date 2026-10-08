@@ -104,6 +104,8 @@ jobs:
       - name: Prepare (recorder-specific)
         if: inputs.prepare-recipe != ''
         working-directory: codetracer-evm-recorder
+        env:
+          WORKSPACE_ROOT: ${{ github.workspace }}
         run: dev-exec just ${{ inputs.prepare-recipe }}
 
       - name: Lint

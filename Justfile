@@ -48,7 +48,7 @@ prepare-ci:
   #!/usr/bin/env bash
   set -euo pipefail
   (
-    cd "${GITHUB_WORKSPACE}/../codetracer-trace-format-nim"
+    cd "${WORKSPACE_ROOT:-${GITHUB_WORKSPACE}/..}/codetracer-trace-format-nim"
     nimble install -y stew results
   )
   just install-hooks "${REPROBUILD_REPRO:-$(command -v repro)}"
