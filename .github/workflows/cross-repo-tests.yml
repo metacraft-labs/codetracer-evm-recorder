@@ -179,7 +179,7 @@ jobs:
           # The direnv-nix-flake-overrides plugin overrides NIX_CONFIG, which
           # drops the access-tokens needed for private flake inputs.
           export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v direnv | tr '\n' ':' | sed 's/:$//')
-          FORCE=1 bash scripts/prepare-solidity-fixture.sh
+          FORCE=1 nix develop "$GITHUB_WORKSPACE" -c bash scripts/prepare-solidity-fixture.sh
 
       - name: Run Solidity smoke tests
         run: |

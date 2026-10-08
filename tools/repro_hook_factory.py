@@ -132,6 +132,30 @@ def terminal(argv: list[str], cwd: Path, env: dict[str, str]) -> str:
 from types import MappingProxyType
 
 
+def selected_derivation_body(decoded, drv):
+    if not isinstance(decoded, dict):
+        raise RuntimeError('package constructor JSON is not an object')
+    if 'version' in decoded or 'derivations' in decoded:
+        if set(decoded) != {'version', 'derivations'} or type(decoded['version']) is not int or decoded['version'] != 4:
+            raise RuntimeError('unsupported package constructor JSON envelope')
+        entries = decoded['derivations']
+        if not isinstance(entries, dict):
+            raise RuntimeError('package constructor derivations is not an object')
+        versioned = True
+    else:
+        entries = decoded
+        versioned = False
+    if len(entries) != 1:
+        raise RuntimeError('ambiguous package constructor')
+    name, body = next(iter(entries.items()))
+    if name not in (str(drv), drv.name) or not isinstance(body, dict):
+        raise RuntimeError('package constructor does not name the exact selected derivation')
+    expected_version = 4 if versioned else 3
+    if type(body.get('version')) is not int or body['version'] != expected_version:
+        raise RuntimeError('unsupported package constructor body version')
+    return body
+
+
 class SelectedFactory:
     def __init__(self, repro: Path, git: Path, owner: Path):
         self.owner = owner
@@ -204,9 +228,7 @@ class SelectedFactory:
             raise RuntimeError('selected complete package has no actual immutable constructor authority: ' + repr({'package': str(package), 'source': str(source), 'deriver': deriver_value}))
         self.principals[str(drv)] = principal(drv)
         decoded = json.loads(terminal([str(nix), 'derivation', 'show', str(drv)], owner, self.env))
-        if len(decoded) != 1:
-            raise RuntimeError('ambiguous package constructor')
-        body = next(iter(decoded.values()))
+        body = selected_derivation_body(decoded, drv)
         constructed_source = Path(body['env']['src'])
         if not str(constructed_source).startswith('/nix/store/'):
             raise RuntimeError('constructor source is outside immutable store authority')
