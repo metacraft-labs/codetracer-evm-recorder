@@ -4,6 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    reprobuild.url = "github:metacraft-labs/reprobuild/76659f5730ecf698b1963c656494d2cb66eb256d";
   };
 
   outputs =
@@ -11,6 +12,7 @@
       self,
       nixpkgs,
       flake-utils,
+      reprobuild,
     }:
     flake-utils.lib.eachDefaultSystem (
       system:
@@ -19,6 +21,10 @@
       in
       {
         devShells.default = pkgs.mkShell {
+          REPROBUILD_REPRO = "${reprobuild.packages.${system}.default}/bin/repro";
+          REPROBUILD_NATIVE_PACKAGE = "${reprobuild.packages.${system}.default}";
+          REPROBUILD_NATIVE_SOURCE = "${reprobuild.outPath}";
+
           packages = with pkgs; [
             # Solidity/EVM tools
             # Expected versions: solc 0.8.28+, foundry 1.1.0+ (forge, cast, anvil)
@@ -54,6 +60,9 @@
 
             # Just for the `just lint` / `just test` entry points.
             just
+
+            # Complete selected CLI package required by the existing hook installer.
+            reprobuild.packages.${system}.default
 
             # Native portable hook SDK; rules remain tracked in the owning repo.
             prek
