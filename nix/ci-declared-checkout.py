@@ -1,19 +1,31 @@
 #!/usr/bin/env python3
 """Create a genuine exact-event checkout with declared Git; no shell activation."""
-import hashlib,json,os,pathlib,stat,subprocess,sys,tempfile
+import hashlib,json,os,pathlib,re,stat,subprocess,sys,tempfile
 
 def require(ok,message):
     if not ok: raise RuntimeError(message)
 
 def main():
-    git,templates,source,destination,event,workspace=sys.argv[1:]
+    git,templates,source,destination,event,workspace,*options=sys.argv[1:]
+    require(len(options)<=1,"Unexpected namespace arguments")
+    namespace=options[0] if options else None
     git=pathlib.Path(git);templates=pathlib.Path(templates)
     require(git.is_absolute() and str(git).startswith("/nix/store/") and git.is_file() and os.access(git,os.X_OK),"Foreign declared Git")
     source=pathlib.Path(source).resolve(strict=True)
-    workspace=pathlib.Path(workspace).resolve(strict=True)
+    workspace_argument=pathlib.Path(workspace)
+    if namespace is not None:
+        require(re.fullmatch(r"evm-ci-[0-9]+-[0-9]+-[A-Za-z0-9][A-Za-z0-9_-]*",namespace) is not None,"Invalid job namespace")
+        require(workspace_argument.is_absolute() and workspace_argument.name==namespace,"Namespace path mismatch")
+        physical_parent=workspace_argument.parent.resolve(strict=True)
+        require(workspace_argument.parent==physical_parent and physical_parent==source.parent and not workspace_argument.parent.is_symlink(),"Foreign namespace parent")
+        parent_identity=(physical_parent.stat().st_dev,physical_parent.stat().st_ino)
+        require(not workspace_argument.exists() and not workspace_argument.is_symlink(),"Occupied job namespace")
+        workspace=physical_parent/namespace
+    else:
+        workspace=workspace_argument.resolve(strict=True)
     raw=pathlib.Path(destination)
     require(raw.is_absolute() and not raw.exists() and not raw.is_symlink(),"Existing destination")
-    parent=raw.parent.resolve(strict=True)
+    parent=raw.parent.resolve(strict=False) if namespace is not None else raw.parent.resolve(strict=True)
     require(parent==workspace and raw.name not in ("", ".", "..") and source!=raw,"Escaped or foreign destination")
     # GitHub setup-nix exports scoped credential GIT_CONFIG_* authority.
     # Local creator metadata/object transfer needs no network credential;
@@ -63,9 +75,19 @@ def main():
             body=run(["cat-file","blob",meta.split()[2].decode()],source)
             require(not body.startswith(b"version https://git-lfs.github.com/spec/v1\n"),"LFS requires explicit support")
     require(templates.is_absolute() and templates.is_dir(),"Missing declared templates")
+    if namespace is not None:
+        require((physical_parent.stat().st_dev,physical_parent.stat().st_ino)==parent_identity,"Namespace parent replaced")
+        require(not workspace.exists() and not workspace.is_symlink(),"Occupied job namespace")
+        os.mkdir(workspace,0o700)
+        namespace_owned=workspace.stat(follow_symlinks=False)
+        require(stat.S_ISDIR(namespace_owned.st_mode) and stat.S_IMODE(namespace_owned.st_mode)==0o700,"Unexpected job namespace mode")
     os.mkdir(raw,0o700)
     owned=os.stat(raw,follow_symlinks=False)
     def directory_guard():
+        if namespace is not None:
+            current=workspace.stat(follow_symlinks=False)
+            require(stat.S_ISDIR(current.st_mode) and stat.S_IMODE(current.st_mode)==0o700 and (current.st_dev,current.st_ino)==(namespace_owned.st_dev,namespace_owned.st_ino),"Job namespace replaced")
+            require((physical_parent.stat().st_dev,physical_parent.stat().st_ino)==parent_identity,"Namespace parent replaced")
         now=os.stat(raw,follow_symlinks=False)
         require((now.st_dev,now.st_ino)==(owned.st_dev,owned.st_ino) and stat.S_ISDIR(now.st_mode),"Destination directory replaced")
     # Owned partial checkout is intentionally retained on any failure.

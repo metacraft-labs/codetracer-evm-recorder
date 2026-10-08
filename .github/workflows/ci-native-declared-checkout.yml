@@ -62,6 +62,8 @@ jobs:
       matrix:
         runner: ${{ fromJSON(inputs.runners) }}
     runs-on: ${{ matrix.runner }}
+    env:
+      EVM_CI_NAMESPACE: evm-ci-${{ github.run_id }}-${{ github.run_attempt }}-native-${{ join(matrix.runner, '-') }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -86,14 +88,14 @@ jobs:
         working-directory: evm-ci-bootstrap
         shell: bash
         run: |
-          nix run .#prepare-ci-checkout -- "$PWD" "$GITHUB_WORKSPACE/codetracer-evm-recorder" "${{ github.sha }}" "$GITHUB_WORKSPACE"
+          nix run .#prepare-ci-checkout -- "$PWD" "$GITHUB_WORKSPACE/$EVM_CI_NAMESPACE/codetracer-evm-recorder" "${{ github.sha }}" "$GITHUB_WORKSPACE/$EVM_CI_NAMESPACE" "$EVM_CI_NAMESPACE"
 
       - name: Setup dev env
         uses: metacraft-labs/metacraft-github-actions/setup-dev-env@142b12da267e48d7322960aa77ec33d7761f9082
         with:
           env-flavor: ${{ inputs.env-flavor }}
-          consumer-directory: codetracer-evm-recorder
-          workspace-directory: .
+          consumer-directory: ${{ env.EVM_CI_NAMESPACE }}/codetracer-evm-recorder
+          workspace-directory: ${{ env.EVM_CI_NAMESPACE }}
           gh-token: ${{ steps.app-token.outputs.token }}
           substituters: ${{ vars.SUBSTITUTERS }}
           trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
@@ -103,17 +105,17 @@ jobs:
 
       - name: Prepare (recorder-specific)
         if: inputs.prepare-recipe != ''
-        working-directory: codetracer-evm-recorder
+        working-directory: ${{ env.EVM_CI_NAMESPACE }}/codetracer-evm-recorder
         env:
-          WORKSPACE_ROOT: ${{ github.workspace }}
+          WORKSPACE_ROOT: ${{ github.workspace }}/${{ env.EVM_CI_NAMESPACE }}
         run: dev-exec just ${{ inputs.prepare-recipe }}
 
       - name: Lint
-        working-directory: codetracer-evm-recorder
+        working-directory: ${{ env.EVM_CI_NAMESPACE }}/codetracer-evm-recorder
         run: dev-exec just lint
 
       - name: Test
-        working-directory: codetracer-evm-recorder
+        working-directory: ${{ env.EVM_CI_NAMESPACE }}/codetracer-evm-recorder
         run: dev-exec just test
 
       - name: Upload test logs on failure
@@ -121,7 +123,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: test-logs-${{ join(matrix.runner, '-') }}
-          path: codetracer-evm-recorder/${{ inputs.log-path }}
+          path: ${{ env.EVM_CI_NAMESPACE }}/codetracer-evm-recorder/${{ inputs.log-path }}
           retention-days: 1
 
       - name: Mirror test logs to S3 (non-blocking)
@@ -129,7 +131,7 @@ jobs:
         continue-on-error: true
         uses: metacraft-labs/metacraft-github-actions/mirror-artifacts-s3@dev
         with:
-          path: codetracer-evm-recorder/${{ inputs.log-path }}
+          path: ${{ env.EVM_CI_NAMESPACE }}/codetracer-evm-recorder/${{ inputs.log-path }}
           prefix: test-logs-${{ join(matrix.runner, '-') }}/${{ github.run_id }}
           endpoint: ${{ vars.MCL_S3_ARTIFACTS_ENDPOINT }}
           bucket: ${{ vars.MCL_S3_ARTIFACTS_BUCKET }}
