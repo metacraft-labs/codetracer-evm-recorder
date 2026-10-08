@@ -20,6 +20,16 @@
         pkgs = import nixpkgs { inherit system; };
       in
       {
+        apps.prepare-ci-checkout = {
+          type = "app";
+          program = toString (
+            pkgs.writeShellScript "prepare-ci-checkout" ''
+              exec ${pkgs.python3}/bin/python3 -I ${./nix/ci-declared-checkout.py} \
+                ${pkgs.git}/bin/git ${pkgs.git}/share/git-core/templates "$@"
+            ''
+          );
+        };
+
         devShells.default = pkgs.mkShell {
           REPROBUILD_REPRO = "${reprobuild.packages.${system}.default}/bin/repro";
           REPROBUILD_NATIVE_PACKAGE = "${reprobuild.packages.${system}.default}";
