@@ -51,8 +51,12 @@ jobs:
             arch: arm64
             runner: [self-hosted, windows, arm64]
     runs-on: ${{ matrix.runner }}
+    env:
+      EVM_CI_NAMESPACE: evm-ci-${{ github.run_id }}-${{ github.run_attempt }}-typed-${{ matrix.os }}-${{ matrix.arch }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: ${{ matrix.os != 'windows' && 'evm-ci-bootstrap' || '.' }}
 
       # Mint a GitHub App installation token via the CI Token Provider
       # app so the reprobuild flake/sibling steps can clone private
@@ -71,10 +75,27 @@ jobs:
           private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
           owner: metacraft-labs
 
+      - name: Setup declared Nix before Unix shell activation
+        if: matrix.os != 'windows'
+        uses: metacraft-labs/metacraft-github-actions/setup-nix@3fcbb26dd920adf6ccc64a87c6d24797ab0b5d94
+        with:
+          substituters: ${{ vars.SUBSTITUTERS }}
+          trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
+          gh-token: ${{ steps.ci_token.outputs.token }}
+
+      - name: Create declared Git exact-event Unix checkout
+        if: matrix.os != 'windows'
+        working-directory: evm-ci-bootstrap
+        shell: bash
+        run: |
+          nix run .#prepare-ci-checkout -- "$PWD" "$GITHUB_WORKSPACE/$EVM_CI_NAMESPACE/codetracer-evm-recorder" "${{ github.sha }}" "$GITHUB_WORKSPACE/$EVM_CI_NAMESPACE" "$EVM_CI_NAMESPACE"
+
       - name: Setup dev env (reprobuild flavor)
-        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@3fcbb26dd920adf6ccc64a87c6d24797ab0b5d94
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@440187b477282220f1c4a8432b77b6d06f2a7146
         with:
           env-flavor: reprobuild
+          consumer-directory: ${{ matrix.os != 'windows' && format('{0}/codetracer-evm-recorder', env.EVM_CI_NAMESPACE) || '.' }}
+          workspace-directory: ${{ matrix.os != 'windows' && env.EVM_CI_NAMESPACE || '.' }}
           repro-from-source: "true"
           repro-build-pin: "76659f5730ecf698b1963c656494d2cb66eb256d"
           gh-token: ${{ steps.ci_token.outputs.token }}
@@ -85,6 +106,7 @@ jobs:
           attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
 
       - name: repro build
+        working-directory: ${{ matrix.os != 'windows' && format('{0}/codetracer-evm-recorder', env.EVM_CI_NAMESPACE) || '.' }}
         # Builds the conventional `build` collection declared in
         # `repro.nim`. Verifies the primary shipping artefact (the
         # recorder binary or extension) materialises through the
@@ -92,16 +114,19 @@ jobs:
         run: dev-exec repro build ${{ matrix.os == 'linux' && '--tool-provisioning=nix' || '' }}
 
       - name: repro test
+        working-directory: ${{ matrix.os != 'windows' && format('{0}/codetracer-evm-recorder', env.EVM_CI_NAMESPACE) || '.' }}
         # Materialises the `test` collection.
         run: dev-exec repro test ${{ matrix.os == 'linux' && '--tool-provisioning=nix' || '' }}
 
       - name: just build (cross-check)
+        working-directory: ${{ matrix.os != 'windows' && format('{0}/codetracer-evm-recorder', env.EVM_CI_NAMESPACE) || '.' }}
         # Re-runs the legacy `just build` path inside the same env so
         # we catch silent divergences between `repro build` outputs
         # and what the dev shell + Justfile produce today.
         run: dev-exec just build
 
       - name: just test (cross-check)
+        working-directory: ${{ matrix.os != 'windows' && format('{0}/codetracer-evm-recorder', env.EVM_CI_NAMESPACE) || '.' }}
         run: dev-exec just test
 
       # Diagnostics on failure. Three things below are load-bearing:
@@ -139,8 +164,8 @@ jobs:
         with:
           name: reprobuild-logs-${{ matrix.os }}-${{ matrix.arch }}
           path: |
-            .repro/build/*/build-failure-report.json
-            .repro/build/*/build-engine-cache/actions/
+            ${{ matrix.os != 'windows' && format('{0}/codetracer-evm-recorder/', env.EVM_CI_NAMESPACE) || '' }}.repro/build/*/build-failure-report.json
+            ${{ matrix.os != 'windows' && format('{0}/codetracer-evm-recorder/', env.EVM_CI_NAMESPACE) || '' }}.repro/build/*/build-engine-cache/actions/
           include-hidden-files: true
           retention-days: 7
           if-no-files-found: warn
