@@ -23,23 +23,23 @@ name: publish-rpm
 
 on:
   push:
-    tags: ['v*']
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       version:
-        description: 'Recorder semver to publish'
+        description: "Recorder semver to publish"
         required: true
-        default: '0.1.0'
+        default: "0.1.0"
       arch:
-        description: 'Target architecture (x86_64 / aarch64)'
+        description: "Target architecture (x86_64 / aarch64)"
         required: true
-        default: 'x86_64'
+        default: "x86_64"
         type: choice
         options:
           - x86_64
           - aarch64
       dry_run:
-        description: 'Build the .rpm but skip the upload'
+        description: "Build the .rpm but skip the upload"
         required: false
         type: boolean
         default: false
@@ -124,7 +124,7 @@ jobs:
         uses: crazy-max/ghaction-import-gpg@v6
         with:
           gpg_private_key: ${{ secrets.CODETRACER_AUR_GPG_PRIVATE_KEY }}
-          passphrase:      ${{ secrets.CODETRACER_AUR_GPG_PRIVATE_KEY_PASS }}
+          passphrase: ${{ secrets.CODETRACER_AUR_GPG_PRIVATE_KEY_PASS }}
 
       - name: Sign .rpm
         if: ${{ inputs.dry_run == false }}
@@ -136,9 +136,9 @@ jobs:
       - name: Upload .rpm to rpm.codetracer.com (R2)
         if: ${{ inputs.dry_run == false }}
         env:
-          AWS_ACCESS_KEY_ID:     ${{ secrets.CODETRACER_RPM_BUCKET_ACCESS_KEY_ID }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.CODETRACER_RPM_BUCKET_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.CODETRACER_RPM_ACCESS_KEY }}
-          AWS_SESSION_TOKEN:     ${{ secrets.CODETRACER_RPM_BUCKET_TOKEN }}
+          AWS_SESSION_TOKEN: ${{ secrets.CODETRACER_RPM_BUCKET_TOKEN }}
         run: |
           set -euo pipefail
           if [[ -z "$AWS_ACCESS_KEY_ID" ]]; then

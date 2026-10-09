@@ -4,6 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    reprobuild.url = "github:metacraft-labs/reprobuild/76659f5730ecf698b1963c656494d2cb66eb256d";
   };
 
   outputs =
@@ -11,6 +12,7 @@
       self,
       nixpkgs,
       flake-utils,
+      reprobuild,
     }:
     flake-utils.lib.eachDefaultSystem (
       system:
@@ -18,7 +20,24 @@
         pkgs = import nixpkgs { inherit system; };
       in
       {
+        apps.prepare-ci-checkout = {
+          type = "app";
+          program = toString (
+            pkgs.writeShellScript "prepare-ci-checkout" ''
+              exec ${pkgs.python3}/bin/python3 -I ${./nix/ci-declared-checkout.py} \
+                ${pkgs.git}/bin/git ${pkgs.git}/share/git-core/templates "$@"
+            ''
+          );
+        };
+
         devShells.default = pkgs.mkShell {
+          REPROBUILD_REPRO = "${reprobuild.packages.${system}.default}/bin/repro";
+          REPROBUILD_NATIVE_PACKAGE = "${reprobuild.packages.${system}.default}";
+          REPROBUILD_NATIVE_SOURCE = "${reprobuild.outPath}";
+
+          EVM_CI_GIT = "${pkgs.git}/bin/git";
+          EVM_CI_DIRENV = "${pkgs.direnv}/bin/direnv";
+          EVM_CI_PYTHON = "${pkgs.python3}/bin/python3";
           packages = with pkgs; [
             # Solidity/EVM tools
             # Expected versions: solc 0.8.28+, foundry 1.1.0+ (forge, cast, anvil)
@@ -54,6 +73,18 @@
 
             # Just for the `just lint` / `just test` entry points.
             just
+
+            # Complete selected CLI package required by the existing hook installer.
+            reprobuild.packages.${system}.default
+
+            # Native portable hook SDK; rules remain tracked in the owning repo.
+            prek
+            uv
+            python3
+            editorconfig-checker
+            nixfmt
+            nodePackages.prettier
+            opentofu
           ];
 
           # `cargo <subcommand>` looks for `cargo-<subcommand>` in
@@ -70,6 +101,16 @@
           # credentials when present: the download cache is shared, and only
           # the proxy directory is left behind.
           shellHook = ''
+            _ct_hook_root="$(${pkgs.git}/bin/git rev-parse --show-toplevel 2>/dev/null || true)"
+            if [ -n "$_ct_hook_root" ] && [ "$PWD" = "$_ct_hook_root" ] \
+              && [ -f "$_ct_hook_root/flake.nix" ] \
+              && [ "$(${pkgs.coreutils}/bin/sha256sum "$_ct_hook_root/flake.nix" | ${pkgs.coreutils}/bin/cut -d' ' -f1)" = "${builtins.hashFile "sha256" ./flake.nix}" ]; then
+              _ct_matching_repro="''${REPROBUILD_REPRO:-$(command -v repro)}"
+              ${pkgs.python3}/bin/python3 tools/install-canonical-hooks.py --repro "$_ct_matching_repro" --bootstrap-managed || return $?
+              ${pkgs.python3}/bin/python3 tools/install-canonical-hooks.py --repro "$_ct_matching_repro" || return $?
+              unset _ct_matching_repro
+            fi
+            unset _ct_hook_root
             _ct_real_cargo_home="''${CARGO_HOME:-$HOME/.cargo}"
             _ct_cargo_home="''${XDG_CACHE_HOME:-$HOME/.cache}/codetracer-evm-recorder/cargo-home"
             if [ "$_ct_real_cargo_home" != "$_ct_cargo_home" ]; then

@@ -140,10 +140,8 @@ fn test_help_mentions_ct_print() {
 /// Real recorder run — requires solc + anvil on PATH (Nix dev shell).
 #[test]
 fn test_env_out_dir_used_when_flag_omitted() {
-    if !has_solc() || !has_anvil() {
-        eprintln!("skipping: solc/anvil unavailable");
-        return;
-    }
+    assert!(has_solc(), "solc required on PATH");
+    assert!(has_anvil(), "anvil required on PATH");
 
     let tmp_dir = tempfile::tempdir().expect("tempdir");
     let env_out_dir = tmp_dir.path().join("via-env");
@@ -222,10 +220,8 @@ fn test_env_disabled_skips_recording() {
 /// deprecation note.  See `Recorder-CLI-Conventions.md` §3.
 #[test]
 fn test_trace_dir_alias_still_works_with_deprecation_note() {
-    if !has_solc() || !has_anvil() {
-        eprintln!("skipping: solc/anvil unavailable");
-        return;
-    }
+    assert!(has_solc(), "solc required on PATH");
+    assert!(has_anvil(), "anvil required on PATH");
 
     let tmp_dir = tempfile::tempdir().expect("tempdir");
     let out_dir = tmp_dir.path().join("legacy-trace-dir");
@@ -316,20 +312,15 @@ fn test_trace_dir_alias_still_works_with_deprecation_note() {
 /// with every CBOR `ValueRecord` decoded to a structured form.
 #[test]
 fn test_recorded_trace_via_ct_print_json() {
-    if !has_solc() || !has_anvil() {
-        eprintln!("skipping: solc/anvil unavailable");
-        return;
-    }
+    assert!(has_solc(), "solc required on PATH");
+    assert!(has_anvil(), "anvil required on PATH");
 
     let ct_print = ct_print_path();
-    if !ct_print.exists() {
-        eprintln!(
-            "SKIP: ct-print not found at {} — only available within the \
-             metacraft workspace where codetracer-trace-format-nim is a sibling.",
-            ct_print.display()
-        );
-        return;
-    }
+    assert!(
+        ct_print.is_file(),
+        "ct-print required at {}",
+        ct_print.display()
+    );
 
     let tmp_dir = tempfile::tempdir().expect("tempdir");
     let out_dir = tmp_dir.path().join("traces");
@@ -447,10 +438,7 @@ fn test_recorded_trace_via_ct_print_json() {
     // The EVM recorder resolves internal Solidity calls' function names
     // via the AST lookahead from `AUDIT-CTFS-2026-05.md` §3, so `add`
     // (the only internal Solidity helper called from `compute()`) lands
-    // in the function table as a bare identifier.  The other two
-    // entries are solc-generated dispatcher / fallback frames whose
-    // names cannot be recovered today — they surface as
-    // `fn_at_pc_<offset>` placeholders.
+    // in the function table as a bare identifier.
     let functions: Vec<&str> = doc["functions"]
         .as_array()
         .expect("functions array")
@@ -489,19 +477,7 @@ fn test_recorded_trace_via_ct_print_json() {
     // 33 = the exact column-aware step count for this fixture; the
     // pre-column-aware line-only count was 15 (which equals the number
     // of distinct source *lines* visited — collapse consecutive
-    // same-line steps and 33 → 15).  4 call_entry events are
-    // emitted: the external `compute()` dispatcher frame
-    // (fn_at_pc_384), the internal `add` invocation (fn_at_pc_314),
-    // a second `fn_at_pc_314` frame for the post-call return path
-    // (same name → same interned function_id), and the absorbed
-    // `add` toplevel frame closed by `finalize()`.  Pre-2026-05 the
-    // FFI keyed function IDs on (name, path, line) while the
-    // multi-stream interning keyed on name alone, so the post-call
-    // frame above used a function_id past the end of the function
-    // table and surfaced as `<unresolved>`.  After the FFI fix
-    // (`codetracer-trace-format-nim/src/codetracer_trace_writer_ffi.nim::trace_writer_ensure_function_id`
-    // keys on name only), every emitted call resolves to a known
-    // function entry — the test pin is now strictly stronger.
+    // same-line steps and 33 → 15).
     // These are stable properties of the canonical fixture under the
     // current EVM recorder — if they change, that's a real regression
     // to investigate, not a flake.
@@ -512,86 +488,36 @@ fn test_recorded_trace_via_ct_print_json() {
         "expected 33 column-aware step events for FlowTest.sol \
          (one per distinct (line, column)); counts={counts}",
     );
-    // `<toplevel>` is one of the five: `start` opens the call tree's root
-    // frame at depth 0 before the recorder makes any call of its own
-    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    // `compute()` makes one call, to `add`.  `compute` itself is absorbed
+    // into `<toplevel>`, the call tree's root that `start` opens at depth
+    // 0 (trace-events.md, "Recorder Integration — Starting a Recording"),
+    // and the checked arithmetic is a jump into compiler-generated code,
+    // not a call.
     assert_eq!(
         counts["calls"].as_u64(),
-        Some(5),
-        "expected 5 call events (<toplevel> + dispatcher + add + repeated \
-         post-call dispatcher + absorbed add); counts={counts}",
+        Some(2),
+        "expected 2 call events (<toplevel> + add); counts={counts}",
     );
 
     let events = doc["events"].as_array().expect("events array");
 
-    // ----- Call sequence: 5 frames, all must resolve ------------------
-    // The recorder emits 5 call_entry events:
-    //   0. `<toplevel>` — the call tree's root, opened by `start` at depth
-    //      0 before the recorder makes any call of its own
-    //      (trace-events.md, "Recorder Integration — Starting a Recording").
-    //   1. fn_at_pc_384 — solc dispatcher / external `compute()` frame
-    //   2. fn_at_pc_314 — solc internal jump (the AST-aware fix in
-    //      `AUDIT-CTFS-2026-05.md` §3 names this `add` in the function
-    //      table even though the call's resolved name on the call
-    //      record itself can lag); tracked there as a follow-up.
-    //   3. A second fn_at_pc_314 frame for the post-call return path.
-    //      Pre-FFI-fix this surfaced as `<unresolved>` because the FFI
-    //      handed out a function_id past the function table; the May-12
-    //      fix to `trace_writer_ensure_function_id` (key on name only)
-    //      makes this resolve to the same `fn_at_pc_314` interned slot.
-    //   4. `add` — the absorbed-into-toplevel `add` invocation that the
-    //      recorder closes from `finalize()`.
-    let call_entries: Vec<&serde_json::Value> = events
+    // ----- Call sequence: exactly the program's calls -----------------
+    let call_entries: Vec<&str> = events
         .iter()
         .filter(|e| e["kind"] == "call_entry")
+        .map(|e| e["function"].as_str().unwrap_or("<unresolved>"))
         .collect();
     assert_eq!(
-        call_entries.len(),
-        5,
-        "expected exactly 5 call_entry events; got {:?}",
-        call_entries
-            .iter()
-            .map(|e| e["function"].as_str().unwrap_or("<unresolved>"))
-            .collect::<Vec<_>>()
+        call_entries,
+        vec!["<toplevel>", "add"],
+        "call_entry sequence"
     );
-    // After the May-12 FFI key-on-name-only fix, EVERY call_entry must
-    // carry a resolvable function name — there should be no
-    // `<unresolved>` frames left.  This is strictly stronger than the
-    // pre-fix pin which only required at least one resolved frame.
-    let unresolved: Vec<usize> = call_entries
+    let call_exits: Vec<&str> = events
         .iter()
-        .enumerate()
-        .filter_map(|(i, e)| {
-            if e.get("function").and_then(|v| v.as_str()).is_none() {
-                Some(i)
-            } else {
-                None
-            }
-        })
+        .filter(|e| e["kind"] == "call_exit")
+        .map(|e| e["function"].as_str().unwrap_or("<unresolved>"))
         .collect();
-    assert!(
-        unresolved.is_empty(),
-        "every call_entry must resolve to a known function after the \
-         FFI key-on-name-only fix; unresolved frame indexes={:?} \
-         frames={:?}",
-        unresolved,
-        call_entries
-            .iter()
-            .map(|e| e["function"].as_str().unwrap_or("<unresolved>"))
-            .collect::<Vec<_>>()
-    );
-    // At least one of the resolved frames must be `fn_at_pc_*`
-    // (solc dispatcher) — verifies the lookahead path runs without
-    // crashing even if AST resolution doesn't kick in for the
-    // outermost frame.
-    let resolved_frames: Vec<&str> = call_entries
-        .iter()
-        .filter_map(|e| e["function"].as_str())
-        .collect();
-    assert!(
-        !resolved_frames.is_empty(),
-        "at least one call_entry must carry a resolvable function name; got 0"
-    );
+    assert_eq!(call_exits, vec!["add", "<toplevel>"], "call_exit sequence");
 
     // ----- Strict ValueRecord variant invariant -----------------------
     // Every step var that surfaces must carry a `value.kind` field.

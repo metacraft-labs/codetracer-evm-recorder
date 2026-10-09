@@ -16,13 +16,13 @@ name: publish-scoop
 
 on:
   push:
-    tags: ['v*']
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       version:
-        description: 'Recorder semver that was released to GitHub'
+        description: "Recorder semver that was released to GitHub"
         required: true
-        default: '0.1.0'
+        default: "0.1.0"
 
 # Least privilege. The only GITHUB_TOKEN use in this workflow is the
 # release-assets preflight gate below, which only reads releases; the

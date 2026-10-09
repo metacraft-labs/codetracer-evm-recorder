@@ -4,7 +4,7 @@
 # extension's Solidity DAP and GUI tests.
 #
 # Workspace layout (sibling repos cloned alongside this checkout):
-#   $GITHUB_WORKSPACE/../
+#   $GITHUB_WORKSPACE/$EVM_CI_NAMESPACE/
 #     codetracer-evm-recorder/                      <-- this repo (checked out)
 #     codetracer/                    <-- cloned (for ct binary)
 #     codetracer-vscode-extension/   <-- cloned (test harness + fixtures)
@@ -20,13 +20,13 @@ on:
   workflow_dispatch:
     inputs:
       codetracer_ref:
-        description: 'Git ref for codetracer repo'
+        description: "Git ref for codetracer repo"
         required: false
-        default: ''
+        default: ""
       vscode_extension_ref:
-        description: 'Git ref for codetracer-vscode-extension repo'
+        description: "Git ref for codetracer-vscode-extension repo"
         required: false
-        default: ''
+        default: ""
 
   repository_dispatch:
     types: [cross-repo-test]
@@ -43,6 +43,8 @@ jobs:
   wdio-integration:
     runs-on: [self-hosted, nixos]
 
+    env:
+      EVM_CI_NAMESPACE: evm-ci-${{ github.run_id }}-${{ github.run_attempt }}-wdio-linux-x64
     steps:
       - name: Generate CI token
         id: app-token
@@ -70,15 +72,32 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          path: evm-ci-bootstrap
+
+      - name: Setup declared Nix before shell activation
+        uses: metacraft-labs/metacraft-github-actions/setup-nix@3fcbb26dd920adf6ccc64a87c6d24797ab0b5d94
+        with:
+          substituters: ${{ vars.SUBSTITUTERS }}
+          trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
+          gh-token: ${{ steps.app-token.outputs.token }}
+
+      - name: Create declared Git exact-event checkout
+        working-directory: evm-ci-bootstrap
+        shell: bash
+        run: |
+          nix run .#prepare-ci-checkout -- "$PWD" "$GITHUB_WORKSPACE/$EVM_CI_NAMESPACE/codetracer-evm-recorder" "${{ github.sha }}" "$GITHUB_WORKSPACE/$EVM_CI_NAMESPACE" "$EVM_CI_NAMESPACE"
 
       - name: Setup dev env
         # Installs nix and clones the cross-repo siblings adjacent to this
         # checkout at workspace-lock-pinned revisions. workflow_dispatch /
         # repository_dispatch ref inputs override the locked revision for
         # codetracer + the extension (empty => lock).
-        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@142b12da267e48d7322960aa77ec33d7761f9082
         with:
           env-flavor: nix
+          consumer-directory: ${{ env.EVM_CI_NAMESPACE }}/codetracer-evm-recorder
+          workspace-directory: ${{ env.EVM_CI_NAMESPACE }}
           gh-token: ${{ steps.app-token.outputs.token }}
           substituters: ${{ vars.SUBSTITUTERS }}
           trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
@@ -99,14 +118,14 @@ jobs:
         # sibling (already cloned at the lock-pinned revision by
         # setup-dev-env) into the expected path before nix build.
         run: |
-          SRC="$GITHUB_WORKSPACE/../codetracer-trace-format"
-          DEST="$GITHUB_WORKSPACE/../codetracer/libs/codetracer-trace-format"
+          SRC="$GITHUB_WORKSPACE/$EVM_CI_NAMESPACE/codetracer-trace-format"
+          DEST="$GITHUB_WORKSPACE/$EVM_CI_NAMESPACE/codetracer/libs/codetracer-trace-format"
           rm -rf "$DEST"
           cp -a "$SRC" "$DEST"
 
       - name: Build codetracer
         run: |
-          cd "$GITHUB_WORKSPACE/../codetracer"
+          cd "$GITHUB_WORKSPACE/$EVM_CI_NAMESPACE/codetracer"
           # Override BOTH trace-format AND trace-format-nim against the
           # workflow-cloned siblings so the Rust wrapper and the Nim FFI
           # advance together.  Without the -nim override, codetracer's
@@ -124,7 +143,7 @@ jobs:
           # the WDIO smoke ``ct/event-load`` request surfaces.  Mirror
           # Solana's fix (a43e8f6).
           OVERRIDE="--override-input codetracer-trace-format path:./libs/codetracer-trace-format \
-                    --override-input codetracer-trace-format-nim path:$GITHUB_WORKSPACE/../codetracer-trace-format-nim"
+                    --override-input codetracer-trace-format-nim path:$GITHUB_WORKSPACE/$EVM_CI_NAMESPACE/codetracer-trace-format-nim"
           # Force-skip every non-default substituter so nix fetches
           # the noir source from origin and computes the correct hash
           # itself. cache.nixos.org alone is sufficient for the
@@ -149,57 +168,57 @@ jobs:
 
       - name: Install extension dependencies
         run: |
-          cd "$GITHUB_WORKSPACE/../codetracer-vscode-extension"
+          cd "$GITHUB_WORKSPACE/$EVM_CI_NAMESPACE/codetracer-vscode-extension"
           nix develop -c just install
 
       - name: Compile extension TypeScript
         run: |
-          cd "$GITHUB_WORKSPACE/../codetracer-vscode-extension"
+          cd "$GITHUB_WORKSPACE/$EVM_CI_NAMESPACE/codetracer-vscode-extension"
           nix develop -c just compile-ts
 
       - name: Restore Nim-compiled ct_vscode.js
         run: |
-          cd "$GITHUB_WORKSPACE/../codetracer-vscode-extension"
+          cd "$GITHUB_WORKSPACE/$EVM_CI_NAMESPACE/codetracer-vscode-extension"
           if [ -f media/ct_vscode.js ]; then
             cp media/ct_vscode.js out/ct_vscode.js
           fi
 
       - name: Patch runnablePath for CI
         run: |
-          CT_BIN="$GITHUB_WORKSPACE/../codetracer/combined-bin/ct"
-          SETTINGS="$GITHUB_WORKSPACE/../codetracer-vscode-extension/test/wdio/projects/stylus-test/.vscode/settings.json"
+          CT_BIN="$GITHUB_WORKSPACE/$EVM_CI_NAMESPACE/codetracer/combined-bin/ct"
+          SETTINGS="$GITHUB_WORKSPACE/$EVM_CI_NAMESPACE/codetracer-vscode-extension/test/wdio/projects/stylus-test/.vscode/settings.json"
           mkdir -p "$(dirname "$SETTINGS")"
           echo "{\"codetracer.runnablePath\": \"$CT_BIN\"}" > "$SETTINGS"
           echo "Patched runnablePath to: $CT_BIN"
 
       - name: Record Solidity trace fixture
         run: |
-          cd "$GITHUB_WORKSPACE/../codetracer-vscode-extension"
+          cd "$GITHUB_WORKSPACE/$EVM_CI_NAMESPACE/codetracer-vscode-extension"
           # Strip direnv from PATH so recorder_exec uses 'nix develop' directly.
           # The direnv-nix-flake-overrides plugin overrides NIX_CONFIG, which
           # drops the access-tokens needed for private flake inputs.
           export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v direnv | tr '\n' ':' | sed 's/:$//')
-          FORCE=1 bash scripts/prepare-solidity-fixture.sh
+          FORCE=1 nix develop "$GITHUB_WORKSPACE/$EVM_CI_NAMESPACE/codetracer-evm-recorder" -c bash scripts/prepare-solidity-fixture.sh
 
       - name: Run Solidity smoke tests
         run: |
-          cd "$GITHUB_WORKSPACE/../codetracer-vscode-extension"
+          cd "$GITHUB_WORKSPACE/$EVM_CI_NAMESPACE/codetracer-vscode-extension"
           nix develop -c just _xvfb-run \
             "npx wdio run wdio.conf.ts --spec test/wdio/specs/smoke/solidity.e2e.ts"
 
       - name: Run Solidity deep tests
         run: |
-          cd "$GITHUB_WORKSPACE/../codetracer-vscode-extension"
+          cd "$GITHUB_WORKSPACE/$EVM_CI_NAMESPACE/codetracer-vscode-extension"
           nix develop -c just _xvfb-run \
             "npx wdio run wdio.conf.ts --spec test/wdio/specs/deep/solidity-storage.e2e.ts"
 
       - name: Collect diagnostics on failure
         if: failure()
         run: |
-          EXT_DIAG="$GITHUB_WORKSPACE/../codetracer-vscode-extension/test/wdio/diagnostics"
+          EXT_DIAG="$GITHUB_WORKSPACE/$EVM_CI_NAMESPACE/codetracer-vscode-extension/test/wdio/diagnostics"
           if [ -d "$EXT_DIAG" ]; then
-            mkdir -p "$GITHUB_WORKSPACE/wdio-diagnostics"
-            cp -r "$EXT_DIAG"/* "$GITHUB_WORKSPACE/wdio-diagnostics/"
+            mkdir -p "$GITHUB_WORKSPACE/$EVM_CI_NAMESPACE/wdio-diagnostics"
+            cp -r "$EXT_DIAG"/* "$GITHUB_WORKSPACE/$EVM_CI_NAMESPACE/wdio-diagnostics/"
           fi
 
       - name: Upload diagnostics on failure
@@ -207,6 +226,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: wdio-solidity-diagnostics
-          path: wdio-diagnostics/
+          path: ${{ env.EVM_CI_NAMESPACE }}/wdio-diagnostics/
           retention-days: 7
           if-no-files-found: ignore
