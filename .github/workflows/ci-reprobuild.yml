@@ -118,6 +118,11 @@ jobs:
         # Materialises the `test` collection.
         run: dev-exec repro test ${{ matrix.os == 'linux' && '--tool-provisioning=nix' || '' }}
 
+      - name: Authorize declared Nim decoder environment
+        if: matrix.os != 'windows'
+        working-directory: ${{ format('{0}/codetracer-evm-recorder', env.EVM_CI_NAMESPACE) }}
+        run: dev-exec bash -c 'exec "${EVM_CI_PYTHON:?declared CI Python missing}" -B -I tools/allow-declared-nim-env.py'
+
       - name: just build (cross-check)
         working-directory: ${{ matrix.os != 'windows' && format('{0}/codetracer-evm-recorder', env.EVM_CI_NAMESPACE) || '.' }}
         # Re-runs the legacy `just build` path inside the same env so
