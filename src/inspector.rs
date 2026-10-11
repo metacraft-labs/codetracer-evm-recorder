@@ -95,12 +95,14 @@ impl ExecutionData {
 /// Inspector that records every EVM execution event into an `ExecutionData`
 /// buffer for post-execution processing.
 ///
-/// Usage:
-/// ```ignore
-/// let mut inspector = CodeTracerInspector::new();
-/// // ... run EVM with this inspector ...
+/// Collection API usage. Running an actual EVM requires host integration
+/// that installs this inspector on the execution context.
+/// ```
+/// use codetracer_evm_recorder::inspector::CodeTracerInspector;
+/// let inspector = CodeTracerInspector::new();
 /// let data = inspector.into_execution_data();
-/// // process data.steps, data.calls, data.logs etc.
+/// assert!(data.is_empty());
+/// assert_eq!(data.step_count(), 0);
 /// ```
 #[derive(Debug, Default)]
 pub struct CodeTracerInspector {

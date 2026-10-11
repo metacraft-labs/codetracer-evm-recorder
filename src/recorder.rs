@@ -22,9 +22,6 @@ const INTERNAL_CALL_LOOKAHEAD: usize = 5;
 /// closes the same thing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum JumpFrame {
-    /// The dispatcher's jump into the entry-point function, folded into
-    /// `<toplevel>` rather than recorded as a call.
-    Absorbed,
     /// A jump into a user function, recorded as a call.
     User,
     /// A jump into, or within, code solc generated (checked arithmetic,
@@ -80,7 +77,7 @@ fn resync_tracker_after_jump(
 }
 
 /// Close the frame an `[out]` jump returns from. A user call gets its
-/// return; an absorbed entry point and generated code have none. An `[out]`
+/// return; generated code has none. An `[out]`
 /// with no open frame is recorded as a return, as before frames were tracked.
 ///
 /// Returning from generated code leaves the tracker alone: it followed the
@@ -94,7 +91,6 @@ fn close_jump_frame(
 ) {
     match frames.pop() {
         Some(JumpFrame::Generated) => {}
-        Some(JumpFrame::Absorbed) => resync_tracker_after_jump(tracker, stack_before_jump),
         Some(JumpFrame::User) | None => {
             let ret_val = ValueRecord::Raw {
                 r: "0x".to_string(),
@@ -605,20 +601,11 @@ impl EvmRecorder {
         let mut prev_line: Option<(i32, u32, u32)> = None; // (file_index, line, column)
         let mut prev_depth: u64 = 1;
 
-        // --- First internal call merging ---
-        // The Solidity compiler's function dispatcher (contract preamble) runs
-        // before the actual user function. `TraceWriter::start()` opens a
-        // `<toplevel>` call at depth 0, and the first JumpType::Into from the
-        // dispatcher into the target function would normally push depth to 1.
-        //
-        // This is problematic because the db-backend's "step over" (next)
-        // skips all steps at deeper call depths. If the user function body
-        // is at depth 1, stepping from the entry point skips the ENTIRE body.
-        //
-        // Fix: absorb the first JumpType::Into into `<toplevel>` by not
-        // emitting a register_call for it, and skip the matching OutOf return.
-        // This keeps the target function's steps at depth 0.
-        let mut first_internal_call_absorbed = false;
+        // `start` opens the format's literal <toplevel> root. A genuine
+        // dispatcher jump into a user entry function opens its own call,
+        // using the same AST identity, argument and balanced-return path as
+        // subsequent user calls. Replay starts inside that recorded entry.
+        let mut dispatcher_entry_seen = false;
         // Per EVM call depth (depth 1 = index 0), one entry per `[in]` jump
         // still open, so each `[out]` closes what its `[in]` opened (see
         // `JumpFrame`). A contract's jumps never pair with another's.
@@ -904,49 +891,6 @@ impl EvmRecorder {
                                 solidity_ast,
                             ) {
                                 jump_frames.push(JumpFrame::Generated);
-                            } else if !first_internal_call_absorbed {
-                                // Absorb the first internal call (dispatcher → target
-                                // function) into <toplevel>. This keeps the target
-                                // function's steps at depth 0 so step-over works.
-                                first_internal_call_absorbed = true;
-                                jump_frames.push(JumpFrame::Absorbed);
-                                // Start the entry point with no labelled slots,
-                                // but as deep as the concrete stack it runs on:
-                                // slots are indexed from the stack bottom, so an
-                                // empty symbolic stack would read every local from
-                                // the wrong slot.
-                                resync_tracker_after_jump(tracker, log.stack.as_deref());
-
-                                // Even though we don't emit a `register_call`
-                                // for the absorbed dispatcher → entry-point
-                                // jump, we still want the entry-point function
-                                // (e.g. `run`) to appear in the trace's
-                                // `functions` table.  This is what the
-                                // recorder-test-requirements §1 strict
-                                // assertion "function table includes the
-                                // entry-point name" expects (see
-                                // `test_nested_calls_function_names_resolved`).
-                                if let Some(target_fn) = resolve_internal_call_target(
-                                    struct_logs,
-                                    i,
-                                    source_map,
-                                    &pc_to_idx,
-                                    solidity_ast,
-                                ) {
-                                    let fn_path = source_paths
-                                        .get(file_idx as usize)
-                                        .copied()
-                                        .unwrap_or(main_path);
-                                    let display_name = solidity_ast
-                                        .map(|ast| ast.qualified_function_name(target_fn))
-                                        .unwrap_or_else(|| target_fn.name.clone());
-                                    let _ = TraceWriter::ensure_function_id(
-                                        &mut *self.writer,
-                                        &display_name,
-                                        fn_path,
-                                        Line(line as i64),
-                                    );
-                                }
                             } else {
                                 jump_frames.push(JumpFrame::User);
 
@@ -1035,11 +979,21 @@ impl EvmRecorder {
                                     1,
                                 );
                                 TraceWriter::register_call(&mut *self.writer, fn_id, vec![]);
+                                // The first genuine dispatcher-to-user transition
+                                // supplies entry authority. Unresolved first targets
+                                // never make a later nested call masquerade as entry.
+                                if !dispatcher_entry_seen {
+                                    dispatcher_entry_seen = true;
+                                    if target_fn.is_some() {
+                                        TraceWriter::mark_current_call_as_entry(&mut *self.writer)
+                                            .map_err(|error| eyre::eyre!("{error}"))?;
+                                    }
+                                }
                             }
                         }
                         JumpType::OutOf => {
-                            // The return from the absorbed entry point gets no
-                            // register_return: finalize() closes <toplevel>.
+                            // Close the genuine user entry or internal frame;
+                            // finalization separately closes <toplevel>.
                             close_jump_frame(
                                 jump_frames,
                                 &mut *self.writer,
