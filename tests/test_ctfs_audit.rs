@@ -250,15 +250,16 @@ async fn audit_ctfs_internal_call_emitted() {
 }
 
 /// Audit (c): EVM LOG opcodes route through register_special_event with the
-/// canonical `EventLogKind::EvmEvent` kind (numeric 13) — not Write (0) or
-/// WriteOther (2) which are reserved for stdout/stderr-style I/O streams.
+/// exact `EventLogKind::EvmEvent` kind (numeric 13). A recorder uses the
+/// exact kind for what it records: `Write` (0) is stdout output,
+/// `WriteStderr` (14) is stderr output, and the `WriteOther` (2) catch-all is
+/// only for writes no other kind describes, so none of them fits a LOG.
 ///
-/// This is the EVM analogue of the JS recorder's stderr→WriteOther fix from
-/// handoff entry 1.38.  EVM has no stdout concept; misrouting LOG events as
-/// `Write` makes them surface in the terminal-output pane alongside Python /
-/// Ruby print output.  `EvmEvent` is the kind the codetracer frontend's
-/// `event_log.nim` and `flow.nim` special-case for EVM-style structured
-/// events (matches the Stylus tracer convention; see
+/// EVM has no stdout concept; misrouting LOG events as `Write` makes them
+/// surface in the terminal-output pane alongside Python / Ruby print output.
+/// `EvmEvent` is the kind the codetracer frontend's `event_log.nim` and
+/// `flow.nim` special-case for EVM-style structured events (matches the
+/// Stylus tracer convention; see
 /// `codetracer/src/db-backend/tests/stylus_flow_integration.rs`).
 #[tokio::test]
 async fn audit_ctfs_log_event_kind_is_evmevent() {
@@ -276,28 +277,10 @@ async fn audit_ctfs_log_event_kind_is_evmevent() {
         "no Event records emitted — FlowTest::compute() does emit a `Computed(uint256)` log"
     );
 
-    // `EvmEvent` now survives the round trip, so this asserts the kind
-    // itself rather than the bucket it used to collapse into.
-    //
-    // History, because the expectation moved and the reason belongs next to
-    // it.  The Nim multi-stream writer USED TO collapse the 13-variant
-    // `EventLogKind` into 4 `IOEventKind` buckets (stdout / stderr /
-    // fileOp / error), putting `EvmEvent` and `TraceLogEvent` together in
-    // `stderr`; this test therefore asserted `kind == "stderr"`, and its
-    // own comment named the end-to-end `EvmEvent` check as the open
-    // infrastructure follow-up it could not yet make.  That follow-up has
-    // landed on the `codetracer-trace-format-nim` side: the reader reports
-    // `"EvmEvent"`, and the weaker bucket assertion started failing with
-    // the self-contradictory `non-EvmEvent kinds: ["EvmEvent"]`.
-    //
-    // So the expectation was stale rather than the recorder wrong — the
-    // same failure reproduces on an unmodified checkout against the
-    // current siblings.  Asserting `EvmEvent` directly is the check the
-    // audit wanted all along and is STRICTLY STRONGER than the bucket
-    // test: `stderr` admitted `TraceLogEvent` too, and `EvmEvent` admits
-    // only itself.  A reader that reverts to collapsing will now fail
-    // here, which is the correct verdict for an audit about this kind
-    // being preserved.
+    // The reader reports each record's exact kind name, so this asserts
+    // `EvmEvent` itself: a reader or writer that collapsed kinds into
+    // coarser buckets (e.g. putting `EvmEvent` and `TraceLogEvent` together)
+    // fails here.
     let mut evm_event_count = 0usize;
     let mut other_kinds = Vec::new();
     for i in 0..event_count {

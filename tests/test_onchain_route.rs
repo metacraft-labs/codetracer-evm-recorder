@@ -273,14 +273,14 @@ async fn trace_onchain_writes_a_container_the_nim_reader_opens() {
     assert_eq!(header[5], 5, "the route must emit a version-5 container");
 
     // `meta.dat` schema version is bytes 4..6 of the `CTMD` record, little
-    // endian.  Version 6 is what the current writer writes and the only
+    // endian.  Version 7 is what the current writer writes and the only
     // one it reads back.
     let ctmd = header
         .windows(4)
         .position(|w| w == b"CTMD")
         .expect("the container must carry a meta.dat record");
     let meta_version = u16::from_le_bytes([header[ctmd + 4], header[ctmd + 5]]);
-    assert_eq!(meta_version, 6, "meta.dat schema version");
+    assert_eq!(meta_version, 7, "meta.dat schema version");
 }
 
 /// The declared prestate strategy is `replay-preceding`, and this asserts
