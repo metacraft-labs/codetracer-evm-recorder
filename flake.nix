@@ -18,6 +18,17 @@
       system:
       let
         pkgs = import nixpkgs { inherit system; };
+        # Darwin's direnv Makefile requires external Go linking. Its pinned
+        # static build disables CGO, so enable it only for this Darwin package.
+        ciDirenv =
+          if pkgs.stdenv.isDarwin then
+            pkgs.direnv.overrideAttrs (old: {
+              env = (old.env or { }) // {
+                CGO_ENABLED = 1;
+              };
+            })
+          else
+            pkgs.direnv;
       in
       {
         apps.prepare-ci-checkout = {
@@ -47,7 +58,7 @@
             REPROBUILD_NATIVE_SOURCE = "${reprobuild.outPath}";
 
             EVM_CI_GIT = "${pkgs.git}/bin/git";
-            EVM_CI_DIRENV = "${pkgs.direnv}/bin/direnv";
+            EVM_CI_DIRENV = "${ciDirenv}/bin/direnv";
             EVM_CI_PYTHON = "${pkgs.python3}/bin/python3";
             packages =
               with pkgs;
@@ -84,7 +95,7 @@
                 # reject `git rev-parse HEAD` as "not a valid sha1 hash value".
                 git
                 # The original decoder recipe activates its owning shell.
-                direnv
+                ciDirenv
 
                 # Just for the `just lint` / `just test` entry points.
                 just

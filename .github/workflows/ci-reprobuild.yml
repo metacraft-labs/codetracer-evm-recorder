@@ -30,7 +30,7 @@ concurrency:
 
 jobs:
   reprobuild:
-    name: ${{ matrix.os }}-${{ matrix.arch }} — repro build/test
+    name: ${{ matrix.os }}-${{ matrix.arch }} — repro build/test ${{ matrix.os == 'windows' && matrix.arch == 'arm64' && '(x64 emulation)' || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -52,6 +52,7 @@ jobs:
             runner: [self-hosted, windows, arm64]
     runs-on: ${{ matrix.runner }}
     env:
+      WINDOWS_DIY_ARCH_OVERRIDE: ${{ matrix.os == 'windows' && matrix.arch == 'arm64' && 'x64' || '' }}
       EVM_CI_NAMESPACE: evm-ci-${{ github.run_id }}-${{ github.run_attempt }}-typed-${{ matrix.os }}-${{ matrix.arch }}
     steps:
       - uses: actions/checkout@v4
@@ -123,28 +124,28 @@ jobs:
         # `repro.nim`. Verifies the primary shipping artefact (the
         # recorder binary or extension) materialises through the
         # reprobuild engine identically to `just build`.
-        run: dev-exec repro build ${{ matrix.os == 'linux' && '--tool-provisioning=nix' || '' }}
+        run: ${{ matrix.os == 'macos' && 'nix develop --command' || '' }} dev-exec repro build ${{ matrix.os == 'linux' && '--tool-provisioning=nix' || '' }}
 
       - name: repro test
         working-directory: ${{ matrix.os != 'windows' && format('{0}/codetracer-evm-recorder', env.EVM_CI_NAMESPACE) || '.' }}
         # Materialises the `test` collection.
-        run: dev-exec repro test ${{ matrix.os == 'linux' && '--tool-provisioning=nix' || '' }}
+        run: ${{ matrix.os == 'macos' && 'nix develop --command' || '' }} dev-exec repro test ${{ matrix.os == 'linux' && '--tool-provisioning=nix' || '' }}
 
       - name: Authorize declared Nim decoder environment
         if: matrix.os != 'windows'
         working-directory: ${{ format('{0}/codetracer-evm-recorder', env.EVM_CI_NAMESPACE) }}
-        run: dev-exec bash -c 'exec "${EVM_CI_PYTHON:?declared CI Python missing}" -B -I tools/allow-declared-nim-env.py'
+        run: ${{ matrix.os == 'macos' && 'nix develop --command' || '' }} dev-exec bash -c "exec \"\${EVM_CI_PYTHON:?declared CI Python missing}\" -B -I tools/allow-declared-nim-env.py"
 
       - name: just build (cross-check)
         working-directory: ${{ matrix.os != 'windows' && format('{0}/codetracer-evm-recorder', env.EVM_CI_NAMESPACE) || '.' }}
         # Re-runs the legacy `just build` path inside the same env so
         # we catch silent divergences between `repro build` outputs
         # and what the dev shell + Justfile produce today.
-        run: dev-exec just build
+        run: ${{ matrix.os == 'macos' && 'nix develop --command' || '' }} dev-exec just build
 
       - name: just test (cross-check)
         working-directory: ${{ matrix.os != 'windows' && format('{0}/codetracer-evm-recorder', env.EVM_CI_NAMESPACE) || '.' }}
-        run: dev-exec just test
+        run: ${{ matrix.os == 'macos' && 'nix develop --command' || '' }} dev-exec just test
 
       # Diagnostics on failure. Three things below are load-bearing:
       #
