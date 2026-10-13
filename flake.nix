@@ -30,6 +30,16 @@
           );
         };
 
+        apps.prepare-ci-trace-nim-peer = {
+          type = "app";
+          program = toString (
+            pkgs.writeShellScript "prepare-ci-trace-nim-peer" ''
+              exec ${pkgs.python3}/bin/python3 -I ${./tools/prepare-ci-trace-nim-peer.py} \
+                ${pkgs.nix}/bin/nix "$@"
+            ''
+          );
+        };
+
         devShells.default = pkgs.mkShell (
           {
             REPROBUILD_REPRO = "${reprobuild.packages.${system}.default}/bin/repro";

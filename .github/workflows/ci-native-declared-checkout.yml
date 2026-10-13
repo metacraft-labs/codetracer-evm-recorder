@@ -90,6 +90,12 @@ jobs:
         run: |
           nix run .#prepare-ci-checkout -- "$PWD" "$GITHUB_WORKSPACE/$EVM_CI_NAMESPACE/codetracer-evm-recorder" "${{ github.sha }}" "$GITHUB_WORKSPACE/$EVM_CI_NAMESPACE" "$EVM_CI_NAMESPACE"
 
+      - name: Create locked decoder peer with its declared Git templates
+        working-directory: evm-ci-bootstrap
+        shell: bash
+        run: |
+          nix run .#prepare-ci-trace-nim-peer -- "$GITHUB_WORKSPACE/$EVM_CI_NAMESPACE/codetracer-evm-recorder"
+
       - name: Setup dev env
         uses: metacraft-labs/metacraft-github-actions/setup-dev-env@142b12da267e48d7322960aa77ec33d7761f9082
         with:

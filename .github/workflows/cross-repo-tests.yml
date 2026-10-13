@@ -88,6 +88,12 @@ jobs:
         run: |
           nix run .#prepare-ci-checkout -- "$PWD" "$GITHUB_WORKSPACE/$EVM_CI_NAMESPACE/codetracer-evm-recorder" "${{ github.sha }}" "$GITHUB_WORKSPACE/$EVM_CI_NAMESPACE" "$EVM_CI_NAMESPACE"
 
+      - name: Create locked decoder peer with its declared Git templates
+        working-directory: evm-ci-bootstrap
+        shell: bash
+        run: |
+          nix run .#prepare-ci-trace-nim-peer -- "$GITHUB_WORKSPACE/$EVM_CI_NAMESPACE/codetracer-evm-recorder"
+
       - name: Setup dev env
         # Installs nix and clones the cross-repo siblings adjacent to this
         # checkout at workspace-lock-pinned revisions. workflow_dispatch /
