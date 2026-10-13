@@ -1,0 +1,40 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+[*.{rs,sol,py}]
+indent_size = 4
+
+[env.ps1]
+indent_size = 4
+
+[packaging/aur/.SRCINFO]
+indent_style = tab
+
+[packaging/deb/control]
+indent_size = 1
+
+[LICENSE]
+indent_size = unset
+
+# Rust literal payloads remain byte-exact; mandatory full cargo fmt enforces code.
+[{src/main.rs,src/recorder.rs,src/source_fetcher.rs}]
+indent_size = unset
+
+# Folded workflow scalar continuation is checked by mandatory native Prettier.
+[.github/workflows/publish-workspace-lock.yml]
+indent_size = unset
+
+# Exact numbered-list layout is enforced by mandatory native Prettier.
+[examples/README.md]
+indent_size = unset
+
+# Exact Rust literal continuations; full existing cargo fmt remains mandatory.
+[{tests/test_cli_convention.rs,tests/test_column_aware.rs,tests/test_ctfs_audit.rs,tests/test_programs_via_ct_print_full.rs}]
+indent_size = unset

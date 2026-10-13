@@ -194,10 +194,8 @@ fn call_arg_count(reader: &NimTraceReaderHandle, call_key: u64) -> usize {
 /// one CallRecord in the trace.
 #[tokio::test]
 async fn audit_ctfs_internal_call_emitted() {
-    if !has_solc() || !has_anvil() {
-        eprintln!("skipping: solc/anvil unavailable");
-        return;
-    }
+    assert!(has_solc(), "solc required on PATH");
+    assert!(has_anvil(), "anvil required on PATH");
 
     let tmp_dir = record_flow_test().await;
     let reader = open_reader(tmp_dir.path());
@@ -262,10 +260,8 @@ async fn audit_ctfs_internal_call_emitted() {
 /// `codetracer/src/db-backend/tests/stylus_flow_integration.rs`).
 #[tokio::test]
 async fn audit_ctfs_log_event_kind_is_evmevent() {
-    if !has_solc() || !has_anvil() {
-        eprintln!("skipping: solc/anvil unavailable");
-        return;
-    }
+    assert!(has_solc(), "solc required on PATH");
+    assert!(has_anvil(), "anvil required on PATH");
 
     let tmp_dir = record_flow_test().await;
     let reader = open_reader(tmp_dir.path());
@@ -276,39 +272,17 @@ async fn audit_ctfs_log_event_kind_is_evmevent() {
         "no Event records emitted — FlowTest::compute() does emit a `Computed(uint256)` log"
     );
 
-    // The Nim multi-stream writer collapses the 13-variant `EventLogKind`
-    // into 4 multi-stream `IOEventKind` buckets (stdout / stderr / fileOp /
-    // error) — see `codetracer_trace_writer_ffi.nim::toIOEventKind`.
-    // The relevant collapse for this audit:
-    //
-    //     EventLogKind::Write      (stdout-style writes)        → "stdout"
-    //     EventLogKind::WriteOther (non-stdout writes)          → "stdout"
-    //     EventLogKind::EvmEvent   (EVM LOG opcodes / Stylus)   → "stderr"
-    //     EventLogKind::TraceLogEvent                            → "stderr"
-    //     EventLogKind::Error                                    → "error"
-    //
-    // Pre-fix, the EVM recorder emitted LOG opcodes as `Write` →
-    // `stdout`, which mixed them with stdout terminal writes from
-    // recorders like Python/Ruby.  Post-fix (this audit), they emit as
-    // `EvmEvent` → `stderr`, segregating them from stdout.  We assert
-    // every Event record from the EVM recorder lands in the `stderr`
-    // bucket and none in `stdout` — that's the canonical
-    // "EvmEvent-as-the-CTFS-multi-stream-presents-it" check.
-    //
-    // This is necessarily weaker than the JS recorder's audit-time
-    // check (1.38) which compares the raw `RecordEvent.kind` byte
-    // against the upstream enum, because the multi-stream IO format
-    // has discarded the original kind by the time we read it back.
-    // See `AUDIT-CTFS-2026-05.md` for the open infrastructure
-    // follow-up that would preserve `EvmEvent` end-to-end.
-    let mut stderr_count = 0usize;
+    // The canonical decoder preserves the exact EventLogKind label.
+    // Every EVM special event must remain EvmEvent (ordinal 13), rather
+    // than collapsing into a generic output-stream category.
+    let mut evm_event_count = 0usize;
     let mut other_kinds = Vec::new();
     for i in 0..event_count {
         let raw = reader.event_json(i).expect("event record JSON missing");
         let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
         let kind = parsed["kind"].as_str().unwrap_or("<missing>").to_string();
-        if kind == "stderr" {
-            stderr_count += 1;
+        if kind == "EvmEvent" {
+            evm_event_count += 1;
         } else {
             other_kinds.push(kind);
         }
@@ -318,7 +292,7 @@ async fn audit_ctfs_log_event_kind_is_evmevent() {
         "EVM recorder produced events with non-EvmEvent kinds: {:?}",
         other_kinds
     );
-    assert!(stderr_count > 0, "no stderr-bucket events found");
+    assert!(evm_event_count > 0, "no canonical EvmEvent events found");
 }
 
 /// Audit (e): Step records are emitted for source-line navigation.
@@ -329,10 +303,8 @@ async fn audit_ctfs_log_event_kind_is_evmevent() {
 /// source line so the frontend's "next line" navigation can land on them.
 #[tokio::test]
 async fn audit_ctfs_step_records_emitted() {
-    if !has_solc() || !has_anvil() {
-        eprintln!("skipping: solc/anvil unavailable");
-        return;
-    }
+    assert!(has_solc(), "solc required on PATH");
+    assert!(has_anvil(), "anvil required on PATH");
 
     let tmp_dir = record_flow_test().await;
     let reader = open_reader(tmp_dir.path());
@@ -435,10 +407,8 @@ fn audit_ctfs_linked_writer_staged_args_roundtrip() {
 /// is now the strict positive assertion the original guard pointed at.
 #[tokio::test]
 async fn audit_ctfs_call_args_writer_attaches_add_xy() {
-    if !has_solc() || !has_anvil() {
-        eprintln!("skipping: solc/anvil unavailable");
-        return;
-    }
+    assert!(has_solc(), "solc required on PATH");
+    assert!(has_anvil(), "anvil required on PATH");
 
     let tmp_dir = record_flow_test().await;
     let reader = open_reader(tmp_dir.path());

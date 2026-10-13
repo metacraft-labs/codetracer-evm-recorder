@@ -47,7 +47,7 @@ The static surface is pinned in three places (M27 plan, hand-extracted
 fixture, and — added 2026-06-18 — the live Go source parsed at test
 time) by the parity tests in
 `codetracer-wasm-instrumenter/crates/codetracer-wasm-host-module-framework/tests/stylus_parity.rs`.
-What still needs a live host is the *runtime* three-way parity
+What still needs a live host is the _runtime_ three-way parity
 (legacy Go path vs M27-on-wazero vs `ct instrument` rewriter); that
 is driven by a one-shot runner script kept with the CodeTracer specs,
 which are maintained internally.
