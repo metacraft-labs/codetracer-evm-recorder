@@ -105,6 +105,11 @@ jobs:
           attic-cache: ${{ vars.ATTIC_CACHE }}
           attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
 
+      - name: Bind declared Windows POSIX tool companions
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: ./tools/windows-posix-tool-profile.ps1
+
       - name: repro build
         working-directory: ${{ matrix.os != 'windows' && format('{0}/codetracer-evm-recorder', env.EVM_CI_NAMESPACE) || '.' }}
         # Builds the conventional `build` collection declared in

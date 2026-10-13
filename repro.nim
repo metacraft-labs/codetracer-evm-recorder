@@ -194,7 +194,22 @@ package codetracer_evm_recorder:
         ["evmZstdDevelopment"])
     let decoderBinary = ctPrintPath(nimRoot)
 
+    var recorderCompilerEnv: seq[(string, string)] = @[]
+    when defined(macosx):
+      # These paths are exported by the owning flake, not selected from PATH.
+      let declaredCc = getEnv("EVM_DARWIN_CC")
+      let declaredSdk = getEnv("EVM_DARWIN_SDKROOT")
+      let declaredIconv = getEnv("EVM_DARWIN_ICONV_LIB")
+      if not fileExists(declaredCc) or not dirExists(declaredSdk) or
+          not dirExists(declaredIconv):
+        raise newException(ValueError, "activate the owning Darwin flake toolchain")
+      recorderCompilerEnv = @[("CC", declaredCc), ("SDKROOT", declaredSdk),
+        ("LIBRARY_PATH", declaredIconv),
+        ("CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER", declaredCc),
+        ("CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER", declaredCc)]
+
     let recorderBuild = cargo.build(
+      extraEnv = recorderCompilerEnv,
       release = false,
       actionId = "codetracer-evm-recorder.cargo-build",
       extraInputs = @[
@@ -205,6 +220,7 @@ package codetracer_evm_recorder:
     discard collect("default", @[recorderBuild])
 
     let recorderReleaseBuild = cargo.build(
+      extraEnv = recorderCompilerEnv,
       release = true,
       actionId = "codetracer-evm-recorder.cargo-build-release",
       extraInputs = @["Cargo.toml", "src"] & traceInputs,
@@ -231,6 +247,7 @@ package codetracer_evm_recorder:
     # changing this recipe.
 
     let testsBuild = cargo.test(
+      extraEnv = recorderCompilerEnv,
       noRun = true,
       after = @[decoderBuild],
       actionId = "codetracer-evm-recorder.cargo-test-build",
@@ -241,6 +258,7 @@ package codetracer_evm_recorder:
       extraOutputs = @["target/debug/deps"])
 
     let testsRun = cargo.test(
+      extraEnv = recorderCompilerEnv,
       actionId = "codetracer-evm-recorder.cargo-test-run",
       after = @[testsBuild.action, decoderBuild],
       extraInputs = @[
