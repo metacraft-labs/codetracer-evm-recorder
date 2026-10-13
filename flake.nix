@@ -73,6 +73,8 @@
                 # stderr together with its stdout, so with that git `nimble install` would
                 # reject `git rev-parse HEAD` as "not a valid sha1 hash value".
                 git
+                # The original decoder recipe activates its owning shell.
+                direnv
 
                 # Just for the `just lint` / `just test` entry points.
                 just
