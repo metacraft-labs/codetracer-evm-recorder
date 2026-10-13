@@ -98,6 +98,16 @@ jobs:
         run: |
           nix run .#prepare-ci-trace-nim-peer -- "$GITHUB_WORKSPACE/$EVM_CI_NAMESPACE/codetracer-evm-recorder"
 
+      - name: Bind declared Git for locked dependency provisioning
+        if: matrix.os != 'windows'
+        working-directory: evm-ci-bootstrap
+        shell: bash
+        run: |
+          git_root="$(nix build --no-link --print-out-paths .#ci-checkout-git)"
+          test -x "$git_root/bin/git"
+          "$git_root/bin/git" --version
+          printf '%s\n' "$git_root/bin" >> "$GITHUB_PATH"
+
       - name: Setup dev env (reprobuild flavor)
         uses: metacraft-labs/metacraft-github-actions/setup-dev-env@440187b477282220f1c4a8432b77b6d06f2a7146
         with:

@@ -31,6 +31,8 @@
             pkgs.direnv;
       in
       {
+        packages.ci-checkout-git = pkgs.git;
+
         apps.prepare-ci-checkout = {
           type = "app";
           program = toString (
