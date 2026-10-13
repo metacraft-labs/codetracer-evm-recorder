@@ -32,6 +32,10 @@
       in
       {
         packages.ci-checkout-git = pkgs.git;
+        packages.ci-provision-git = pkgs.writeShellScriptBin "git" ''
+          exec ${pkgs.python3}/bin/python3 -B -I ${./nix/ci-provision-git.py} \
+            ${pkgs.git}/bin/git "$@"
+        '';
 
         apps.prepare-ci-checkout = {
           type = "app";
