@@ -112,6 +112,7 @@ jobs:
         uses: metacraft-labs/metacraft-github-actions/setup-dev-env@440187b477282220f1c4a8432b77b6d06f2a7146
         with:
           env-flavor: reprobuild
+          sibling-strategy: ${{ matrix.os != 'windows' && 'repro-lock' || 'auto' }}
           consumer-directory: ${{ matrix.os != 'windows' && format('{0}/codetracer-evm-recorder', env.EVM_CI_NAMESPACE) || '.' }}
           workspace-directory: ${{ matrix.os != 'windows' && env.EVM_CI_NAMESPACE || '.' }}
           repro-from-source: "true"
