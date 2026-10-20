@@ -69,7 +69,7 @@ use crate::contract_registry::{ContractArtifacts, ContractRegistry};
 use crate::inspector::ExecutionData;
 use crate::recorder::EvmRecorder;
 use crate::replay::{
-    ReplayOptions, ReplayedTransaction, build_provider, replay_transaction_detailed,
+    ReplayOptions, ReplayedTransaction, build_provider, replay_block, replay_transaction_detailed,
 };
 use crate::revert_decode;
 use crate::source_fetcher;
@@ -531,11 +531,87 @@ pub async fn record_onchain_transaction(options: &OnchainOptions) -> Result<Onch
         )
     })?;
 
+    record_replayed(options, options.tx_hash, &replayed).await
+}
+
+/// What [`record_onchain_block`] did with each transaction of a block.
+#[derive(Debug)]
+pub enum BlockTxOutcome {
+    /// A container was written and reopened.
+    Recorded(OnchainRecording),
+    /// The transaction was replayed but not recorded; the reason says why
+    /// (a plain value transfer has no execution, for one).
+    NotRecorded(String),
+    /// The replay stopped at an earlier transaction, so this one was never
+    /// executed: its prestate would have been wrong.
+    NotReached(String),
+}
+
+/// Record every transaction of `block_number` into `options.out_dir`, one
+/// container each, replaying the block once ([`replay_block`]).
+///
+/// `options.tx_hash` is ignored; each container is named and identified by
+/// its own transaction.  Returns one outcome per transaction, in block
+/// order, so the caller can account for every transaction the block holds.
+pub async fn record_onchain_block(
+    options: &OnchainOptions,
+    block_number: u64,
+) -> Result<Vec<(TxHash, BlockTxOutcome)>> {
+    std::fs::create_dir_all(&options.out_dir)
+        .with_context(|| format!("cannot create output dir: {}", options.out_dir.display()))?;
+    let outcomes: std::cell::RefCell<Vec<(TxHash, BlockTxOutcome)>> =
+        std::cell::RefCell::new(Vec::new());
+    let summary = replay_block(
+        &options.rpc_url,
+        block_number,
+        ReplayOptions {
+            capture_memory: options.capture_memory,
+        },
+        |replayed| {
+            let tx_hash = replayed.tx_hash;
+            let outcomes = &outcomes;
+            async move {
+                let outcome = match record_replayed(options, tx_hash, &replayed).await {
+                    Ok(rec) => BlockTxOutcome::Recorded(rec),
+                    Err(e) => BlockTxOutcome::NotRecorded(format!("{e:#}")),
+                };
+                outcomes.borrow_mut().push((tx_hash, outcome));
+                Ok(())
+            }
+        },
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "replay of block {block_number} against {} failed",
+            options.rpc_url
+        )
+    })?;
+    let mut outcomes = outcomes.into_inner();
+    if let Some((index, reason)) = &summary.stopped {
+        for tx_hash in summary.tx_hashes.iter().skip(*index) {
+            outcomes.push((
+                *tx_hash,
+                BlockTxOutcome::NotReached(format!(
+                    "the replay stopped at index {index}: {reason}"
+                )),
+            ));
+        }
+    }
+    Ok(outcomes)
+}
+
+/// Steps 2-6 of the route, for a transaction that has already been replayed.
+async fn record_replayed(
+    options: &OnchainOptions,
+    tx_hash: TxHash,
+    replayed: &ReplayedTransaction,
+) -> Result<OnchainRecording> {
     if replayed.execution.is_empty() {
         return Err(eyre::eyre!(
             "the replay of {} captured 0 EVM steps — a plain value transfer to an \
              account with no code has no execution to trace",
-            options.tx_hash
+            tx_hash
         ));
     }
 
@@ -553,7 +629,7 @@ pub async fn record_onchain_transaction(options: &OnchainOptions) -> Result<Onch
     // ------------------------------------------------------------------ //
     // 3. Recover verified source for the addresses that executed.         //
     // ------------------------------------------------------------------ //
-    let addresses = executed_addresses(&replayed, options.max_source_lookups);
+    let addresses = executed_addresses(replayed, options.max_source_lookups);
     let mut registry = ContractRegistry::new();
     let mut lookups = Vec::with_capacity(addresses.len());
     let mut mapped = 0usize;
@@ -608,15 +684,12 @@ pub async fn record_onchain_transaction(options: &OnchainOptions) -> Result<Onch
     // `packaging/chocolatey`).
     let program_label = format!(
         "evm-{}-{}-{}",
-        replayed.chain_id, options.tx_hash, replayed.block_number
+        replayed.chain_id, tx_hash, replayed.block_number
     );
     let recording_id = match &options.recording_id {
         None => None,
         Some(RecordingId::Pinned(id)) => Some(id.clone()),
-        Some(RecordingId::Derive) => Some(derived_recording_id(
-            replayed.block_timestamp,
-            &options.tx_hash,
-        )),
+        Some(RecordingId::Derive) => Some(derived_recording_id(replayed.block_timestamp, &tx_hash)),
     };
     let mut recorder =
         EvmRecorder::with_recording_id(&program_label, &options.out_dir, recording_id.as_deref())

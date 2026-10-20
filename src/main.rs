@@ -148,6 +148,44 @@ enum Commands {
     /// per-address outcome is printed.
     #[command(name = "trace-onchain")]
     TraceOnchain(TraceOnchainArgs),
+
+    /// Trace EVERY transaction of one block on a live EVM network.
+    ///
+    /// Pins a fork at the block's parent and replays the block once, in
+    /// order, recording each transaction into its own container in
+    /// `--out-dir` as it goes. The prestate is `trace-onchain`'s
+    /// (`replay-preceding`), paid once per block instead of once per
+    /// transaction. Prints one line per transaction and writes
+    /// `<out-dir>/block-<number>.json` accounting for every transaction the
+    /// block holds: recorded, not recorded (with the reason), or not reached
+    /// because an earlier transaction could not be executed.
+    #[command(name = "trace-block")]
+    TraceBlock(TraceBlockArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct TraceBlockArgs {
+    /// The block number to trace.
+    block: u64,
+    /// As for `trace-onchain`.
+    #[arg(long, value_name = "URL")]
+    rpc_url: Option<String>,
+    /// As for `trace-onchain`.
+    #[arg(short = 'o', long)]
+    out_dir: Option<PathBuf>,
+    /// As for `trace-onchain`.
+    #[arg(long)]
+    skip_source_fetch: bool,
+    /// As for `trace-onchain`; `derive` derives each container's id from
+    /// its own transaction.
+    #[arg(long, value_name = "UUID|derive")]
+    recording_id: Option<String>,
+    /// As for `trace-onchain`.
+    #[arg(long, value_name = "N", default_value_t = onchain::DEFAULT_MAX_SOURCE_LOOKUPS)]
+    max_source_lookups: usize,
+    /// As for `trace-onchain`.
+    #[arg(long)]
+    no_memory: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -343,6 +381,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Record(args) => record(args).await,
         Commands::TraceOnchain(args) => trace_onchain(args).await,
+        Commands::TraceBlock(args) => trace_block(args).await,
     }
 }
 
@@ -448,6 +487,95 @@ async fn trace_onchain(args: TraceOnchainArgs) -> Result<()> {
         recording.container_steps_read_back,
     );
     eprintln!("Trace written to {}", recording.out_dir.display());
+    Ok(())
+}
+
+/// Execute the `trace-block` subcommand. See [`onchain::record_onchain_block`].
+async fn trace_block(args: TraceBlockArgs) -> Result<()> {
+    if recording_disabled() {
+        eprintln!(
+            "{ENV_DISABLED} is set; skipping trace recording (no output written, no endpoint contacted)."
+        );
+        return Ok(());
+    }
+    let rpc_url = resolve_rpc_url(args.rpc_url.clone())?;
+    let out_dir = resolve_out_dir(args.out_dir.clone(), None)?;
+    let mut options =
+        onchain::OnchainOptions::new(rpc_url.clone(), alloy::primitives::TxHash::ZERO, &out_dir);
+    options.skip_source_fetch = args.skip_source_fetch;
+    options.max_source_lookups = args.max_source_lookups;
+    options.capture_memory = !args.no_memory;
+    if args.recording_id.as_deref() == Some("derive") {
+        options.recording_id = Some(onchain::RecordingId::Derive);
+    } else if args.recording_id.is_some() {
+        // One pinned id for many containers would give them all one identity.
+        return Err(eyre::eyre!(
+            "trace-block takes `--recording-id derive` or nothing: one pinned id cannot name \
+             every container of a block"
+        ));
+    }
+
+    eprintln!("Replaying block {} from {rpc_url}", args.block);
+    eprintln!("  prestate strategy: replay-preceding, the block replayed once in order");
+    let outcomes = onchain::record_onchain_block(&options, args.block).await?;
+
+    let mut rows = Vec::with_capacity(outcomes.len());
+    let (mut recorded, mut not_recorded, mut not_reached) = (0usize, 0usize, 0usize);
+    for (index, (tx_hash, outcome)) in outcomes.iter().enumerate() {
+        let row = match outcome {
+            onchain::BlockTxOutcome::Recorded(rec) => {
+                recorded += 1;
+                eprintln!(
+                    "tx {index} {tx_hash} recorded {} ({} bytes, {} steps read back, status {})",
+                    rec.container_path.display(),
+                    rec.container_bytes,
+                    rec.container_steps_read_back,
+                    if rec.succeeded { "ok" } else { "reverted" },
+                );
+                serde_json::json!({
+                    "index": index, "txHash": format!("{tx_hash}"), "outcome": "recorded",
+                    "container": rec.container_path.file_name().map(|n| n.to_string_lossy().to_string()),
+                    "containerBytes": rec.container_bytes,
+                    "stepsReadBack": rec.container_steps_read_back,
+                    "succeeded": rec.succeeded, "gasUsed": rec.gas_used,
+                    "logs": rec.log_count, "calls": rec.call_count,
+                    "mappedAddresses": rec.mapped_addresses,
+                    "lookedUpAddresses": rec.source_lookups.len(),
+                })
+            }
+            onchain::BlockTxOutcome::NotRecorded(reason) => {
+                not_recorded += 1;
+                eprintln!("tx {index} {tx_hash} not recorded: {reason}");
+                serde_json::json!({"index": index, "txHash": format!("{tx_hash}"),
+                                   "outcome": "not-recorded", "reason": reason})
+            }
+            onchain::BlockTxOutcome::NotReached(reason) => {
+                not_reached += 1;
+                eprintln!("tx {index} {tx_hash} not reached: {reason}");
+                serde_json::json!({"index": index, "txHash": format!("{tx_hash}"),
+                                   "outcome": "not-reached", "reason": reason})
+            }
+        };
+        rows.push(row);
+    }
+    let summary = serde_json::json!({
+        "block": args.block,
+        "transactions": outcomes.len(),
+        "recorded": recorded,
+        "notRecorded": not_recorded,
+        "notReached": not_reached,
+        "rows": rows,
+    });
+    let summary_path = out_dir.join(format!("block-{}.json", args.block));
+    std::fs::write(&summary_path, serde_json::to_string_pretty(&summary)?)
+        .with_context(|| format!("cannot write {}", summary_path.display()))?;
+    eprintln!(
+        "block {}: {} transaction(s): {recorded} recorded, {not_recorded} not recorded, \
+         {not_reached} not reached; ledger at {}",
+        args.block,
+        outcomes.len(),
+        summary_path.display()
+    );
     Ok(())
 }
 

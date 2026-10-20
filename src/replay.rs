@@ -54,6 +54,8 @@ pub struct ReplayedTransaction {
     /// takes its time component from here, so it names when the transaction
     /// ran rather than when it was recorded.
     pub block_timestamp: u64,
+    /// The transaction this is a replay of.
+    pub tx_hash: TxHash,
     /// Index of the target transaction within that block.
     pub tx_index: usize,
     /// The revm hardfork the replay ran under, as inferred from the block
@@ -242,6 +244,7 @@ pub async fn replay_transaction_detailed(
     let data = tracing_evm.into_inspector().into_execution_data();
     Ok(ReplayedTransaction {
         execution: data,
+        tx_hash,
         chain_id,
         block_number,
         block_timestamp: block.header.timestamp(),
@@ -253,6 +256,159 @@ pub async fn replay_transaction_detailed(
         succeeded,
         output,
         gas_used,
+    })
+}
+
+/// What [`replay_block`] did with a whole block.
+#[derive(Debug)]
+pub struct BlockReplay {
+    pub chain_id: u64,
+    pub block_number: u64,
+    /// Every transaction the block carries, in order.
+    pub tx_hashes: Vec<TxHash>,
+    /// How many of them were replayed and handed to the callback.
+    pub replayed: usize,
+    /// Where the replay stopped early, and why.  Once a transaction cannot
+    /// be executed the state every later one would start from is wrong, so
+    /// the rest are refused rather than traced from a wrong prestate.
+    pub stopped: Option<(usize, String)>,
+}
+
+/// Replay EVERY transaction of `block_number`, in order, on one fork pinned
+/// at the parent block, handing each one's [`ReplayedTransaction`] to
+/// `on_tx` as soon as it has run.
+///
+/// The same `replay-preceding` prestate as [`replay_transaction_detailed`],
+/// paid once per block instead of once per transaction.  Tracing all `n`
+/// transactions of a block one at a time replays `n(n-1)/2` of them
+/// (31,606 for mainnet blocks 4,370,100-4,370,101, measured with
+/// BlockTracer's `capture-eth-range.mjs --plan`); this replays `n`.  Each
+/// transaction runs under a fresh `CodeTracerInspector` and its state is
+/// committed before the next starts, which is exactly what a preceding
+/// replay does, so the trace of transaction `k` is taken from the state the
+/// first `k` transactions left.
+///
+/// The callback runs between transactions and may await (the recording
+/// route resolves source over the network).  Results are not collected
+/// here because a block's memory-captured steps do not fit comfortably in
+/// memory at once.
+pub async fn replay_block<F, Fut>(
+    rpc_url: &str,
+    block_number: u64,
+    options: ReplayOptions,
+    mut on_tx: F,
+) -> Result<BlockReplay>
+where
+    F: FnMut(ReplayedTransaction) -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    let provider = build_provider(rpc_url)?;
+    let block = provider
+        .get_block_by_number(block_number.into())
+        .full()
+        .await
+        .context("eth_getBlockByNumber failed")?
+        .ok_or_else(|| eyre::eyre!("block {} not found", block_number))?;
+    let chain_id = provider
+        .get_chain_id()
+        .await
+        .context("eth_chainId failed")?;
+    if block_number == 0 {
+        return Err(eyre::eyre!("block 0 has no parent state to fork from"));
+    }
+    let parent_block_id: alloy::rpc::types::BlockId = (block_number - 1).into();
+    let spec = spec_from_block_header(&*block.header);
+    let block_env = BlockEnv {
+        number: U256::from(block_number),
+        beneficiary: block.header.beneficiary(),
+        timestamp: U256::from(block.header.timestamp()),
+        difficulty: block.header.difficulty(),
+        basefee: block.header.base_fee_per_gas().unwrap_or(0),
+        gas_limit: block.header.gas_limit(),
+        prevrandao: block.header.mix_hash(),
+        blob_excess_gas_and_price: block.header.excess_blob_gas().map(|ebg| {
+            revm::context_interface::block::BlobExcessGasAndPrice::new(
+                ebg,
+                blob_base_fee_update_fraction(spec),
+            )
+        }),
+    };
+    let block_timestamp = block.header.timestamp();
+    let transactions = match &block.transactions {
+        BlockTransactions::Full(txs) => txs.clone(),
+        _ => return Err(eyre::eyre!("block did not return full transactions")),
+    };
+    let tx_hashes: Vec<TxHash> = transactions.iter().map(|t| t.tx_hash()).collect();
+
+    let meta = BlockchainDbMeta::new(block_env.clone(), rpc_url.to_string());
+    let backend = SharedBackend::spawn_backend_thread(
+        provider,
+        BlockchainDb::new(meta, None),
+        Some(parent_block_id),
+    );
+    type ForkDb = CacheDB<SharedBackend<alloy::network::Ethereum>>;
+    let mut ctx: RevmContext<BlockEnv, TxEnv, CfgEnv, ForkDb, Journal<ForkDb>, ()> =
+        RevmContext::new(CacheDB::new(backend), spec);
+    ctx.modify_block(|b| {
+        *b = block_env;
+    });
+    ctx.modify_cfg(|cfg| {
+        cfg.chain_id = chain_id;
+    });
+    let fresh = || {
+        if options.capture_memory {
+            CodeTracerInspector::with_memory_capture()
+        } else {
+            CodeTracerInspector::new()
+        }
+    };
+    let mut evm = ctx.build_mainnet_with_inspector(fresh());
+
+    let mut replayed = 0usize;
+    let mut stopped = None;
+    for (index, tx) in transactions.iter().enumerate() {
+        let tx_env = match alloy_tx_to_revm_tx(tx) {
+            Ok(env) => env,
+            Err(e) => {
+                stopped = Some((index, format!("cannot convert transaction: {e}")));
+                break;
+            }
+        };
+        evm.inspector = fresh();
+        let outcome = match evm.inspect_tx_commit(tx_env) {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                stopped = Some((index, format!("{e:?}")));
+                break;
+            }
+        };
+        let execution =
+            std::mem::replace(&mut evm.inspector, CodeTracerInspector::new()).into_execution_data();
+        on_tx(ReplayedTransaction {
+            execution,
+            tx_hash: tx_hashes[index],
+            chain_id,
+            block_number,
+            block_timestamp,
+            tx_index: index,
+            spec_id: spec,
+            to: AlloyTransactionTrait::to(tx),
+            caller: TransactionResponse::from(tx),
+            preceding_replayed: index,
+            succeeded: outcome.is_success(),
+            output: outcome.output().cloned().unwrap_or_default(),
+            gas_used: outcome.gas_used(),
+        })
+        .await?;
+        replayed += 1;
+    }
+
+    Ok(BlockReplay {
+        chain_id,
+        block_number,
+        tx_hashes,
+        replayed,
+        stopped,
     })
 }
 
