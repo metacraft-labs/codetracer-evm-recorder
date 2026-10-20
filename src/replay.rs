@@ -50,6 +50,10 @@ pub struct ReplayedTransaction {
     pub chain_id: u64,
     /// Block the target transaction was mined in.
     pub block_number: u64,
+    /// That block's header timestamp, in seconds.  The derived recording id
+    /// takes its time component from here, so it names when the transaction
+    /// ran rather than when it was recorded.
+    pub block_timestamp: u64,
     /// Index of the target transaction within that block.
     pub tx_index: usize,
     /// The revm hardfork the replay ran under, as inferred from the block
@@ -240,6 +244,7 @@ pub async fn replay_transaction_detailed(
         execution: data,
         chain_id,
         block_number,
+        block_timestamp: block.header.timestamp(),
         tx_index,
         spec_id: spec,
         to: AlloyTransactionTrait::to(&tx),

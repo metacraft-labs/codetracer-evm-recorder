@@ -1,6 +1,6 @@
 use codetracer_trace_types::{EventLogKind, Line, NONE_VALUE, TypeId, TypeKind, ValueRecord};
 use codetracer_trace_writer_nim::trace_writer::TraceWriter;
-use codetracer_trace_writer_nim::{TraceEventsFileFormat, create_trace_writer};
+use codetracer_trace_writer_nim::{NimTraceWriter, TraceEventsFileFormat, create_trace_writer};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -436,7 +436,29 @@ impl EvmRecorder {
     /// multi-stream format is well-tested across Ruby/Python and is the
     /// CTFS-migration target tracked by mission goal #6.
     pub fn new(program: &str, output_dir: &Path) -> eyre::Result<Self> {
-        let writer = create_trace_writer(program, &[], TraceEventsFileFormat::Ctfs);
+        Self::with_recording_id(program, output_dir, None)
+    }
+
+    /// As [`EvmRecorder::new`], with the container's `recording_id` pinned
+    /// instead of minted when `recording_id` is `Some`.  The id has to reach
+    /// the writer before the trace begins, and the setter lives on the Nim
+    /// writer rather than on the `TraceWriter` trait, so the concrete writer
+    /// is constructed here.  `create_trace_writer` builds the same
+    /// `NimTraceWriter` for `Ctfs`.
+    pub fn with_recording_id(
+        program: &str,
+        output_dir: &Path,
+        recording_id: Option<&str>,
+    ) -> eyre::Result<Self> {
+        let writer: Box<dyn TraceWriter + Send> = match recording_id {
+            None => create_trace_writer(program, &[], TraceEventsFileFormat::Ctfs),
+            Some(id) => {
+                let mut nim = NimTraceWriter::new(program, &[], TraceEventsFileFormat::Ctfs);
+                nim.set_recording_id(id)
+                    .map_err(|e| eyre::eyre!("the writer refused recording id {id}: {e}"))?;
+                Box::new(nim)
+            }
+        };
         Ok(Self {
             writer,
             type_names: Vec::new(),
@@ -639,8 +661,8 @@ impl EvmRecorder {
         // variables visible in the debugger at every subsequent step, we cache
         // the last written value per variable name and re-emit the full set
         // whenever a new source-line step is registered.
-        let mut storage_state: std::collections::HashMap<String, ValueRecord> =
-            std::collections::HashMap::new();
+        let mut storage_state: std::collections::BTreeMap<String, ValueRecord> =
+            std::collections::BTreeMap::new();
 
         // Raw-slot index keyed by storage slot number, used to assemble
         // compound `ValueRecord::Sequence` / `Struct` snapshots for
@@ -1440,8 +1462,12 @@ impl EvmRecorder {
         // Vec corresponds to an EVM call depth (depth 1 = index 0).  When a
         // new call frame is entered, a fresh map is pushed; when a frame is
         // exited, its map is popped.
-        let mut storage_states: Vec<std::collections::HashMap<String, ValueRecord>> =
-            vec![std::collections::HashMap::new()];
+        // A BTreeMap, not a HashMap: the set is re-emitted at every source-line
+        // step, so its iteration order is the order variables are interned and
+        // written. A HashMap's order is per process, and two runs over the same
+        // replay wrote two different containers for it.
+        let mut storage_states: Vec<std::collections::BTreeMap<String, ValueRecord>> =
+            vec![std::collections::BTreeMap::new()];
 
         // Raw-slot index per call frame (mirror of `storage_states` but
         // keyed by storage slot number) so we can assemble compound
@@ -1559,7 +1585,7 @@ impl EvmRecorder {
                 }
                 // Fresh storage state for the new call frame.
                 while storage_states.len() < log.depth as usize {
-                    storage_states.push(std::collections::HashMap::new());
+                    storage_states.push(std::collections::BTreeMap::new());
                 }
                 while slot_values_per_frame.len() < log.depth as usize {
                     slot_values_per_frame.push(std::collections::HashMap::new());
@@ -1986,7 +2012,7 @@ impl EvmRecorder {
                 // Cache for carry-forward to subsequent steps in this frame.
                 let ss_idx = (log.depth as usize).saturating_sub(1);
                 while storage_states.len() <= ss_idx {
-                    storage_states.push(std::collections::HashMap::new());
+                    storage_states.push(std::collections::BTreeMap::new());
                 }
                 while slot_values_per_frame.len() <= ss_idx {
                     slot_values_per_frame.push(std::collections::HashMap::new());

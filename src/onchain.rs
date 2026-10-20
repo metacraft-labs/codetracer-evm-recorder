@@ -402,6 +402,49 @@ pub struct OnchainOptions {
     /// "Recorded at EVM-opcode granularity" has to be made true by giving
     /// the opcodes somewhere to point.
     pub disassembly_fallback: bool,
+    /// The container's `recording_id`.  `None` lets the writer mint a fresh
+    /// UUIDv7, which is the default and makes every run's bytes differ.
+    /// `Some(RecordingId::Derive)` builds one from the block and the
+    /// transaction (see [`derived_recording_id`]), so two runs over the same
+    /// inputs write the same container: a producer that publishes the
+    /// container at an input-derived URL needs exactly that.
+    pub recording_id: Option<RecordingId>,
+}
+
+/// How the container's `recording_id` is chosen when it is not minted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordingId {
+    /// Use this UUIDv7 verbatim; the writer validates it.
+    Pinned(String),
+    /// Derive it from the block timestamp and the transaction hash.
+    Derive,
+}
+
+/// A valid UUIDv7 (RFC 9562) that is a function of the transaction alone.
+///
+/// The 48-bit time field is the block timestamp in milliseconds, so the id
+/// still sorts by when the transaction ran, which is what the Glossary asks a
+/// recording id to do.  The 74 "random" bits are the leading bits of the
+/// transaction hash.  Two recordings of one transaction therefore share an
+/// id, and that is the point: they record the same execution.
+pub fn derived_recording_id(block_timestamp_secs: u64, tx_hash: &TxHash) -> String {
+    let ms = block_timestamp_secs.saturating_mul(1000) & 0xFFFF_FFFF_FFFF;
+    let h = tx_hash.as_slice();
+    let mut b = [0u8; 16];
+    b[..6].copy_from_slice(&ms.to_be_bytes()[2..]);
+    b[6] = 0x70 | (h[0] & 0x0f);
+    b[7] = h[1];
+    b[8] = 0x80 | (h[2] & 0x3f);
+    b[9..].copy_from_slice(&h[3..10]);
+    let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..]
+    )
 }
 
 impl OnchainOptions {
@@ -417,6 +460,7 @@ impl OnchainOptions {
             max_source_lookups: DEFAULT_MAX_SOURCE_LOOKUPS,
             capture_memory: true,
             disassembly_fallback: true,
+            recording_id: None,
         }
     }
 }
@@ -566,8 +610,17 @@ pub async fn record_onchain_transaction(options: &OnchainOptions) -> Result<Onch
         "evm-{}-{}-{}",
         replayed.chain_id, options.tx_hash, replayed.block_number
     );
-    let mut recorder = EvmRecorder::new(&program_label, &options.out_dir)
-        .context("failed to create EvmRecorder")?;
+    let recording_id = match &options.recording_id {
+        None => None,
+        Some(RecordingId::Pinned(id)) => Some(id.clone()),
+        Some(RecordingId::Derive) => Some(derived_recording_id(
+            replayed.block_timestamp,
+            &options.tx_hash,
+        )),
+    };
+    let mut recorder =
+        EvmRecorder::with_recording_id(&program_label, &options.out_dir, recording_id.as_deref())
+            .context("failed to create EvmRecorder")?;
     recorder
         .initialize()
         .context("failed to initialize EvmRecorder")?;
@@ -891,6 +944,40 @@ mod tests {
     use super::*;
     use crate::inspector::StepData;
     use alloy::primitives::U256;
+
+    #[test]
+    fn derived_recording_id_is_a_uuidv7_of_the_transaction() {
+        // The mainnet USDT transfer BlockTracer publishes, block 26,083,328.
+        let tx: TxHash = "0xf6998cac9f5d2843729743b866bdc4b09bd119774bbec5e56f69f8819f2b71aa"
+            .parse()
+            .unwrap();
+        let ts = 1_760_000_000u64;
+        let id = derived_recording_id(ts, &tx);
+        assert_eq!(
+            id,
+            derived_recording_id(ts, &tx),
+            "a function of its inputs"
+        );
+        let parts: Vec<&str> = id.split('-').collect();
+        assert_eq!(
+            parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
+            vec![8, 4, 4, 4, 12]
+        );
+        assert!(parts[2].starts_with('7'), "version nibble is 7: {id}");
+        assert!(
+            matches!(parts[3].as_bytes()[0], b'8' | b'9' | b'a' | b'b'),
+            "RFC 9562 variant: {id}"
+        );
+        // The time field is the block's, in milliseconds.
+        let ms = u64::from_str_radix(&format!("{}{}", parts[0], parts[1]), 16).unwrap();
+        assert_eq!(ms, ts * 1000);
+        // CONTROL: another transaction or another block gives another id.
+        let other: TxHash = "0x0000000000000000000000000000000000000000000000000000000000000001"
+            .parse()
+            .unwrap();
+        assert_ne!(derived_recording_id(ts, &other), id);
+        assert_ne!(derived_recording_id(ts + 12, &tx), id);
+    }
 
     fn step(pc: usize, op: &str, depth: u64, gas: u64, memory: Option<Vec<u8>>) -> StepData {
         StepData {

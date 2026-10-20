@@ -177,6 +177,16 @@ struct TraceOnchainArgs {
     #[arg(long)]
     skip_source_fetch: bool,
 
+    /// The container's recording id: a UUIDv7, or `derive` to build one from
+    /// the block timestamp and the transaction hash.
+    ///
+    /// Omitted, the writer mints a fresh id and every run's bytes differ.
+    /// `derive` makes two runs over the same inputs write the same container,
+    /// which a producer needs when it publishes the container at a URL derived
+    /// from the inputs (BlockTracer's chain snapshots).
+    #[arg(long, value_name = "UUID|derive")]
+    recording_id: Option<String>,
+
     /// Keep recompiled artifacts whose bytecode disagrees with the code
     /// deployed at the target block.
     ///
@@ -368,6 +378,13 @@ async fn trace_onchain(args: TraceOnchainArgs) -> Result<()> {
 
     let mut options = onchain::OnchainOptions::new(rpc_url.clone(), tx_hash, &out_dir);
     options.skip_source_fetch = args.skip_source_fetch;
+    options.recording_id = args.recording_id.as_deref().map(|v| {
+        if v == "derive" {
+            onchain::RecordingId::Derive
+        } else {
+            onchain::RecordingId::Pinned(v.to_string())
+        }
+    });
     options.allow_source_mismatch = args.allow_source_mismatch;
     options.max_source_lookups = args.max_source_lookups;
     options.capture_memory = !args.no_memory;
