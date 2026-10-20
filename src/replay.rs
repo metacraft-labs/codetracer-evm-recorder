@@ -56,6 +56,8 @@ pub struct ReplayedTransaction {
     pub block_timestamp: u64,
     /// The transaction this is a replay of.
     pub tx_hash: TxHash,
+    /// Its input data: calldata for a call, the initcode for a contract creation.
+    pub input: Bytes,
     /// Index of the target transaction within that block.
     pub tx_index: usize,
     /// The revm hardfork the replay ran under, as inferred from the block
@@ -144,7 +146,7 @@ pub async fn replay_transaction_detailed(
     // The hardfork has to be known BEFORE the block environment is built:
     // the blob base fee is priced with a per-fork update fraction, and
     // `BlobExcessGasAndPrice::new` computes that price eagerly.
-    let spec = spec_from_block_header(&*block.header);
+    let spec = spec_for_block(chain_id, block_number, &*block.header);
 
     // Build block environment from the target block header.
     let block_env = BlockEnv {
@@ -245,6 +247,7 @@ pub async fn replay_transaction_detailed(
     Ok(ReplayedTransaction {
         execution: data,
         tx_hash,
+        input: AlloyTransactionTrait::input(&tx).clone(),
         chain_id,
         block_number,
         block_timestamp: block.header.timestamp(),
@@ -317,7 +320,7 @@ where
         return Err(eyre::eyre!("block 0 has no parent state to fork from"));
     }
     let parent_block_id: alloy::rpc::types::BlockId = (block_number - 1).into();
-    let spec = spec_from_block_header(&*block.header);
+    let spec = spec_for_block(chain_id, block_number, &*block.header);
     let block_env = BlockEnv {
         number: U256::from(block_number),
         beneficiary: block.header.beneficiary(),
@@ -387,6 +390,7 @@ where
         on_tx(ReplayedTransaction {
             execution,
             tx_hash: tx_hashes[index],
+            input: AlloyTransactionTrait::input(tx).clone(),
             chain_id,
             block_number,
             block_timestamp,
@@ -438,11 +442,27 @@ pub fn build_provider(rpc_url: &str) -> Result<impl Provider + Clone + use<>> {
     const INITIAL_BACKOFF_MS: u64 = 500;
 
     let client = alloy::rpc::client::ClientBuilder::default()
-        .layer(alloy::transports::layers::RetryBackoffLayer::new(
-            MAX_RATE_LIMIT_RETRIES,
-            INITIAL_BACKOFF_MS,
-            0,
-        ))
+        .layer(
+            alloy::transports::layers::RetryBackoffLayer::new_with_policy(
+                MAX_RATE_LIMIT_RETRIES,
+                INITIAL_BACKOFF_MS,
+                0,
+                // AND A GATEWAY'S TRANSIENT 5xx. alloy retries 429 and 503 on its own; a free
+                // endpoint also answers 502 / 504 and Cloudflare's 520-524 for a moment and
+                // then serves the same read. A whole-block replay makes thousands of reads, so
+                // one such answer used to stop a block (mainnet 4,370,100, measured: a 502 at
+                // index 59 left 18 transactions not reached) when retrying would have read on.
+                alloy::transports::layers::RateLimitRetryPolicy::default().or(
+                    |e: &alloy::transports::TransportError| {
+                        matches!(
+                            e.as_transport_err(),
+                            Some(alloy::transports::TransportErrorKind::HttpError(h))
+                                if matches!(h.status, 500 | 502 | 504 | 520..=524)
+                        )
+                    },
+                ),
+            ),
+        )
         .http(rpc_url.parse()?);
     Ok(ProviderBuilder::new().connect_client(client))
 }
@@ -499,6 +519,51 @@ where
 /// same optional fields as London).  The distinction only matters for
 /// prevrandao semantics, which are handled by the block environment rather
 /// than the spec ID.
+/// The hardfork a block executes under.
+///
+/// FROM THE CHAIN'S OWN SCHEDULE WHERE IT IS KNOWN, because a header cannot say which
+/// pre-London fork it belongs to: before EIP-1559 there is no member that differs
+/// between Byzantium, Constantinople, Istanbul and Berlin. The header-only rule below
+/// called all of them BERLIN, so mainnet block 4,370,100 (Byzantium) replayed with
+/// EIP-2929 access costs and the Istanbul repricings: in BlockTracer's first
+/// whole-block capture, 58 of 59 traced transactions disagreed with their receipts on
+/// gas, three of them reverting where the chain's succeeded. For Ethereum mainnet
+/// (chain 1) this reads the activation heights. A zero difficulty marks the Merge on any
+/// chain, which the header rule also missed (it said LONDON for Paris blocks). Other
+/// chains keep the header rule and its stated pre-London limitation.
+fn spec_for_block<H: BlockHeader>(chain_id: u64, number: u64, header: &H) -> SpecId {
+    let by_header = spec_from_block_header(header);
+    if by_header >= SpecId::SHANGHAI {
+        return by_header;
+    }
+    if header.difficulty().is_zero() && header.base_fee_per_gas().is_some() {
+        return SpecId::MERGE;
+    }
+    if chain_id != 1 {
+        return by_header;
+    }
+    // Ethereum mainnet activation heights (EIP-7568's hardfork meta list).
+    const MAINNET: &[(u64, SpecId)] = &[
+        (15_050_000, SpecId::GRAY_GLACIER),
+        (13_773_000, SpecId::ARROW_GLACIER),
+        (12_965_000, SpecId::LONDON),
+        (12_244_000, SpecId::BERLIN),
+        (9_200_000, SpecId::MUIR_GLACIER),
+        (9_069_000, SpecId::ISTANBUL),
+        (7_280_000, SpecId::PETERSBURG),
+        (4_370_000, SpecId::BYZANTIUM),
+        (2_675_000, SpecId::SPURIOUS_DRAGON),
+        (2_463_000, SpecId::TANGERINE),
+        (1_920_000, SpecId::DAO_FORK),
+        (1_150_000, SpecId::HOMESTEAD),
+    ];
+    MAINNET
+        .iter()
+        .find(|(height, _)| number >= *height)
+        .map(|(_, spec)| *spec)
+        .unwrap_or(SpecId::FRONTIER)
+}
+
 fn spec_from_block_header<H: BlockHeader>(header: &H) -> SpecId {
     if header.requests_hash().is_some() {
         SpecId::PRAGUE
@@ -544,6 +609,40 @@ mod tests {
     use revm::primitives::eip4844::{
         BLOB_BASE_FEE_UPDATE_FRACTION_CANCUN, BLOB_BASE_FEE_UPDATE_FRACTION_PRAGUE,
     };
+
+    #[test]
+    fn mainnet_forks_come_from_the_schedule_not_from_the_header() {
+        // A pre-London header: no base fee, no withdrawals, a non-zero difficulty. The
+        // header alone says BERLIN whatever its height, which is the defect.
+        let pre_london = alloy::consensus::Header {
+            difficulty: U256::from(3_000_000_000_000u64),
+            ..Default::default()
+        };
+        assert_eq!(spec_from_block_header(&pre_london), SpecId::BERLIN);
+        assert_eq!(spec_for_block(1, 4_370_100, &pre_london), SpecId::BYZANTIUM);
+        assert_eq!(
+            spec_for_block(1, 4_369_999, &pre_london),
+            SpecId::SPURIOUS_DRAGON
+        );
+        assert_eq!(spec_for_block(1, 9_069_000, &pre_london), SpecId::ISTANBUL);
+        assert_eq!(spec_for_block(1, 12_500_000, &pre_london), SpecId::BERLIN);
+        // CONTROL: another chain keeps the header rule, since its schedule is not known here.
+        assert_eq!(spec_for_block(10, 4_370_100, &pre_london), SpecId::BERLIN);
+        // The Merge, from the zero difficulty a post-Merge header carries.
+        let paris = alloy::consensus::Header {
+            base_fee_per_gas: Some(10),
+            ..Default::default()
+        };
+        assert_eq!(spec_for_block(1, 16_000_000, &paris), SpecId::MERGE);
+        // And a header that names its fork outright is believed.
+        let cancun = alloy::consensus::Header {
+            base_fee_per_gas: Some(10),
+            withdrawals_root: Some(Default::default()),
+            excess_blob_gas: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(spec_for_block(1, 19_500_000, &cancun), SpecId::CANCUN);
+    }
 
     #[test]
     fn prague_and_later_price_blobs_with_the_eip_7691_fraction() {

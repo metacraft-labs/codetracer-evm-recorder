@@ -57,6 +57,9 @@ pub struct CallData {
     pub value: U256,
     /// Gas limit passed to the callee.
     pub gas_limit: u64,
+    /// The initcode a CREATE / CREATE2 frame runs; `None` for calls.  A creation's
+    /// code is not at any address while it runs, so this is the only place it exists.
+    pub init_code: Option<alloy::primitives::Bytes>,
 }
 
 /// Distinguishes between CALL variants and CREATE variants.
@@ -231,6 +234,7 @@ where
             target: inputs.target_address,
             value,
             gas_limit: inputs.gas_limit,
+            init_code: None,
         });
 
         None // don't override the call result
@@ -259,6 +263,7 @@ where
             target: Address::ZERO,
             value: inputs.value(),
             gas_limit: inputs.gas_limit(),
+            init_code: Some(inputs.init_code().clone()),
         });
 
         None

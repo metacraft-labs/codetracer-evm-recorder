@@ -639,6 +639,9 @@ fn describe_source(outcome: &onchain::SourceOutcome) -> String {
                 format!("source unavailable (solc `{solc}`): {reason}")
             }
         }
+        O::Initcode { bytes } => format!(
+            "contract-creation initcode ({bytes} bytes), keyed by its keccak256; no deployed code to verify"
+        ),
         O::NoCode => "no code at the target block (EOA or self-destructed)".to_string(),
     }
 }

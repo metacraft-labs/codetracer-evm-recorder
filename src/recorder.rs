@@ -1536,8 +1536,21 @@ impl EvmRecorder {
                             .unwrap_or(Address::ZERO);
                         (addr, CallType::StaticCall, false, None)
                     }
-                    "CREATE" => (Address::ZERO, CallType::Create, false, None),
-                    "CREATE2" => (Address::ZERO, CallType::Create2, false, None),
+                    // The frame runs the INITCODE, which no address holds: it is keyed by
+                    // `onchain::initcode_address`, recomputed here from the creating step's
+                    // memory so the frame and the registry agree with no side table.
+                    "CREATE" => (
+                        create_frame_address(prev_log),
+                        CallType::Create,
+                        false,
+                        None,
+                    ),
+                    "CREATE2" => (
+                        create_frame_address(prev_log),
+                        CallType::Create2,
+                        false,
+                        None,
+                    ),
                     _ => (Address::ZERO, CallType::Call, false, None),
                 };
 
@@ -2290,6 +2303,38 @@ fn precompile_name_for_address(addr_lower160: u64) -> Option<&'static str> {
         0x09 => Some("blake2f"),
         _ => None,
     }
+}
+
+/// The address a CREATE / CREATE2 frame's initcode is registered under, from the
+/// creating step: its stack names the initcode's `offset` and `size` (below `value`),
+/// and its memory holds the bytes.  Bytes past the memory's current end read as zero,
+/// exactly as the EVM expands memory for the copy.  `Address::ZERO`, the old
+/// placeholder, when the step carries no memory (a replay run with `--no-memory`).
+pub(crate) fn create_frame_address(prev_log: Option<&StructLog>) -> Address {
+    let Some(log) = prev_log else {
+        return Address::ZERO;
+    };
+    let (Some(stack), Some(words)) = (log.stack.as_ref(), log.memory.as_ref()) else {
+        return Address::ZERO;
+    };
+    if stack.len() < 3 {
+        return Address::ZERO;
+    }
+    let as_usize = |v: &alloy::primitives::U256| usize::try_from(*v).ok();
+    let (Some(offset), Some(size)) = (
+        as_usize(&stack[stack.len() - 2]),
+        as_usize(&stack[stack.len() - 3]),
+    ) else {
+        return Address::ZERO;
+    };
+    let memory: Vec<u8> = words
+        .iter()
+        .flat_map(|w| alloy::hex::decode(w).unwrap_or_default())
+        .collect();
+    let init_code: Vec<u8> = (offset..offset.saturating_add(size))
+        .map(|i| memory.get(i).copied().unwrap_or(0))
+        .collect();
+    crate::onchain::initcode_address(&init_code)
 }
 
 /// Detect a CALL / STATICCALL / DELEGATECALL targeting one of the EVM

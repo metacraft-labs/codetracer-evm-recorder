@@ -58,7 +58,7 @@
 //! replay stepped through has somewhere to point.  `disassembly_fallback`
 //! turns it off, for a caller who wants verified source or nothing.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use alloy::primitives::{Address, TxHash};
@@ -361,6 +361,10 @@ pub enum SourceOutcome {
     /// Sourcify answered but the artifacts could not be produced (usually a
     /// solc version the machine does not have).  Carries the error chain.
     RecompileFailed { reason: String, solc: String },
+    /// A contract creation's initcode, which no address holds while it runs:
+    /// disassembled from the bytes the frame actually executed, and keyed by
+    /// [`initcode_address`].
+    Initcode { bytes: usize },
     /// The address has no code at the target block (an EOA or a
     /// self-destructed contract); nothing to look up.
     NoCode,
@@ -418,6 +422,37 @@ pub enum RecordingId {
     Pinned(String),
     /// Derive it from the block timestamp and the transaction hash.
     Derive,
+}
+
+/// The address a creation frame's initcode is registered under: the last 20 bytes
+/// of `keccak256(initcode)`.
+///
+/// NOT the created contract's address, and deliberately: a factory that creates a
+/// contract and then calls it in the same transaction runs the initcode and then the
+/// RUNTIME code, and keying both by the created address would attribute runtime steps
+/// to initcode lines, which is worse than leaving them unmapped.  Two creations with
+/// the same initcode share a listing, which is right because they ran the same code.
+/// The recorder computes the same address for a nested CREATE / CREATE2 from the
+/// creating step's memory, so the frame and the registry agree without any side table.
+pub fn initcode_address(init_code: &[u8]) -> Address {
+    Address::from_slice(&alloy::primitives::keccak256(init_code)[12..])
+}
+
+/// The initcodes a replay executed, by [`initcode_address`]: the transaction's own input
+/// when it is a creation, and every CREATE / CREATE2 frame's.
+fn executed_initcodes(
+    replayed: &ReplayedTransaction,
+) -> BTreeMap<Address, alloy::primitives::Bytes> {
+    let mut out = BTreeMap::new();
+    if replayed.to.is_none() {
+        out.insert(initcode_address(&replayed.input), replayed.input.clone());
+    }
+    for call in &replayed.execution.calls {
+        if let Some(code) = &call.init_code {
+            out.insert(initcode_address(code), code.clone());
+        }
+    }
+    out
 }
 
 /// A valid UUIDv7 (RFC 9562) that is a function of the transaction alone.
@@ -619,7 +654,10 @@ async fn record_replayed(
     // address and the created address is not known until the frame returns,
     // so the entry point is reported as the zero address and the creation
     // records unmapped.
-    let entry_point = replayed.to.unwrap_or(Address::ZERO);
+    let entry_point = replayed
+        .to
+        .unwrap_or_else(|| initcode_address(&replayed.input));
+    let initcodes = executed_initcodes(replayed);
 
     // ------------------------------------------------------------------ //
     // 2. Convert to the structLog shape the recorder consumes.            //
@@ -638,6 +676,21 @@ async fn record_replayed(
     // rate-limit retry.
     let provider = build_provider(&options.rpc_url)?;
     for address in &addresses {
+        // A creation's initcode is disassembled from the bytes the frame ran: there is
+        // no deployed code to fetch and no verified source to look up for it.
+        if let Some(code) = initcodes.get(address) {
+            let instructions = options.disassembly_fallback.then(|| {
+                let (artifacts, n) = disassembly_artifacts(*address, code);
+                registry.register(*address, artifacts);
+                n
+            });
+            lookups.push(SourceLookup {
+                address: *address,
+                outcome: SourceOutcome::Initcode { bytes: code.len() },
+                disassembly_instructions: instructions,
+            });
+            continue;
+        }
         let (outcome, disassembly_instructions) = resolve_source_for_address(
             &provider,
             *address,
@@ -664,6 +717,26 @@ async fn record_replayed(
     //    point the artifacts at them.                                     //
     // ------------------------------------------------------------------ //
     materialise_sources(&mut registry, &addresses, &options.out_dir)?;
+    // Beside each initcode listing, the bytes and their keccak256, so a consumer can key
+    // the listing by the code it describes without hashing it again.
+    for (address, code) in &initcodes {
+        let dir = options
+            .out_dir
+            .join("sources")
+            .join(format!("{address:#x}"));
+        if !dir.exists() {
+            continue;
+        }
+        let record = serde_json::json!({
+            "keccak256": format!("{:#x}", alloy::primitives::keccak256(code)),
+            "bytes": code.len(),
+            "hex": format!("{code}"),
+        });
+        std::fs::write(
+            dir.join(format!("{address:#x}.initcode.json")),
+            serde_json::to_string_pretty(&record)?,
+        )?;
+    }
 
     if registry.get(&entry_point).is_some() {
         registry.set_default(entry_point);
@@ -781,14 +854,19 @@ fn executed_addresses(replayed: &ReplayedTransaction, limit: usize) -> Vec<Addre
     let mut ordered: Vec<Address> = Vec::new();
     let mut seen: BTreeSet<Address> = BTreeSet::new();
 
-    if let Some(to) = replayed.to
-        && seen.insert(to)
-    {
-        ordered.push(to);
+    let entry = replayed
+        .to
+        .unwrap_or_else(|| initcode_address(&replayed.input));
+    if seen.insert(entry) {
+        ordered.push(entry);
     }
     for call in &replayed.execution.calls {
-        if call.target != Address::ZERO && seen.insert(call.target) {
-            ordered.push(call.target);
+        let executed = match &call.init_code {
+            Some(code) => initcode_address(code),
+            None => call.target,
+        };
+        if executed != Address::ZERO && seen.insert(executed) {
+            ordered.push(executed);
         }
         if ordered.len() >= limit {
             break;
@@ -1017,6 +1095,65 @@ mod tests {
     use super::*;
     use crate::inspector::StepData;
     use alloy::primitives::U256;
+
+    #[test]
+    fn a_create_frame_is_keyed_by_its_initcode_in_the_recorder_and_the_registry() {
+        // The recorder rebuilds a CREATE frame's initcode from the creating step's memory;
+        // the registry hashes the bytes the inspector captured. They must agree, or the
+        // frame's steps find no artifacts and record as `<unknown>`, which is the defect
+        // the first whole-block capture (mainnet block 4,370,100) showed.
+        let init: Vec<u8> = (0u8..70).collect();
+        let mut memory = vec![0u8; 8];
+        memory.extend_from_slice(&init);
+        let words: Vec<String> = memory
+            .chunks(32)
+            .map(|c| {
+                let mut w = [0u8; 32];
+                w[..c.len()].copy_from_slice(c);
+                alloy::hex::encode(w)
+            })
+            .collect();
+        let log = |stack: Vec<U256>, memory: Option<Vec<String>>| {
+            let mut l: crate::structlog::StructLog = serde_json::from_value(serde_json::json!({
+                "pc": 0, "op": "CREATE", "gas": 0, "gasCost": 0, "depth": 1
+            }))
+            .unwrap();
+            l.stack = Some(stack);
+            l.memory = memory;
+            l
+        };
+        // Stack bottom-to-top: size, offset, value (value on top).
+        let create = log(
+            vec![U256::from(init.len()), U256::from(8), U256::ZERO],
+            Some(words.clone()),
+        );
+        let expected = initcode_address(&init);
+        assert_eq!(
+            crate::recorder::create_frame_address(Some(&create)),
+            expected
+        );
+        // Bytes past memory's end read as zero, as the EVM expands memory for the copy.
+        let past = log(
+            vec![U256::from(init.len() + 5), U256::from(8), U256::ZERO],
+            Some(words),
+        );
+        let mut padded = init.clone();
+        padded.extend_from_slice(&[0u8; 5]);
+        assert_eq!(
+            crate::recorder::create_frame_address(Some(&past)),
+            initcode_address(&padded)
+        );
+        // CONTROL: without memory there is nothing to hash, and the placeholder stays.
+        let blind = log(
+            vec![U256::from(init.len()), U256::from(8), U256::ZERO],
+            None,
+        );
+        assert_eq!(
+            crate::recorder::create_frame_address(Some(&blind)),
+            Address::ZERO
+        );
+        assert_ne!(expected, Address::ZERO);
+    }
 
     #[test]
     fn derived_recording_id_is_a_uuidv7_of_the_transaction() {
