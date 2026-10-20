@@ -434,7 +434,21 @@ async fn trace_onchain(args: TraceOnchainArgs) -> Result<()> {
 
     let recording = onchain::record_onchain_transaction(&options).await?;
 
-    eprintln!(
+    eprint!("{}", render_recording(&recording));
+    Ok(())
+}
+
+/// The report `trace-onchain` prints for one recording, as text.
+///
+/// One function for both commands, because BlockTracer's producer parses these lines (status,
+/// gas, the captured shape, the entry point, the per-address listing census): `trace-block`
+/// writes the same text beside each container, so the producer reads a block capture exactly
+/// as it reads a single one.
+fn render_recording(recording: &onchain::OnchainRecording) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
         "chain {} block {} tx index {} ({} preceding transaction(s) replayed), hardfork {}",
         recording.chain_id,
         recording.block_number,
@@ -442,7 +456,8 @@ async fn trace_onchain(args: TraceOnchainArgs) -> Result<()> {
         recording.preceding_replayed,
         recording.spec_id,
     );
-    eprintln!(
+    let _ = writeln!(
+        out,
         "entry point {}, status {}, gas used {}",
         recording.entry_point,
         if recording.succeeded {
@@ -452,7 +467,8 @@ async fn trace_onchain(args: TraceOnchainArgs) -> Result<()> {
         },
         recording.gas_used,
     );
-    eprintln!(
+    let _ = writeln!(
+        out,
         "captured {} step(s), {} call(s), {} log(s); frame memory {}",
         recording.step_count,
         recording.call_count,
@@ -464,7 +480,8 @@ async fn trace_onchain(args: TraceOnchainArgs) -> Result<()> {
         },
     );
 
-    eprintln!(
+    let _ = writeln!(
+        out,
         "source attribution: {} of {} address(es) mapped",
         recording.mapped_addresses,
         recording.source_lookups.len(),
@@ -477,17 +494,18 @@ async fn trace_onchain(args: TraceOnchainArgs) -> Result<()> {
                  so its opcodes are navigable"
             ));
         }
-        eprintln!("{line}");
+        let _ = writeln!(out, "{line}");
     }
 
-    eprintln!(
+    let _ = writeln!(
+        out,
         "Container {} ({} bytes); reopened through the current reader, which sees {} step(s)",
         recording.container_path.display(),
         recording.container_bytes,
         recording.container_steps_read_back,
     );
-    eprintln!("Trace written to {}", recording.out_dir.display());
-    Ok(())
+    let _ = writeln!(out, "Trace written to {}", recording.out_dir.display());
+    out
 }
 
 /// Execute the `trace-block` subcommand. See [`onchain::record_onchain_block`].
@@ -525,6 +543,11 @@ async fn trace_block(args: TraceBlockArgs) -> Result<()> {
         let row = match outcome {
             onchain::BlockTxOutcome::Recorded(rec) => {
                 recorded += 1;
+                // The same report `trace-onchain` prints, beside the container, so a consumer
+                // that parses one recording's report reads each of a block's the same way.
+                let report_path = rec.container_path.with_extension("log");
+                std::fs::write(&report_path, render_recording(rec))
+                    .with_context(|| format!("cannot write {}", report_path.display()))?;
                 eprintln!(
                     "tx {index} {tx_hash} recorded {} ({} bytes, {} steps read back, status {})",
                     rec.container_path.display(),
@@ -541,6 +564,7 @@ async fn trace_block(args: TraceBlockArgs) -> Result<()> {
                     "logs": rec.log_count, "calls": rec.call_count,
                     "mappedAddresses": rec.mapped_addresses,
                     "lookedUpAddresses": rec.source_lookups.len(),
+                    "report": report_path.file_name().map(|n| n.to_string_lossy().to_string()),
                 })
             }
             onchain::BlockTxOutcome::NotRecorded(reason) => {
