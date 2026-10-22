@@ -352,6 +352,43 @@ pub fn parse_metadata_settings(metadata_json: &str) -> eyre::Result<MetadataSett
     })
 }
 
+/// The `(major, minor, patch)` of a solc version string such as `0.8.28+commit.7893614a`,
+/// or `None` when it does not parse (then every flag is passed, as before).
+pub fn solc_release(full_version: &str) -> Option<(u32, u32, u32)> {
+    let mut it = semver_prefix(full_version).trim_start_matches('v').split('.');
+    let major = it.next()?.parse().ok()?;
+    let minor = it.next()?.parse().ok()?;
+    let patch = it.next()?.parse().ok()?;
+    Some((major, minor, patch))
+}
+
+/// The length of `code` without the CBOR metadata solc appends, and the INVALID byte newer
+/// releases put before it: the last two bytes are the metadata's length, big-endian (every
+/// release from 0.4.7). Code that does not end in a
+/// plausible length is returned whole, so nothing is cut from code that carries none.
+pub fn strip_cbor_metadata_len(code: &[u8]) -> usize {
+    if code.len() < 2 {
+        return code.len();
+    }
+    let n = u16::from_be_bytes([code[code.len() - 2], code[code.len() - 1]]) as usize;
+    if n == 0 || n + 2 > code.len() {
+        return code.len();
+    }
+    // The metadata is a CBOR map: its first byte has major type 5 (0xa0..=0xbf).
+    let start = code.len() - 2 - n;
+    if (0xa0..=0xbf).contains(&code[start]) {
+        // Newer releases separate code and metadata with one INVALID (0xfe), which
+        // `--no-cbor-metadata` omits as well; it goes with the metadata.
+        if start > 0 && code[start - 1] == 0xfe {
+            start - 1
+        } else {
+            start
+        }
+    } else {
+        code.len()
+    }
+}
+
 /// Strip the commit-hash suffix from a metadata `compiler.version` string.
 ///
 /// Solc renders its full version as `<semver>+commit.<hash>.<...>` (e.g.
@@ -468,243 +505,328 @@ async fn fetch_one(url: &str, v2: bool) -> eyre::Result<Option<SourcifyContract>
 // Solc invocation + ContractArtifacts assembly
 // ---------------------------------------------------------------------------
 
-/// Recompile a Sourcify [`SourcifyContract`] bundle with the settings
-/// recorded in its `metadata.json` and assemble [`ContractArtifacts`].
+/// Recompile a Sourcify [`SourcifyContract`] bundle the way Sourcify verified it, and assemble
+/// [`ContractArtifacts`].
 ///
-/// Workflow:
+/// solc is given `--standard-json`, built from the bundle's `metadata.json`: every source under
+/// the path the metadata names it by, the metadata's own `settings` (optimizer and its details,
+/// `evmVersion`, `remappings`, `libraries`, `viaIR`, `metadata.bytecodeHash`), and its
+/// `compilationTarget` as the one contract to emit. That is Sourcify's own recompile, so a
+/// contract Sourcify matched recompiles to the same code.
 ///
-///   1. Parse the bundled `metadata.json` for compiler version,
-///      optimizer settings, and EVM target version.
-///   2. Write each `.sol` source file into a temporary directory under
-///      its original repo-relative path.
-///   3. Invoke solc with `--combined-json
-///      abi,bin-runtime,srcmap-runtime,storage-layout,ast` plus the
-///      `--optimize` / `--optimize-runs` / `--evm-version` flags
-///      derived from the metadata.
-///   4. Pick the contract whose key ends with the value of the
-///      `preferred_contract_name` argument (if any), otherwise the
-///      first contract solc reports.  Sourcify bundles can contain
-///      multiple contracts in a single `.sol` (libraries, base
-///      contracts), so the caller must tell us which one to keep.
-///   5. Decode the runtime bytecode, parse the source map + storage
-///      layout + AST, and assemble [`ContractArtifacts`].
+/// IT REPLACED A `--combined-json` COMMAND LINE that lost most of that. It passed
+/// `--no-cbor-metadata` to every release (solc 0.8.18 and later accept it), so every contract
+/// verified before 0.8.18 failed; it dropped remappings and library addresses, so any
+/// multi-file project laid out under absolute paths failed; it picked the first contract in the
+/// output rather than the compilation target, so a file holding several compiled the wrong one
+/// (33 bytes of a library against kilobytes deployed); and it indexed source files in the
+/// bundle's order rather than solc's source ids, which a multi-file source map does not use.
 ///
-/// `solc_cmd` is the solc binary to invoke (caller's responsibility to
-/// pick the right version for the metadata; we do not run solc-select
-/// here).  The recorder's CLI mirrors this with the `SOLC_PATH`
-/// env-var convention.
+/// Output selections solc does not know are not requested: `storageLayout` exists from 0.5.13
+/// and `evm.deployedBytecode.immutableReferences` from 0.6.5. The CBOR metadata solc appends is
+/// stripped from the runtime code, so a correct recompile is a PREFIX of the deployed code
+/// whatever the release, and the immutable references are returned so the caller can mask them
+/// in the deployed code before comparing.
 ///
-/// Returns an error on any solc failure, missing combined-json field,
-/// or invalid hex / JSON in solc's output.  The error chain includes
-/// solc's stderr so the caller can diagnose version-mismatch and
-/// settings-mismatch failures.
+/// `preferred_contract_name` is used only when the metadata names no compilation target.
 pub fn compile_sourcify_bundle(
     bundle: &SourcifyContract,
     solc_cmd: &str,
     preferred_contract_name: Option<&str>,
 ) -> eyre::Result<ContractArtifacts> {
+    compile_sourcify_bundle_with_immutables(bundle, solc_cmd, preferred_contract_name)
+        .map(|(artifacts, _)| artifacts)
+}
+
+/// [`compile_sourcify_bundle`], plus the byte ranges of the runtime code that hold immutable
+/// values: zero in the recompile, set at deployment in the deployed code.
+pub fn compile_sourcify_bundle_with_immutables(
+    bundle: &SourcifyContract,
+    solc_cmd: &str,
+    preferred_contract_name: Option<&str>,
+) -> eyre::Result<(ContractArtifacts, Vec<(usize, usize)>)> {
     let metadata_json = bundle
         .metadata_json
         .as_deref()
         .ok_or_else(|| eyre::eyre!("Sourcify bundle has no metadata.json; cannot recompile"))?;
     let settings = parse_metadata_settings(metadata_json)?;
-
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|e| eyre::eyre!("metadata.json is not valid JSON: {e}"))?;
     if bundle.sources.is_empty() {
         return Err(eyre::eyre!(
             "Sourcify bundle has no Solidity source files; cannot recompile"
         ));
     }
+    let release = solc_release(&settings.solc_version);
+    let at_least = |v: (u32, u32, u32)| release.is_none_or(|r| r >= v);
 
-    // -------------------------------------------------------------------
-    // 1. Write sources into a tempdir under their repo-relative paths.
+    // ---- 1. The sources, under the names the metadata compiled them by ------------------
     //
-    // Sourcify stores files at paths like
-    //   /contracts/full_match/<chain>/<addr>/sources/<basename>.sol
-    // We strip the leading slash and reconstruct the directory layout
-    // under the tempdir so multi-file projects with relative imports
-    // resolve correctly.
-    // -------------------------------------------------------------------
-    let tmp =
-        tempfile::TempDir::new().map_err(|e| eyre::eyre!("failed to create solc tempdir: {e}"))?;
-    let mut written_paths: Vec<PathBuf> = Vec::with_capacity(bundle.sources.len());
-    for src in &bundle.sources {
-        let relative = src.path.trim_start_matches('/');
-        let dst = tmp.path().join(relative);
-        if let Some(parent) = dst.parent() {
-            let parent_display = parent.display().to_string();
-            std::fs::create_dir_all(parent).map_err(|e| {
-                eyre::eyre!("failed to create solc tempdir entry {parent_display}: {e}")
-            })?;
+    // Sourcify v2 keys its sources by those names already; v1 nests them under a
+    // `.../sources/` prefix, so a metadata name matches the bundle path it is a suffix of.
+    // A metadata document that names no sources (a hand-built one) compiles the bundle's
+    // files under their own paths.
+    let empty = serde_json::Map::new();
+    let meta_sources = metadata
+        .get("sources")
+        .and_then(|v| v.as_object())
+        .unwrap_or(&empty);
+    let mut input_sources = serde_json::Map::new();
+    if meta_sources.is_empty() {
+        for src in &bundle.sources {
+            input_sources.insert(src.path.clone(), serde_json::json!({ "content": src.content }));
         }
-        std::fs::write(&dst, &src.content)
-            .map_err(|e| eyre::eyre!("failed to write source file {}: {e}", dst.display()))?;
-        written_paths.push(dst);
+    }
+    for (name, entry) in meta_sources {
+        let bare = name.trim_start_matches('/');
+        let from_bundle = bundle
+            .sources
+            .iter()
+            .find(|s| s.path == *name)
+            .or_else(|| bundle.sources.iter().find(|s| s.path.ends_with(bare)));
+        let content = match from_bundle {
+            Some(s) => s.content.clone(),
+            None => entry
+                .get("content")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    eyre::eyre!("metadata source `{name}` is not in the Sourcify bundle")
+                })?,
+        };
+        input_sources.insert(name.clone(), serde_json::json!({ "content": content }));
     }
 
-    // -------------------------------------------------------------------
-    // 2. Build the solc command line from the metadata settings.
-    // -------------------------------------------------------------------
-    let mut cmd = Command::new(solc_cmd);
-    cmd.args([
-        "--combined-json",
-        "abi,bin,bin-runtime,srcmap-runtime,storage-layout,ast",
-        "--no-cbor-metadata",
-    ]);
-    if settings.optimizer_enabled {
-        cmd.arg("--optimize");
-        cmd.arg("--optimize-runs");
-        cmd.arg(settings.optimizer_runs.to_string());
+    // ---- 2. The settings, as the metadata states them ------------------------------------
+    let mut input_settings = metadata
+        .get("settings")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let target = input_settings
+        .get("compilationTarget")
+        .and_then(|v| v.as_object())
+        .and_then(|m| m.iter().next())
+        .map(|(file, name)| (file.clone(), name.as_str().unwrap_or_default().to_string()));
+    if let Some(obj) = input_settings.as_object_mut() {
+        obj.remove("compilationTarget");
+        // The metadata spells libraries `"file:Lib": "0x…"`; standard JSON nests them by file.
+        if let Some(libs) = obj.remove("libraries").and_then(|v| v.as_object().cloned()) {
+            let mut nested = serde_json::Map::new();
+            for (key, addr) in libs {
+                let (file, lib) = key.rsplit_once(':').unwrap_or(("", key.as_str()));
+                let slot = nested
+                    .entry(file.to_string())
+                    .or_insert_with(|| serde_json::json!({}));
+                if let Some(m) = slot.as_object_mut() {
+                    m.insert(lib.to_string(), addr);
+                }
+            }
+            obj.insert("libraries".into(), serde_json::Value::Object(nested));
+        }
+        let mut per_contract = vec![
+            "evm.deployedBytecode.object",
+            "evm.deployedBytecode.sourceMap",
+        ];
+        if at_least((0, 6, 5)) {
+            per_contract.push("evm.deployedBytecode.immutableReferences");
+        }
+        if at_least((0, 5, 13)) {
+            per_contract.push("storageLayout");
+        }
+        obj.insert(
+            "outputSelection".into(),
+            serde_json::json!({ "*": { "*": per_contract, "": ["ast"] } }),
+        );
     }
-    if let Some(ref evm) = settings.evm_version {
-        cmd.arg("--evm-version");
-        cmd.arg(evm);
-    }
-    for p in &written_paths {
-        cmd.arg(p);
-    }
+    let language = metadata
+        .get("language")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Solidity");
+    let input = serde_json::json!({
+        "language": language,
+        "sources": input_sources,
+        "settings": input_settings,
+    });
 
-    let output = cmd.output().map_err(|e| {
+    // ---- 3. solc ---------------------------------------------------------------------------
+    let mut child = Command::new(solc_cmd)
+        .arg("--standard-json")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            eyre::eyre!(
+                "failed to run solc ({solc_cmd}) for Sourcify-recompile (version {}): {e}",
+                settings.solc_version
+            )
+        })?;
+    {
+        use std::io::Write;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| eyre::eyre!("solc's stdin was not captured"))?;
+        stdin
+            .write_all(input.to_string().as_bytes())
+            .map_err(|e| eyre::eyre!("failed to write solc's standard-json input: {e}"))?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|e| eyre::eyre!("solc ({solc_cmd}) did not finish: {e}"))?;
+    let out: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|e| {
         eyre::eyre!(
-            "failed to run solc ({solc_cmd}) for Sourcify-recompile (version {}): {e}",
-            settings.solc_version
+            "solc Sourcify-recompile (version {}) wrote no JSON ({e}); stderr: {}",
+            settings.solc_version,
+            String::from_utf8_lossy(&output.stderr)
         )
     })?;
-
-    if !output.status.success() {
+    let errors: Vec<String> = out
+        .get("errors")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter(|e| e.get("severity").and_then(|s| s.as_str()) == Some("error"))
+                .map(|e| {
+                    e.get("formattedMessage")
+                        .or_else(|| e.get("message"))
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("(no message)")
+                        .trim()
+                        .to_string()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if !errors.is_empty() {
         return Err(eyre::eyre!(
-            "solc Sourcify-recompile failed (version {}):\nstdout: {}\nstderr: {}",
+            "solc Sourcify-recompile failed (version {}): {}",
             settings.solc_version,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+            errors.join(" | ")
         ));
     }
 
-    let combined_json_str = String::from_utf8(output.stdout)
-        .map_err(|e| eyre::eyre!("solc output is not valid UTF-8: {e}"))?;
-    let combined: serde_json::Value = serde_json::from_str(&combined_json_str)
-        .map_err(|e| eyre::eyre!("solc output is not valid JSON: {e}"))?;
-
-    // -------------------------------------------------------------------
-    // 3. Pick the target contract from the `contracts` map.
-    //
-    // Combined-json keys look like `path/to/File.sol:ContractName`.  If
-    // the caller named a contract we honour that; otherwise we take the
-    // first non-library, non-interface contract (preferring entries
-    // with non-empty `bin-runtime`, since libraries / interfaces
-    // produce empty runtime bytecode).
-    // -------------------------------------------------------------------
-    let contracts = combined
+    // ---- 4. The compilation target's artifacts -------------------------------------------
+    let contracts = out
         .get("contracts")
         .and_then(|v| v.as_object())
         .ok_or_else(|| eyre::eyre!("solc output is missing the 'contracts' object"))?;
-
-    let (contract_key, contract_json) = pick_contract(contracts, preferred_contract_name)?;
-    let contract_name = contract_key
-        .split(':')
-        .next_back()
-        .unwrap_or(contract_key)
-        .to_string();
-
-    // -------------------------------------------------------------------
-    // 4. Decode the artifact fields.
-    // -------------------------------------------------------------------
-    let runtime_bytecode_hex = contract_json
-        .get("bin-runtime")
+    let (file, name) = match target {
+        Some(t) => t,
+        None => {
+            // No target named: the preferred name, else the first contract with runtime code.
+            let mut found = None;
+            for (file, by_name) in contracts {
+                for (name, c) in by_name.as_object().into_iter().flatten() {
+                    let code = c
+                        .pointer("/evm/deployedBytecode/object")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    let wanted = preferred_contract_name.is_none_or(|p| name == p);
+                    if wanted && !code.is_empty() && found.is_none() {
+                        found = Some((file.clone(), name.clone()));
+                    }
+                }
+            }
+            found.ok_or_else(|| eyre::eyre!("solc emitted no contract with runtime code"))?
+        }
+    };
+    let contract = contracts
+        .get(&file)
+        .and_then(|m| m.get(&name))
+        .ok_or_else(|| eyre::eyre!("solc emitted no `{file}:{name}`, the compilation target"))?;
+    let code_hex = contract
+        .pointer("/evm/deployedBytecode/object")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| eyre::eyre!("missing 'bin-runtime' for contract {contract_key}"))?;
-    let runtime_bytecode = alloy::hex::decode(runtime_bytecode_hex).map_err(|e| {
-        eyre::eyre!("invalid runtime bytecode hex for contract {contract_key}: {e}")
+        .ok_or_else(|| eyre::eyre!("no deployed bytecode for `{file}:{name}`"))?;
+    let mut runtime_bytecode = alloy::hex::decode(code_hex).map_err(|e| {
+        eyre::eyre!("deployed bytecode of `{file}:{name}` is not hex (an unlinked library?): {e}")
     })?;
+    runtime_bytecode.truncate(strip_cbor_metadata_len(&runtime_bytecode));
     if runtime_bytecode.is_empty() {
         return Err(eyre::eyre!(
-            "contract {contract_key} has empty runtime bytecode (likely an interface or abstract contract)"
+            "`{file}:{name}` has empty runtime bytecode (an interface or abstract contract)"
         ));
     }
-
-    let source_map_raw = contract_json
-        .get("srcmap-runtime")
+    let source_map_raw = contract
+        .pointer("/evm/deployedBytecode/sourceMap")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| eyre::eyre!("missing 'srcmap-runtime' for contract {contract_key}"))?;
+        .unwrap_or_default();
     if source_map_raw.is_empty() {
-        return Err(eyre::eyre!(
-            "contract {contract_key} has empty 'srcmap-runtime'"
-        ));
+        return Err(eyre::eyre!("`{file}:{name}` has an empty runtime source map"));
     }
-
     let source_map = SourceMap::parse(source_map_raw);
     let pc_to_idx = build_pc_to_instruction_index(&runtime_bytecode);
-
-    let storage_layout: Option<StorageLayout> = contract_json
-        .get("storage-layout")
-        .and_then(|v| {
-            if v.is_null() {
-                None
-            } else if let Some(obj) = v.as_object() {
-                if obj.is_empty() {
-                    None
-                } else {
-                    Some(v.clone())
+    let storage_layout: Option<StorageLayout> = contract
+        .get("storageLayout")
+        .filter(|v| v.as_object().is_some_and(|o| !o.is_empty()))
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
+    let mut immutables = Vec::new();
+    if let Some(refs) = contract
+        .pointer("/evm/deployedBytecode/immutableReferences")
+        .and_then(|v| v.as_object())
+    {
+        for ranges in refs.values() {
+            for r in ranges.as_array().into_iter().flatten() {
+                let start = r.get("start").and_then(|v| v.as_u64());
+                let length = r.get("length").and_then(|v| v.as_u64());
+                if let (Some(s), Some(l)) = (start, length) {
+                    immutables.push((s as usize, l as usize));
                 }
-            } else {
-                None
             }
-        })
-        .and_then(|v| serde_json::from_value(v).ok());
-
-    let solidity_ast = SolidityAst::from_combined_json(&combined_json_str).ok();
-
-    // Source paths and contents -- preserve the original Sourcify
-    // repo-relative paths so the recorder's source-resolver can index
-    // them by file_index in the source map without any rewriting.
-    let source_paths: Vec<PathBuf> = bundle
-        .sources
-        .iter()
-        .map(|s| PathBuf::from(&s.path))
-        .collect();
-    let source_contents: Vec<String> = bundle.sources.iter().map(|s| s.content.clone()).collect();
-
-    Ok(ContractArtifacts {
-        name: contract_name,
-        source_map,
-        runtime_bytecode,
-        pc_to_idx,
-        source_paths,
-        source_contents,
-        storage_layout,
-        solidity_ast,
-    })
-}
-
-/// Pick the target contract from a solc combined-json `contracts` map.
-///
-/// `preferred_contract_name` constrains the choice to entries whose key
-/// ends with `:<name>` (the canonical solc convention for combined-json
-/// contract keys).  Without a preferred name we take the first contract
-/// with a non-empty `bin-runtime` to avoid landing on an interface or
-/// pure abstract base.
-fn pick_contract<'a>(
-    contracts: &'a serde_json::Map<String, serde_json::Value>,
-    preferred_contract_name: Option<&str>,
-) -> eyre::Result<(&'a String, &'a serde_json::Value)> {
-    if let Some(name) = preferred_contract_name {
-        let suffix = format!(":{name}");
-        if let Some(hit) = contracts.iter().find(|(k, _)| k.ends_with(&suffix)) {
-            return Ok(hit);
         }
-        return Err(eyre::eyre!(
-            "solc output does not contain a contract named `{name}`"
-        ));
     }
 
-    contracts
+    // ---- 5. Source files BY SOLC'S SOURCE ID, which is what the source map indexes -------
+    let out_sources = out
+        .get("sources")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| eyre::eyre!("solc output is missing the 'sources' object"))?;
+    let mut by_id: Vec<(u64, String)> = out_sources
         .iter()
-        .find(|(_, v)| {
-            v.get("bin-runtime")
-                .and_then(|x| x.as_str())
-                .is_some_and(|s| !s.is_empty())
-        })
-        .or_else(|| contracts.iter().next())
-        .ok_or_else(|| eyre::eyre!("solc output's 'contracts' map is empty"))
+        .filter_map(|(path, s)| s.get("id").and_then(|v| v.as_u64()).map(|id| (id, path.clone())))
+        .collect();
+    by_id.sort();
+    let mut source_paths = Vec::with_capacity(by_id.len());
+    let mut source_contents = Vec::with_capacity(by_id.len());
+    for (_, path) in &by_id {
+        source_paths.push(PathBuf::from(path));
+        source_contents.push(
+            input_sources
+                .get(path)
+                .and_then(|s| s.get("content"))
+                .and_then(|c| c.as_str())
+                .unwrap_or_default()
+                .to_string(),
+        );
+    }
+    // The AST, in the shape `SolidityAst::from_combined_json` reads: `sources.<path>.AST`.
+    let mut ast_sources = serde_json::Map::new();
+    for (path, s) in out_sources {
+        if let Some(ast) = s.get("ast").or_else(|| s.get("legacyAST")) {
+            ast_sources.insert(path.clone(), serde_json::json!({ "AST": ast }));
+        }
+    }
+    let solidity_ast = if ast_sources.is_empty() {
+        None
+    } else {
+        SolidityAst::from_combined_json(&serde_json::json!({ "sources": ast_sources }).to_string())
+            .ok()
+    };
+
+    Ok((
+        ContractArtifacts {
+            name,
+            source_map,
+            runtime_bytecode,
+            pc_to_idx,
+            source_paths,
+            source_contents,
+            storage_layout,
+            solidity_ast,
+        },
+        immutables,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1057,6 +1179,42 @@ mod tests {
     // -------------------------------------------------------------------
     // metadata.json parsing
     // -------------------------------------------------------------------
+
+    #[test]
+    fn solc_release_reads_the_version_and_refuses_what_it_cannot() {
+        assert_eq!(solc_release("0.8.28+commit.7893614a"), Some((0, 8, 28)));
+        assert_eq!(solc_release("v0.4.24+commit.e67f0147"), Some((0, 4, 24)));
+        assert_eq!(solc_release("0.5.12"), Some((0, 5, 12)));
+        assert_eq!(solc_release(""), None);
+        assert_eq!(solc_release("nightly"), None);
+    }
+
+    #[test]
+    fn cbor_metadata_is_stripped_only_where_it_is() {
+        // 0.4.x's swarm metadata: a1 65 'bzzr0' 58 20 <32 bytes>, then length 0x0029.
+        let code = [0x60u8, 0x80, 0x60, 0x40, 0x52];
+        let mut meta = vec![0xa1, 0x65, b'b', b'z', b'z', b'r', b'0', 0x58, 0x20];
+        meta.extend_from_slice(&[0x11u8; 32]);
+        let mut with = code.to_vec();
+        with.extend_from_slice(&meta);
+        with.extend_from_slice(&(meta.len() as u16).to_be_bytes());
+        assert_eq!(strip_cbor_metadata_len(&with), code.len());
+        // A newer release's 0xfe separator goes with the metadata.
+        let mut sep = code.to_vec();
+        sep.push(0xfe);
+        sep.extend_from_slice(&meta);
+        sep.extend_from_slice(&(meta.len() as u16).to_be_bytes());
+        assert_eq!(strip_cbor_metadata_len(&sep), code.len());
+        // Controls: code with no metadata, an implausible length, and a tail that is not a
+        // CBOR map are returned whole.
+        assert_eq!(strip_cbor_metadata_len(&code), code.len());
+        let mut too_long = code.to_vec();
+        too_long.extend_from_slice(&[0x01, 0x00]);
+        assert_eq!(strip_cbor_metadata_len(&too_long), too_long.len());
+        let mut not_map = code.to_vec();
+        not_map.extend_from_slice(&[0x60, 0x01, 0x00, 0x02]);
+        assert_eq!(strip_cbor_metadata_len(&not_map), not_map.len());
+    }
 
     #[test]
     fn parse_metadata_minimal_uses_solc_defaults() {

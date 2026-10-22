@@ -355,6 +355,10 @@ pub enum SourceOutcome {
         prefix_match: usize,
         /// Length of the deployed runtime bytecode.
         deployed_len: usize,
+        /// Whether the recompile produced a Solidity AST and a storage layout. With the
+        /// source map, these are what Chain-Support-Matrix §1.2a's level B requires.
+        ast: bool,
+        storage_layout: bool,
     },
     /// Sourcify has no verified match for the address.
     NotVerified,
@@ -1032,8 +1036,9 @@ async fn resolve_source_for_address<P: Provider>(
         .unwrap_or_default();
     let (solc, version_matched) = resolve_solc_for_version(&full_version);
 
-    let artifacts = match source_fetcher::compile_sourcify_bundle(&bundle, &solc, None) {
-        Ok(artifacts) => artifacts,
+    let (artifacts, immutables) =
+        match source_fetcher::compile_sourcify_bundle_with_immutables(&bundle, &solc, None) {
+        Ok(compiled) => compiled,
         Err(err) => {
             let instructions = fall_back(registry);
             return (
@@ -1055,7 +1060,16 @@ async fn resolve_source_for_address<P: Provider>(
         }
     };
 
-    let prefix_match = common_prefix_len(&artifacts.runtime_bytecode, &deployed);
+    // Immutable values are set at deployment and are zero in a recompile, so they are masked
+    // in the deployed code before the comparison, as Sourcify masks them.
+    let mut compared = deployed.to_vec();
+    for &(start, len) in &immutables {
+        let end = (start + len).min(compared.len());
+        if start < end {
+            compared[start..end].fill(0);
+        }
+    }
+    let prefix_match = common_prefix_len(&artifacts.runtime_bytecode, &compared);
     let aligned = prefix_match == artifacts.runtime_bytecode.len().min(deployed.len());
 
     if aligned {
@@ -1064,6 +1078,8 @@ async fn resolve_source_for_address<P: Provider>(
             source_files: artifacts.source_paths.len(),
             prefix_match,
             deployed_len: deployed.len(),
+            ast: artifacts.solidity_ast.is_some(),
+            storage_layout: artifacts.storage_layout.is_some(),
         };
         registry.register(address, artifacts);
         return (outcome, None);

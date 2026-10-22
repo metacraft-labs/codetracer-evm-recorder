@@ -627,9 +627,14 @@ fn describe_source(outcome: &onchain::SourceOutcome) -> String {
             source_files,
             prefix_match,
             deployed_len,
+            ast,
+            storage_layout,
         } => format!(
             "mapped as {contract_name} ({source_files} source file(s)); \
-             recompiled code matches the first {prefix_match} of {deployed_len} deployed bytes"
+             recompiled code matches the first {prefix_match} of {deployed_len} deployed bytes; \
+             source map, {}, {}",
+            if *ast { "AST" } else { "no AST" },
+            if *storage_layout { "storage layout" } else { "no storage layout" }
         ),
         O::NotVerified => "no usable verified source".to_string(),
         O::LookupCapped { limit } => format!(
