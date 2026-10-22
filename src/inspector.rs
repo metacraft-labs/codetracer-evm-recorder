@@ -128,6 +128,10 @@ pub struct CodeTracerInspector {
     current_depth: u64,
     /// Whether to copy the frame's memory into every [`StepData`].
     capture_memory: bool,
+    /// `data.logs.len()` at the entry of every open call / create frame. A frame that does
+    /// not succeed discards the logs it and its children emitted, exactly as the EVM
+    /// discards them, so the captured logs are the ones the receipt can carry.
+    log_marks: Vec<usize>,
 }
 
 impl CodeTracerInspector {
@@ -213,6 +217,7 @@ where
 
     fn call(&mut self, _context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
         self.current_depth += 1;
+        self.log_marks.push(self.data.logs.len());
 
         let kind = match inputs.scheme {
             CallScheme::Call => CallKind::Call,
@@ -240,7 +245,15 @@ where
         None // don't override the call result
     }
 
-    fn call_end(&mut self, _context: &mut CTX, _inputs: &CallInputs, _outcome: &mut CallOutcome) {
+    fn call_end(&mut self, _context: &mut CTX, _inputs: &CallInputs, outcome: &mut CallOutcome) {
+        // A reverted or failed frame's logs never reach the receipt. Counting them made 14
+        // reverted transactions in BlockTracer's pinned yield windows read "0 logs on chain,
+        // N replayed" while status and gas agreed.
+        if let Some(mark) = self.log_marks.pop()
+            && !outcome.result.is_ok()
+        {
+            self.data.logs.truncate(mark);
+        }
         if self.current_depth > 0 {
             self.current_depth -= 1;
         }
@@ -248,6 +261,7 @@ where
 
     fn create(&mut self, _context: &mut CTX, inputs: &mut CreateInputs) -> Option<CreateOutcome> {
         self.current_depth += 1;
+        self.log_marks.push(self.data.logs.len());
 
         let kind = match inputs.scheme() {
             revm::interpreter::CreateScheme::Create => CallKind::Create,
@@ -273,8 +287,13 @@ where
         &mut self,
         _context: &mut CTX,
         _inputs: &CreateInputs,
-        _outcome: &mut CreateOutcome,
+        outcome: &mut CreateOutcome,
     ) {
+        if let Some(mark) = self.log_marks.pop()
+            && !outcome.result.is_ok()
+        {
+            self.data.logs.truncate(mark);
+        }
         if self.current_depth > 0 {
             self.current_depth -= 1;
         }

@@ -499,6 +499,26 @@ where
         builder = builder.chain_id(Some(chain_id));
     }
 
+    // THE TYPED-TRANSACTION FIELDS, which change what the transaction costs. Without them
+    // revm ran every transaction as if it carried no access list (EIP-2930), no blobs
+    // (EIP-4844) and no authorizations (EIP-7702). An access-listed slot is warm and was
+    // charged cold (2,100 / 2,600 gas), and a list entry's own cost went unpaid. In
+    // BlockTracer's six pinned yield windows that was 13 transactions whose replayed gas
+    // differed from the receipt by exactly such amounts, all of them successful.
+    builder = builder.tx_type(Some(alloy::eips::Typed2718::ty(tx)));
+    if let Some(list) = AlloyTransactionTrait::access_list(tx) {
+        builder = builder.access_list(list.clone());
+    }
+    if let Some(hashes) = AlloyTransactionTrait::blob_versioned_hashes(tx) {
+        builder = builder.blob_hashes(hashes.to_vec());
+    }
+    if let Some(fee) = AlloyTransactionTrait::max_fee_per_blob_gas(tx) {
+        builder = builder.max_fee_per_blob_gas(fee);
+    }
+    if let Some(auths) = AlloyTransactionTrait::authorization_list(tx) {
+        builder = builder.authorization_list_signed(auths.to_vec());
+    }
+
     Ok(builder.build_fill())
 }
 
