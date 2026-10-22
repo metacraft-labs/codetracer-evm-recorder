@@ -546,6 +546,9 @@ pub struct OnchainRecording {
     /// are therefore not in the container. See
     /// [`EvmRecorder::steps_without_artifacts`]; 0 unless `--no-disassembly-fallback`.
     pub steps_without_artifacts: u64,
+    /// Executed steps at a PC the frame's registered code does not have as an
+    /// instruction. See [`EvmRecorder::steps_off_code`]; 0 in a correct recording.
+    pub steps_off_code: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -797,6 +800,7 @@ async fn record_replayed(
         .record_from_structlog_multi_contract(&struct_logs, &registry, entry_point)
         .context("recorder failed to process the replayed structlogs")?;
     let steps_without_artifacts = recorder.steps_without_artifacts();
+    let steps_off_code = recorder.steps_off_code();
 
     if !replayed.succeeded {
         let decoded = revert_decode::decode_revert_with_registry(
@@ -865,7 +869,14 @@ async fn record_replayed(
         container_bytes,
         container_steps_read_back,
         steps_without_artifacts,
+        steps_off_code,
     })
+}
+
+/// The delegate an EIP-7702 designator (`0xef0100 ‖ address`, 23 bytes) points at, or
+/// `None` for any other code.
+pub fn delegation_target(code: &[u8]) -> Option<Address> {
+    (code.len() == 23 && code[..3] == [0xef, 0x01, 0x00]).then(|| Address::from_slice(&code[3..]))
 }
 
 /// The distinct addresses whose code executed, entry point first, every one of
@@ -938,6 +949,36 @@ async fn resolve_source_for_address<P: Provider>(
         return (SourceOutcome::NoCode, None);
     }
 
+    // AN EIP-7702 ACCOUNT HOLDS A DESIGNATOR, NOT THE CODE IT RUNS. Its code is the 23 bytes
+    // `0xef0100 ‖ delegate`, and a call to it executes the DELEGATE's code in the account's
+    // context. Listing the designator resolved every step against 7 instructions: PCs past
+    // them were dropped and PCs inside them named instructions that never ran (mainnet block
+    // 22,500,000: 378 steps captured, 5 in the container). So the delegate's code is listed,
+    // and looked up on Sourcify, under the ACCOUNT's address, which is where the frame is keyed.
+    let (deployed, source_address) = match delegation_target(&deployed) {
+        None => (deployed, address),
+        Some(delegate) => match provider
+            .get_code_at(delegate)
+            .block_id(block_number.into())
+            .await
+        {
+            Ok(code) if !code.is_empty() => (code, delegate),
+            Ok(_) => return (SourceOutcome::NoCode, None),
+            Err(err) => {
+                return (
+                    SourceOutcome::RecompileFailed {
+                        reason: format!(
+                            "eth_getCode for {address}'s EIP-7702 delegate {delegate} at \
+                             block {block_number} failed: {err}"
+                        ),
+                        solc: String::new(),
+                    },
+                    None,
+                );
+            }
+        },
+    };
+
     // Registers the disassembly listing and reports how many instructions it
     // holds.  Used for every path below that does not end in usable verified
     // source.
@@ -964,7 +1005,7 @@ async fn resolve_source_for_address<P: Provider>(
         );
     }
 
-    let bundle = match source_fetcher::fetch_sourcify_files(chain_id, address).await {
+    let bundle = match source_fetcher::fetch_sourcify_files(chain_id, source_address).await {
         Ok(Some(bundle)) => bundle,
         Ok(None) => {
             let instructions = fall_back(registry);
@@ -1391,6 +1432,21 @@ mod tests {
         let d = disassemble(&bytecode);
         assert_eq!(d.instructions, 1);
         assert_eq!(d.listing.lines().next().unwrap(), "0x0000  PUSH32 0x");
+    }
+
+    #[test]
+    fn an_eip7702_designator_names_its_delegate_and_nothing_else_does() {
+        let mut code = vec![0xef, 0x01, 0x00];
+        code.extend_from_slice(&[0x80u8; 20]);
+        assert_eq!(delegation_target(&code), Some(Address::from([0x80u8; 20])));
+        // Controls: one byte longer, a different prefix, and ordinary code are not designators.
+        let mut longer = code.clone();
+        longer.push(0x00);
+        assert_eq!(delegation_target(&longer), None);
+        let mut other = code.clone();
+        other[2] = 0x01;
+        assert_eq!(delegation_target(&other), None);
+        assert_eq!(delegation_target(&[0x60, 0x80, 0x60, 0x40]), None);
     }
 
     #[test]

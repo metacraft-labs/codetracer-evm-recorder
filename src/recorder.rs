@@ -394,6 +394,11 @@ pub struct EvmRecorder {
     /// recording, whether or not verified source was found, because every executed
     /// address is given at least a listing; see [`Self::steps_without_artifacts`].
     steps_without_artifacts: u64,
+    /// Executed steps whose frame HAD artifacts, at a PC those artifacts' code does not
+    /// have as an instruction: past its end, or inside a PUSH's data. The artifacts then
+    /// describe some other code than the code that ran, so the step was dropped or, worse,
+    /// placed on an instruction that never executed. Zero in a correct recording.
+    steps_off_code: u64,
 }
 
 /// Compute the per-line UTF-8 byte-length table required by the
@@ -470,6 +475,7 @@ impl EvmRecorder {
             output_dir: output_dir.to_path_buf(),
             paths_with_line_lengths: HashSet::new(),
             steps_without_artifacts: 0,
+            steps_off_code: 0,
         })
     }
 
@@ -1358,6 +1364,14 @@ impl EvmRecorder {
         self.steps_without_artifacts
     }
 
+    /// Executed steps at a PC the frame's artifacts do not have as an instruction, so the
+    /// artifacts describe other code than what ran; see the field. Reported beside
+    /// [`Self::steps_without_artifacts`]: that one catches a frame with no listing, this one a
+    /// frame with the WRONG listing, such as an EIP-7702 account's 23-byte designator.
+    pub fn steps_off_code(&self) -> u64 {
+        self.steps_off_code
+    }
+
     /// Process structLog entries with multi-contract support.
     ///
     /// Uses the [`ContractRegistry`] to switch source maps, storage layouts
@@ -1707,6 +1721,18 @@ impl EvmRecorder {
             };
             if cur_source_map.is_none() {
                 self.steps_without_artifacts += 1;
+            } else {
+                let p = pc as usize;
+                // Running off the end of the code is the EVM's implicit STOP: a real step
+                // at pc == code length that no instruction byte holds. It is not other code,
+                // so it is not counted, and having no instruction it has no line to land on.
+                let implicit_stop = p == cur_pc_to_idx.len() && log.op.as_ref() == "STOP";
+                let on_instruction = implicit_stop
+                    || (p < cur_pc_to_idx.len()
+                        && (p == 0 || cur_pc_to_idx[p] != cur_pc_to_idx[p - 1]));
+                if !on_instruction {
+                    self.steps_off_code += 1;
+                }
             }
 
             // Convert &[String] to &[&str] slices that the existing helpers expect.
