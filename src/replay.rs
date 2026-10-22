@@ -448,7 +448,8 @@ pub fn build_provider(rpc_url: &str) -> Result<impl Provider + Clone + use<>> {
                 INITIAL_BACKOFF_MS,
                 0,
                 // AND A GATEWAY'S TRANSIENT 5xx. alloy retries 429 and 503 on its own; a free
-                // endpoint also answers 502 / 504 and Cloudflare's 520-524 for a moment and
+                // endpoint also answers 408 (drpc's free-plan "Request timeout", which stopped
+                // mainnet block 22,500,001 at index 88), 502 / 504 and Cloudflare's 520-524 for a moment and
                 // then serves the same read. A whole-block replay makes thousands of reads, so
                 // one such answer used to stop a block (mainnet 4,370,100, measured: a 502 at
                 // index 59 left 18 transactions not reached) when retrying would have read on.
@@ -457,7 +458,7 @@ pub fn build_provider(rpc_url: &str) -> Result<impl Provider + Clone + use<>> {
                         matches!(
                             e.as_transport_err(),
                             Some(alloy::transports::TransportErrorKind::HttpError(h))
-                                if matches!(h.status, 500 | 502 | 504 | 520..=524)
+                                if matches!(h.status, 408 | 500 | 502 | 504 | 520..=524)
                         )
                     },
                 ),
