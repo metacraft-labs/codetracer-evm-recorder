@@ -542,6 +542,10 @@ pub struct OnchainRecording {
     /// current reader cannot open is not a recording, so this is part of
     /// the route rather than a check someone has to remember to run.
     pub container_steps_read_back: u64,
+    /// Executed steps that ran where no listing or source map was registered, and
+    /// are therefore not in the container. See
+    /// [`EvmRecorder::steps_without_artifacts`]; 0 unless `--no-disassembly-fallback`.
+    pub steps_without_artifacts: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -792,6 +796,7 @@ async fn record_replayed(
     recorder
         .record_from_structlog_multi_contract(&struct_logs, &registry, entry_point)
         .context("recorder failed to process the replayed structlogs")?;
+    let steps_without_artifacts = recorder.steps_without_artifacts();
 
     if !replayed.succeeded {
         let decoded = revert_decode::decode_revert_with_registry(
@@ -859,6 +864,7 @@ async fn record_replayed(
         container_path,
         container_bytes,
         container_steps_read_back,
+        steps_without_artifacts,
     })
 }
 
@@ -881,7 +887,12 @@ fn executed_addresses(replayed: &ReplayedTransaction) -> Vec<Address> {
     for call in &replayed.execution.calls {
         let executed = match &call.init_code {
             Some(code) => initcode_address(code),
-            None => call.target,
+            // The code that RAN, not the context it ran in. Keyed by `target`, a
+            // DELEGATECALL's implementation was never listed, so every step it ran
+            // resolved against nothing and was dropped: 489 of the 1,424 traced
+            // transactions in BlockTracer's pinned mainnet windows had fewer steps in
+            // their container than the replay captured.
+            None => call.code_address,
         };
         if executed != Address::ZERO && seen.insert(executed) {
             ordered.push(executed);

@@ -389,6 +389,11 @@ pub struct EvmRecorder {
     /// registration wins per the Nim writer's semantics — see
     /// `codetracer_trace_writer_nim::NimTraceWriter::register_path_with_line_lengths`).
     paths_with_line_lengths: HashSet<PathBuf>,
+    /// Executed steps whose frame had no artifacts at all: no source map and no
+    /// disassembly listing, so the step could only be dropped. Zero in a correct
+    /// recording, whether or not verified source was found, because every executed
+    /// address is given at least a listing; see [`Self::steps_without_artifacts`].
+    steps_without_artifacts: u64,
 }
 
 /// Compute the per-line UTF-8 byte-length table required by the
@@ -464,6 +469,7 @@ impl EvmRecorder {
             type_names: Vec::new(),
             output_dir: output_dir.to_path_buf(),
             paths_with_line_lengths: HashSet::new(),
+            steps_without_artifacts: 0,
         })
     }
 
@@ -1339,6 +1345,19 @@ impl EvmRecorder {
         Ok(())
     }
 
+    /// Executed steps that ran in a frame with neither a source map nor a
+    /// disassembly listing, so they are absent from the container.
+    ///
+    /// A route that registers artifacts for every executed address reports 0. It is
+    /// reported rather than asserted because `--no-disassembly-fallback` makes a non-zero
+    /// count the requested outcome; the caller decides. It is the check that two defects
+    /// passed: a lookup cap that also bounded which contracts were listed, and a
+    /// DELEGATECALL keyed by its context rather than its code. Both left the receipt
+    /// matching and the trace short.
+    pub fn steps_without_artifacts(&self) -> u64 {
+        self.steps_without_artifacts
+    }
+
     /// Process structLog entries with multi-contract support.
     ///
     /// Uses the [`ContractRegistry`] to switch source maps, storage layouts
@@ -1368,34 +1387,11 @@ impl EvmRecorder {
 
         // ---------- initial artifacts for the entry-point contract ----------
         let initial_artifacts = registry.get(&contract_address);
-        let (
-            init_source_map,
-            init_bytecode,
-            init_source_paths,
-            init_source_contents,
-            init_storage_layout,
-            init_solidity_ast,
-        ) = match initial_artifacts {
-            Some(a) => (
-                Some(&a.source_map),
-                a.runtime_bytecode.as_slice(),
-                a.source_paths.as_slice(),
-                a.source_contents.as_slice(),
-                a.storage_layout.as_ref(),
-                a.solidity_ast.as_ref(),
-            ),
-            None => (None, &[][..], &[][..], &[][..], None, None),
-        };
-
-        // Build pc_to_idx for the initial contract.
-        let init_pc_to_idx_owned;
-        let init_pc_to_idx: &[usize] = if !init_bytecode.is_empty() {
-            init_pc_to_idx_owned = source_map::build_pc_to_instruction_index(init_bytecode);
-            &init_pc_to_idx_owned
-        } else if let Some(a) = initial_artifacts {
-            &a.pc_to_idx
-        } else {
-            &[]
+        // Only the entry contract's paths are read here: they name the container's main
+        // source. Its source map is NOT a fallback for frames the registry does not know.
+        let (init_source_paths, init_source_contents) = match initial_artifacts {
+            Some(a) => (a.source_paths.as_slice(), a.source_contents.as_slice()),
+            None => (&[][..], &[][..]),
         };
 
         // Determine the main source path for TraceWriter::start.
@@ -1702,17 +1698,16 @@ impl EvmRecorder {
                         a.solidity_ast.as_ref(),
                     )
                 } else {
-                    // Fall back to initial contract's data for unknown addresses.
-                    (
-                        init_source_map,
-                        init_pc_to_idx,
-                        init_source_paths,
-                        init_source_contents,
-                        init_storage_layout,
-                        init_solidity_ast,
-                    )
+                    // NOT the entry contract's artifacts. Resolving an unknown frame's PCs
+                    // against another contract's map attributed its steps to code that never
+                    // ran wherever the PC happened to fall inside that map; an absent step is
+                    // preferable to a wrong one, and it is counted below.
+                    (None, &[], &[], &[], None, None)
                 }
             };
+            if cur_source_map.is_none() {
+                self.steps_without_artifacts += 1;
+            }
 
             // Convert &[String] to &[&str] slices that the existing helpers expect.
             // We do this with a small temporary Vec allocated per step only when needed.

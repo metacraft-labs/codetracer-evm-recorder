@@ -52,7 +52,13 @@ pub struct CallData {
     /// Caller address.
     pub caller: Address,
     /// Target (callee) address, or Address::ZERO for CREATEs (address unknown before execution).
+    /// For DELEGATECALL and CALLCODE this is the CONTEXT the frame runs in (the caller's
+    /// storage and balance), not the contract whose code runs: see [`Self::code_address`].
     pub target: Address,
+    /// The address whose bytecode the frame executes. Equal to `target` for CALL and
+    /// STATICCALL; the implementation for DELEGATECALL and CALLCODE; Address::ZERO for
+    /// CREATEs, whose code is `init_code`.
+    pub code_address: Address,
     /// Value transferred (zero for static / delegate calls).
     pub value: U256,
     /// Gas limit passed to the callee.
@@ -237,6 +243,7 @@ where
             kind,
             caller: inputs.caller,
             target: inputs.target_address,
+            code_address: inputs.bytecode_address,
             value,
             gas_limit: inputs.gas_limit,
             init_code: None,
@@ -275,6 +282,7 @@ where
             kind,
             caller: inputs.caller(),
             target: Address::ZERO,
+            code_address: Address::ZERO,
             value: inputs.value(),
             gas_limit: inputs.gas_limit(),
             init_code: Some(inputs.init_code().clone()),
