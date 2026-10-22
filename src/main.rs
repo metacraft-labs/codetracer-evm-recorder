@@ -235,6 +235,9 @@ struct TraceOnchainArgs {
     allow_source_mismatch: bool,
 
     /// Maximum number of distinct addresses to look up on Sourcify.
+    ///
+    /// Bounds the lookups only: every executed address still gets its
+    /// disassembly listing, so the cap never costs a step.
     #[arg(long, value_name = "N", default_value_t = onchain::DEFAULT_MAX_SOURCE_LOOKUPS)]
     max_source_lookups: usize,
 
@@ -617,6 +620,9 @@ fn describe_source(outcome: &onchain::SourceOutcome) -> String {
              recompiled code matches the first {prefix_match} of {deployed_len} deployed bytes"
         ),
         O::NotVerified => "no usable verified source".to_string(),
+        O::LookupCapped { limit } => format!(
+            "not looked up on Sourcify: {limit} address(es) already were (--max-source-lookups)"
+        ),
         O::BytecodeMismatch {
             prefix_match,
             recompiled_len,

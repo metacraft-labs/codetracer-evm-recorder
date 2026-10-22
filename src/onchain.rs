@@ -82,6 +82,14 @@ use codetracer_trace_writer_nim::NimTraceReaderHandle;
 /// router hop through several pools); each one is an HTTP round trip plus a
 /// solc invocation, and the ones that matter for source attribution are the
 /// entry point and the handful of frames beneath it.
+///
+/// It caps LOOKUPS and nothing else. Every executed address still gets its
+/// disassembly listing, because the recorder emits a step only where a listing
+/// or a source map resolves the PC: when the cap also bounded the address list,
+/// the steps a transaction ran in its ninth and later contracts were silently
+/// missing from a container whose receipt still matched (mainnet block
+/// 22,500,000: 7 of 21 transactions at the cap, one of them 16,156 steps of
+/// 30,367).
 pub const DEFAULT_MAX_SOURCE_LOOKUPS: usize = 8;
 
 // ---------------------------------------------------------------------------
@@ -368,6 +376,10 @@ pub enum SourceOutcome {
     /// The address has no code at the target block (an EOA or a
     /// self-destructed contract); nothing to look up.
     NoCode,
+    /// Not asked of Sourcify because `max_source_lookups` addresses already
+    /// were. Its disassembly listing is registered all the same, so its steps
+    /// are in the container at instruction level.
+    LookupCapped { limit: usize },
 }
 
 /// Inputs to [`record_onchain_transaction`].
@@ -667,7 +679,8 @@ async fn record_replayed(
     // ------------------------------------------------------------------ //
     // 3. Recover verified source for the addresses that executed.         //
     // ------------------------------------------------------------------ //
-    let addresses = executed_addresses(replayed, options.max_source_lookups);
+    let addresses = executed_addresses(replayed);
+    let mut sourcify_lookups = 0usize;
     let mut registry = ContractRegistry::new();
     let mut lookups = Vec::with_capacity(addresses.len());
     let mut mapped = 0usize;
@@ -691,12 +704,17 @@ async fn record_replayed(
             });
             continue;
         }
+        let lookup_allowed = sourcify_lookups < options.max_source_lookups;
+        if lookup_allowed {
+            sourcify_lookups += 1;
+        }
         let (outcome, disassembly_instructions) = resolve_source_for_address(
             &provider,
             *address,
             replayed.chain_id,
             replayed.block_number,
             options,
+            lookup_allowed,
             &mut registry,
         )
         .await;
@@ -844,13 +862,13 @@ async fn record_replayed(
     })
 }
 
-/// The distinct addresses whose code executed, entry point first, capped at
-/// `limit`.
+/// The distinct addresses whose code executed, entry point first, every one of
+/// them: see [`DEFAULT_MAX_SOURCE_LOOKUPS`] for why this list is never capped.
 ///
 /// Order matters: the entry point's artifacts decide the container's main
-/// source path, so it is looked up first and the cap can only cost deeper
-/// frames.
-fn executed_addresses(replayed: &ReplayedTransaction, limit: usize) -> Vec<Address> {
+/// source path, so it is looked up first and the lookup cap can only cost
+/// deeper frames their verified source, never their steps.
+fn executed_addresses(replayed: &ReplayedTransaction) -> Vec<Address> {
     let mut ordered: Vec<Address> = Vec::new();
     let mut seen: BTreeSet<Address> = BTreeSet::new();
 
@@ -868,11 +886,7 @@ fn executed_addresses(replayed: &ReplayedTransaction, limit: usize) -> Vec<Addre
         if executed != Address::ZERO && seen.insert(executed) {
             ordered.push(executed);
         }
-        if ordered.len() >= limit {
-            break;
-        }
     }
-    ordered.truncate(limit);
     ordered
 }
 
@@ -888,6 +902,7 @@ async fn resolve_source_for_address<P: Provider>(
     chain_id: u64,
     block_number: u64,
     options: &OnchainOptions,
+    lookup_allowed: bool,
     registry: &mut ContractRegistry,
 ) -> (SourceOutcome, Option<usize>) {
     let deployed = match provider
@@ -927,6 +942,15 @@ async fn resolve_source_for_address<P: Provider>(
     if options.skip_source_fetch {
         let instructions = fall_back(registry);
         return (SourceOutcome::NotVerified, instructions);
+    }
+    if !lookup_allowed {
+        let instructions = fall_back(registry);
+        return (
+            SourceOutcome::LookupCapped {
+                limit: options.max_source_lookups,
+            },
+            instructions,
+        );
     }
 
     let bundle = match source_fetcher::fetch_sourcify_files(chain_id, address).await {
