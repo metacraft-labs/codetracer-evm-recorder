@@ -399,6 +399,12 @@ pub struct EvmRecorder {
     /// describe some other code than the code that ran, so the step was dropped or, worse,
     /// placed on an instruction that never executed. Zero in a correct recording.
     steps_off_code: u64,
+    /// Executed steps that resolved to a line of VERIFIED SOURCE, and those that resolved to
+    /// a line of a disassembly listing. Counted per executed instruction, before consecutive
+    /// steps on one line are merged into one, so the two over the replay's own count are the
+    /// share of the execution that has backing source.
+    steps_on_source: u64,
+    steps_on_listing: u64,
 }
 
 /// Compute the per-line UTF-8 byte-length table required by the
@@ -476,6 +482,8 @@ impl EvmRecorder {
             paths_with_line_lengths: HashSet::new(),
             steps_without_artifacts: 0,
             steps_off_code: 0,
+            steps_on_source: 0,
+            steps_on_listing: 0,
         })
     }
 
@@ -1372,6 +1380,13 @@ impl EvmRecorder {
         self.steps_off_code
     }
 
+    /// Executed steps that resolved to a line of verified source, and to a line of a
+    /// disassembly listing; see the fields. The rest of the replay's steps resolved to no
+    /// line (compiler-generated code with no source range, or an implicit STOP).
+    pub fn steps_on_source_and_listing(&self) -> (u64, u64) {
+        (self.steps_on_source, self.steps_on_listing)
+    }
+
     /// Process structLog entries with multi-contract support.
     ///
     /// Uses the [`ContractRegistry`] to switch source maps, storage layouts
@@ -1759,6 +1774,17 @@ impl EvmRecorder {
                 let file_idx = location.file_index;
                 let line = location.line;
                 let column = location.column;
+                // A listing is the one artifact whose source is the bytecode itself
+                // (`onchain::disassembly_artifacts` names it `<address>.evmasm`).
+                let on_listing = source_paths_paths
+                    .get(file_idx as usize)
+                    .and_then(|p| p.extension())
+                    .is_some_and(|e| e == "evmasm");
+                if on_listing {
+                    self.steps_on_listing += 1;
+                } else {
+                    self.steps_on_source += 1;
+                }
                 // (file_index, line, column) — track the column too so
                 // multi-statement-per-line moves emit distinct steps
                 // under column-aware navigation.

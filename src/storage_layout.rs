@@ -2,7 +2,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 
 /// Parsed representation of solc's `storageLayout` JSON output.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct StorageLayout {
     /// Ordered list of storage variable entries.
     pub storage: Vec<StorageEntry>,
@@ -23,7 +23,7 @@ where
 }
 
 /// A single storage variable entry from the storageLayout.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageEntry {
     /// Variable name as written in the source.
@@ -45,7 +45,7 @@ pub struct StorageEntry {
 }
 
 /// Type metadata from the storageLayout types map.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageTypeInfo {
     /// Encoding strategy: "inplace", "mapping", "dynamic_array", etc.

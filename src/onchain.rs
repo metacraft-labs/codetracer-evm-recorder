@@ -58,7 +58,7 @@
 //! replay stepped through has somewhere to point.  `disassembly_fallback`
 //! turns it off, for a caller who wants verified source or nothing.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use alloy::primitives::{Address, TxHash};
@@ -553,6 +553,10 @@ pub struct OnchainRecording {
     /// Executed steps at a PC the frame's registered code does not have as an
     /// instruction. See [`EvmRecorder::steps_off_code`]; 0 in a correct recording.
     pub steps_off_code: u64,
+    /// Executed steps that resolved to verified source, and to a disassembly listing. See
+    /// [`EvmRecorder::steps_on_source_and_listing`].
+    pub steps_on_source: u64,
+    pub steps_on_listing: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -805,6 +809,7 @@ async fn record_replayed(
         .context("recorder failed to process the replayed structlogs")?;
     let steps_without_artifacts = recorder.steps_without_artifacts();
     let steps_off_code = recorder.steps_off_code();
+    let (steps_on_source, steps_on_listing) = recorder.steps_on_source_and_listing();
 
     if !replayed.succeeded {
         let decoded = revert_decode::decode_revert_with_registry(
@@ -874,7 +879,82 @@ async fn record_replayed(
         container_steps_read_back,
         steps_without_artifacts,
         steps_off_code,
+        steps_on_source,
+        steps_on_listing,
     })
+}
+
+/// What Sourcify and solc made of one address: no verified source, a failure with its reason,
+/// or the recompiled artifacts with the immutable ranges to mask.
+#[derive(Clone)]
+enum Compiled {
+    NotVerified,
+    Failed { reason: String, solc: String },
+    Ok {
+        artifacts: ContractArtifacts,
+        immutables: Vec<(usize, usize)>,
+    },
+}
+
+/// ONE FETCH AND ONE RECOMPILE PER ADDRESS PER PROCESS. `trace-block` resolves the contracts
+/// of every transaction in a block, and a block's transactions run the same contracts again
+/// and again (a token, a router, a pool): fetching and recompiling each one per transaction
+/// made a block with source lookups on cost a solc run for every (transaction, contract) pair.
+/// Keyed by `(chain_id, address)`, the key Sourcify verifies under; the bytecode comparison
+/// against the code at the target block still runs for every lookup.
+static COMPILED: std::sync::OnceLock<std::sync::Mutex<HashMap<(u64, Address), Compiled>>> =
+    std::sync::OnceLock::new();
+
+async fn compile_cached(chain_id: u64, address: Address) -> Compiled {
+    let cache = COMPILED.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    if let Some(hit) = cache.lock().ok().and_then(|m| m.get(&(chain_id, address)).cloned()) {
+        return hit;
+    }
+    let compiled = compile_uncached(chain_id, address).await;
+    if let Ok(mut m) = cache.lock() {
+        m.insert((chain_id, address), compiled.clone());
+    }
+    compiled
+}
+
+async fn compile_uncached(chain_id: u64, address: Address) -> Compiled {
+    let bundle = match source_fetcher::fetch_sourcify_files(chain_id, address).await {
+        Ok(Some(bundle)) => bundle,
+        Ok(None) => return Compiled::NotVerified,
+        Err(err) => {
+            return Compiled::Failed {
+                reason: format!("Sourcify lookup failed: {err:#}"),
+                solc: String::new(),
+            };
+        }
+    };
+    // Choose the solc that can reproduce the verified artifacts.
+    let full_version = bundle
+        .metadata_json
+        .as_deref()
+        .and_then(|m| source_fetcher::parse_metadata_settings(m).ok())
+        .map(|s| s.solc_version)
+        .unwrap_or_default();
+    let (solc, version_matched) = resolve_solc_for_version(&full_version);
+    match source_fetcher::compile_sourcify_bundle_with_immutables(&bundle, &solc, None) {
+        Ok((artifacts, immutables)) => Compiled::Ok {
+            artifacts,
+            immutables,
+        },
+        Err(err) => Compiled::Failed {
+            reason: format!(
+                "recompile with `{solc}` failed (contract was verified with \
+                 `{full_version}`; a version-specific binary was \
+                 {}): {err:#}",
+                if version_matched {
+                    "found"
+                } else {
+                    "NOT found, so this is the fallback solc"
+                }
+            ),
+            solc,
+        },
+    }
 }
 
 /// The delegate an EIP-7702 designator (`0xef0100 ‖ address`, 23 bytes) points at, or
@@ -1009,55 +1089,19 @@ async fn resolve_source_for_address<P: Provider>(
         );
     }
 
-    let bundle = match source_fetcher::fetch_sourcify_files(chain_id, source_address).await {
-        Ok(Some(bundle)) => bundle,
-        Ok(None) => {
+    let (artifacts, immutables) = match compile_cached(chain_id, source_address).await {
+        Compiled::NotVerified => {
             let instructions = fall_back(registry);
             return (SourceOutcome::NotVerified, instructions);
         }
-        Err(err) => {
+        Compiled::Failed { reason, solc } => {
             let instructions = fall_back(registry);
-            return (
-                SourceOutcome::RecompileFailed {
-                    reason: format!("Sourcify lookup failed: {err:#}"),
-                    solc: String::new(),
-                },
-                instructions,
-            );
+            return (SourceOutcome::RecompileFailed { reason, solc }, instructions);
         }
-    };
-
-    // Choose the solc that can reproduce the verified artifacts.
-    let full_version = bundle
-        .metadata_json
-        .as_deref()
-        .and_then(|m| source_fetcher::parse_metadata_settings(m).ok())
-        .map(|s| s.solc_version)
-        .unwrap_or_default();
-    let (solc, version_matched) = resolve_solc_for_version(&full_version);
-
-    let (artifacts, immutables) =
-        match source_fetcher::compile_sourcify_bundle_with_immutables(&bundle, &solc, None) {
-        Ok(compiled) => compiled,
-        Err(err) => {
-            let instructions = fall_back(registry);
-            return (
-                SourceOutcome::RecompileFailed {
-                    reason: format!(
-                        "recompile with `{solc}` failed (contract was verified with \
-                         `{full_version}`; a version-specific binary was \
-                         {}): {err:#}",
-                        if version_matched {
-                            "found"
-                        } else {
-                            "NOT found, so this is the fallback solc"
-                        }
-                    ),
-                    solc,
-                },
-                instructions,
-            );
-        }
+        Compiled::Ok {
+            artifacts,
+            immutables,
+        } => (artifacts, immutables),
     };
 
     // Immutable values are set at deployment and are zero in a recompile, so they are masked

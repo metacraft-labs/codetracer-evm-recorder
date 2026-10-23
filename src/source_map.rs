@@ -51,6 +51,7 @@ pub struct SourceLocation {
 }
 
 /// Parsed Solidity/Vyper source map.
+#[derive(Clone)]
 pub struct SourceMap {
     entries: Vec<SourceMapEntry>,
 }

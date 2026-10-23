@@ -517,6 +517,11 @@ fn render_recording(recording: &onchain::OnchainRecording) -> String {
         "{} executed step(s) ran at a PC the registered code has no instruction at, so it describes other code",
         recording.steps_off_code,
     );
+    let _ = writeln!(
+        out,
+        "{} executed step(s) resolved to verified source and {} to a disassembly listing",
+        recording.steps_on_source, recording.steps_on_listing,
+    );
     let _ = writeln!(out, "Trace written to {}", recording.out_dir.display());
     out
 }
@@ -575,6 +580,8 @@ async fn trace_block(args: TraceBlockArgs) -> Result<()> {
                     "stepsReadBack": rec.container_steps_read_back,
                     "stepsWithoutArtifacts": rec.steps_without_artifacts,
                     "stepsOffCode": rec.steps_off_code,
+                    "stepsOnSource": rec.steps_on_source,
+                    "stepsOnListing": rec.steps_on_listing,
                     "succeeded": rec.succeeded, "gasUsed": rec.gas_used,
                     "logs": rec.log_count, "calls": rec.call_count,
                     "mappedAddresses": rec.mapped_addresses,

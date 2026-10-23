@@ -18,6 +18,7 @@ use crate::storage_layout::StorageLayout;
 // ---------------------------------------------------------------------------
 
 /// Compilation artifacts for a single deployed contract.
+#[derive(Clone)]
 pub struct ContractArtifacts {
     /// Human-readable contract name.
     pub name: String,
