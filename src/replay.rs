@@ -495,9 +495,12 @@ where
         builder = builder.gas_priority_fee(Some(fee));
     }
 
-    if let Some(chain_id) = AlloyTransactionTrait::chain_id(tx) {
-        builder = builder.chain_id(Some(chain_id));
-    }
+    // ALWAYS SET, `None` INCLUDED. revm's TxEnv builder defaults `chain_id` to `Some(1)`, so
+    // leaving it unset for a pre-EIP-155 legacy transaction (signed with v = 27/28, no chain
+    // id) replayed it as a chain-1 transaction. On mainnet that matched by accident; on Sepolia
+    // block 6,000,000 it stopped the block replay at index 2 with InvalidChainId. `None` is
+    // what the transaction says, and revm skips the chain check for it.
+    builder = builder.chain_id(AlloyTransactionTrait::chain_id(tx));
 
     // THE TYPED-TRANSACTION FIELDS, which change what the transaction costs. Without them
     // revm ran every transaction as if it carried no access list (EIP-2930), no blobs
