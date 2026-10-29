@@ -600,7 +600,7 @@ pub async fn record_onchain_transaction(options: &OnchainOptions) -> Result<Onch
 #[derive(Debug)]
 pub enum BlockTxOutcome {
     /// A container was written and reopened.
-    Recorded(OnchainRecording),
+    Recorded(Box<OnchainRecording>),
     /// The transaction was replayed but not recorded; the reason says why
     /// (a plain value transfer has no execution, for one).
     NotRecorded(String),
@@ -634,7 +634,7 @@ pub async fn record_onchain_block(
             let outcomes = &outcomes;
             async move {
                 let outcome = match record_replayed(options, tx_hash, &replayed).await {
-                    Ok(rec) => BlockTxOutcome::Recorded(rec),
+                    Ok(rec) => BlockTxOutcome::Recorded(Box::new(rec)),
                     Err(e) => BlockTxOutcome::NotRecorded(format!("{e:#}")),
                 };
                 outcomes.borrow_mut().push((tx_hash, outcome));
@@ -889,9 +889,12 @@ async fn record_replayed(
 #[derive(Clone)]
 enum Compiled {
     NotVerified,
-    Failed { reason: String, solc: String },
+    Failed {
+        reason: String,
+        solc: String,
+    },
     Ok {
-        artifacts: ContractArtifacts,
+        artifacts: Box<ContractArtifacts>,
         immutables: Vec<(usize, usize)>,
     },
 }
@@ -907,7 +910,11 @@ static COMPILED: std::sync::OnceLock<std::sync::Mutex<HashMap<(u64, Address), Co
 
 async fn compile_cached(chain_id: u64, address: Address) -> Compiled {
     let cache = COMPILED.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
-    if let Some(hit) = cache.lock().ok().and_then(|m| m.get(&(chain_id, address)).cloned()) {
+    if let Some(hit) = cache
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&(chain_id, address)).cloned())
+    {
         return hit;
     }
     let compiled = compile_uncached(chain_id, address).await;
@@ -938,7 +945,7 @@ async fn compile_uncached(chain_id: u64, address: Address) -> Compiled {
     let (solc, version_matched) = resolve_solc_for_version(&full_version);
     match source_fetcher::compile_sourcify_bundle_with_immutables(&bundle, &solc, None) {
         Ok((artifacts, immutables)) => Compiled::Ok {
-            artifacts,
+            artifacts: Box::new(artifacts),
             immutables,
         },
         Err(err) => Compiled::Failed {
@@ -1096,12 +1103,15 @@ async fn resolve_source_for_address<P: Provider>(
         }
         Compiled::Failed { reason, solc } => {
             let instructions = fall_back(registry);
-            return (SourceOutcome::RecompileFailed { reason, solc }, instructions);
+            return (
+                SourceOutcome::RecompileFailed { reason, solc },
+                instructions,
+            );
         }
         Compiled::Ok {
             artifacts,
             immutables,
-        } => (artifacts, immutables),
+        } => (*artifacts, immutables),
     };
 
     // Immutable values are set at deployment and are zero in a recompile, so they are masked

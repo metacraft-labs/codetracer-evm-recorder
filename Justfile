@@ -10,7 +10,10 @@ build:
 build-release:
   cargo build --release
 
-test:
+build-decoder:
+  cd ../codetracer-trace-format-nim && direnv exec . just build-ct-print
+
+test: build-decoder
   cargo test
   bash tests/verify-cli-convention-no-silent-skip.sh
 
@@ -44,10 +47,13 @@ fmt: format
 prepare-ci:
   #!/usr/bin/env bash
   set -euo pipefail
+  "${EVM_CI_PYTHON:?declared native CI Python missing}" -I tools/allow-declared-nim-env.py
   (
-    cd "${GITHUB_WORKSPACE}/../codetracer-trace-format-nim"
+    cd "${WORKSPACE_ROOT:-${GITHUB_WORKSPACE}/..}/codetracer-trace-format-nim"
     nimble install -y stew results
   )
+  just install-hooks "${REPROBUILD_REPRO:-$(command -v repro)}"
+  just check-hooks
 
 # --- M13: Packaging UX Standardization ---
 # These recipes implement Repo-Requirements.md §2.5. The OS-packaged
@@ -241,3 +247,11 @@ verify-scoop:
 
 verify-chocolatey:
     just verify-package chocolatey
+
+# Owning native SDK and matching managed protocol are required.
+install-hooks REPRO:
+  python3 tools/install-canonical-hooks.py --repro "{{REPRO}}" --bootstrap-managed
+  python3 tools/install-canonical-hooks.py --repro "{{REPRO}}"
+
+check-hooks:
+  prek run --all-files

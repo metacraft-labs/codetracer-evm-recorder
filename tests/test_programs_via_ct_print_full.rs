@@ -107,26 +107,16 @@ fn has_anvil() -> bool {
         .unwrap_or(false)
 }
 
-/// Skip-helper: returns `Some(path)` to ct-print or logs a clear
-/// `SKIP:` diagnostic and returns `None`.
-///
-/// The `verify-cli-convention-no-silent-skip.sh` script greps for the
-/// literal `SKIP:` token, so silent skips remain forbidden.
-fn ct_print_or_skip(test_name: &str) -> Option<PathBuf> {
-    if !has_solc() || !has_anvil() {
-        eprintln!("SKIP: {test_name} requires solc + anvil on PATH (use the Nix dev shell).");
-        return None;
-    }
+/// Require the real declared compiler, node and decoder before any trace oracle.
+fn ct_print_required(test_name: &str) -> Option<PathBuf> {
+    assert!(has_solc(), "{test_name}: solc required on PATH");
+    assert!(has_anvil(), "{test_name}: anvil required on PATH");
     let p = ct_print_path();
-    if !p.exists() {
-        eprintln!(
-            "SKIP: {test_name} requires ct-print at {} — only available \
-             within the metacraft workspace where codetracer-trace-format-nim \
-             is a sibling.",
-            p.display()
-        );
-        return None;
-    }
+    assert!(
+        p.is_file(),
+        "{test_name}: ct-print required at {}",
+        p.display()
+    );
     Some(p)
 }
 
@@ -186,16 +176,31 @@ fn run_recorder_cli_with_from_and_value(
     );
 }
 
+/// Keep both genuine decoder projections from the same recorded container.
+/// Stable event/path assertions use stripped output; canonical source identity
+/// uses the separately decoded unstripped metadata, without rewriting either.
+struct DecodedFullTrace {
+    stripped: serde_json::Value,
+    unstripped: serde_json::Value,
+}
+
+impl std::ops::Deref for DecodedFullTrace {
+    type Target = serde_json::Value;
+
+    fn deref(&self) -> &Self::Target {
+        &self.stripped
+    }
+}
+
 /// Record one program and return the `ct-print --full --strip-paths`
-/// JSON document.  Returns `None` when the prerequisites
-/// (solc / anvil / ct-print) are absent — the caller has already
-/// emitted a `SKIP:` line via `ct_print_or_skip`.
+/// JSON document. Required solc, Anvil and decoder assertions fail
+/// before recording if a prerequisite is unavailable.
 fn record_and_dump_full(
     test_name: &str,
     group: &str,
     file: &str,
     function_name: &str,
-) -> Option<serde_json::Value> {
+) -> Option<DecodedFullTrace> {
     record_and_dump_full_with_from(test_name, group, file, function_name, None)
 }
 
@@ -208,7 +213,7 @@ fn record_and_dump_full_with_from(
     file: &str,
     function_name: &str,
     from: Option<&str>,
-) -> Option<serde_json::Value> {
+) -> Option<DecodedFullTrace> {
     record_and_dump_full_with_from_and_value(test_name, group, file, function_name, from, None)
 }
 
@@ -222,8 +227,8 @@ fn record_and_dump_full_with_from_and_value(
     function_name: &str,
     from: Option<&str>,
     value: Option<&str>,
-) -> Option<serde_json::Value> {
-    let ct_print = ct_print_or_skip(test_name)?;
+) -> Option<DecodedFullTrace> {
+    let ct_print = ct_print_required(test_name)?;
 
     let tmp_dir = tempfile::tempdir().expect("tempdir");
     let out_dir = tmp_dir.path().join("traces");
@@ -253,8 +258,24 @@ fn record_and_dump_full_with_from_and_value(
     let doc: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("ct-print --full should emit valid JSON");
 
+    let unstripped_output = Command::new(&ct_print)
+        .arg("--full")
+        .arg(&ct_files[0])
+        .output()
+        .expect("failed to run ct-print --full without path stripping");
+    assert!(
+        unstripped_output.status.success(),
+        "unstripped ct-print --full should succeed; stderr: {}",
+        String::from_utf8_lossy(&unstripped_output.stderr)
+    );
+    let unstripped: serde_json::Value = serde_json::from_slice(&unstripped_output.stdout)
+        .expect("unstripped ct-print --full should emit valid JSON");
+
     drop(tmp_dir);
-    Some(doc)
+    Some(DecodedFullTrace {
+        stripped: doc,
+        unstripped,
+    })
 }
 
 /// Decode the step events into `(step_index, line)` pairs in emission
@@ -415,8 +436,8 @@ fn observed_step_var_pairs(doc: &serde_json::Value) -> Vec<(String, String)> {
 /// path computed exactly the same way the recorder CLI canonicalizes
 /// its `solidity_file` argument, so the assertion is strict in the
 /// `assert_eq!` sense but stays stable across checkouts.
-fn assert_metadata_program_is_source_path(doc: &serde_json::Value, group: &str, file: &str) {
-    let prog = doc["metadata"]["program"]
+fn assert_metadata_program_is_source_path(doc: &DecodedFullTrace, group: &str, file: &str) {
+    let prog = doc.unstripped["metadata"]["program"]
         .as_str()
         .expect("metadata.program str");
     let expected = test_program(group, file)
@@ -427,6 +448,25 @@ fn assert_metadata_program_is_source_path(doc: &serde_json::Value, group: &str, 
         prog, expected_str,
         "metadata.program must be the canonical source-file path \
          (spec: recorder-test-requirements.md §1)"
+    );
+    let workdir = doc.unstripped["metadata"]["workdir"]
+        .as_str()
+        .expect("unstripped metadata.workdir str");
+    let stripped_expected = if !workdir.is_empty() && expected_str.starts_with(workdir) {
+        let rest = &expected_str[workdir.len()..];
+        format!("<workdir>/{}", rest.strip_prefix('/').unwrap_or(rest))
+    } else if expected_str.starts_with("/tmp/") {
+        let parts: Vec<_> = expected_str.split('/').collect();
+        format!("<tmp>/{}", parts[3..].join("/"))
+    } else {
+        expected_str.clone()
+    };
+    assert_eq!(
+        doc.stripped["metadata"]["program"]
+            .as_str()
+            .expect("stripped metadata.program str"),
+        stripped_expected,
+        "stripped decoder projection must honor documented workdir/tmp normalization"
     );
 }
 
@@ -2126,10 +2166,9 @@ fn test_try_catch_via_ct_print_full() {
         3,
         "expected three io_events: one Outcome(uint256,uint256) and two Error"
     );
-    let stderr_events: Vec<&(String, String)> =
-        ios.iter().filter(|(k, _)| k == "EvmEvent").collect();
+    let evm_events: Vec<&(String, String)> = ios.iter().filter(|(k, _)| k == "EvmEvent").collect();
     assert_eq!(
-        stderr_events.len(),
+        evm_events.len(),
         1,
         "exactly one EvmEvent (the Outcome emit); got {ios:?}"
     );
@@ -2137,11 +2176,11 @@ fn test_try_catch_via_ct_print_full() {
     // The serialised LOG1 payload is topic0 + 64-byte data
     // (32 bytes per uint256 arg).
     assert!(
-        stderr_events[0]
+        evm_events[0]
             .1
             .contains("0x00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000012"),
         "Outcome(okValue=1, lastPanic=0x12) must encode both args in the data segment; got {}",
-        stderr_events[0].1
+        evm_events[0].1
     );
 }
 

@@ -1737,7 +1737,7 @@ impl EvmRecorder {
             if cur_source_map.is_none() {
                 self.steps_without_artifacts += 1;
             } else {
-                let p = pc as usize;
+                let p = pc;
                 // Running off the end of the code is the EVM's implicit STOP: a real step
                 // at pc == code length that no instruction byte holds. It is not other code,
                 // so it is not counted, and having no instruction it has no line to land on.

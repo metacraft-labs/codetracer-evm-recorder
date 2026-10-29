@@ -355,7 +355,9 @@ pub fn parse_metadata_settings(metadata_json: &str) -> eyre::Result<MetadataSett
 /// The `(major, minor, patch)` of a solc version string such as `0.8.28+commit.7893614a`,
 /// or `None` when it does not parse (then every flag is passed, as before).
 pub fn solc_release(full_version: &str) -> Option<(u32, u32, u32)> {
-    let mut it = semver_prefix(full_version).trim_start_matches('v').split('.');
+    let mut it = semver_prefix(full_version)
+        .trim_start_matches('v')
+        .split('.');
     let major = it.next()?.parse().ok()?;
     let minor = it.next()?.parse().ok()?;
     let patch = it.next()?.parse().ok()?;
@@ -574,7 +576,10 @@ pub fn compile_sourcify_bundle_with_immutables(
     let mut input_sources = serde_json::Map::new();
     if meta_sources.is_empty() {
         for src in &bundle.sources {
-            input_sources.insert(src.path.clone(), serde_json::json!({ "content": src.content }));
+            input_sources.insert(
+                src.path.clone(),
+                serde_json::json!({ "content": src.content }),
+            );
         }
     }
     for (name, entry) in meta_sources {
@@ -753,7 +758,9 @@ pub fn compile_sourcify_bundle_with_immutables(
         .and_then(|v| v.as_str())
         .unwrap_or_default();
     if source_map_raw.is_empty() {
-        return Err(eyre::eyre!("`{file}:{name}` has an empty runtime source map"));
+        return Err(eyre::eyre!(
+            "`{file}:{name}` has an empty runtime source map"
+        ));
     }
     let source_map = SourceMap::parse(source_map_raw);
     let pc_to_idx = build_pc_to_instruction_index(&runtime_bytecode);
@@ -784,7 +791,11 @@ pub fn compile_sourcify_bundle_with_immutables(
         .ok_or_else(|| eyre::eyre!("solc output is missing the 'sources' object"))?;
     let mut by_id: Vec<(u64, String)> = out_sources
         .iter()
-        .filter_map(|(path, s)| s.get("id").and_then(|v| v.as_u64()).map(|id| (id, path.clone())))
+        .filter_map(|(path, s)| {
+            s.get("id")
+                .and_then(|v| v.as_u64())
+                .map(|id| (id, path.clone()))
+        })
         .collect();
     by_id.sort();
     let mut source_paths = Vec::with_capacity(by_id.len());

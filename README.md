@@ -57,18 +57,18 @@ ct print --json <dir>/<Contract>.ct
 
 The recorder is organized into the following modules:
 
-* `recorder.rs` — top-level recording orchestration and trace file output
-* `inspector.rs` — EVM opcode inspection and step-level tracing
-* `source_map.rs` — solc source mapping resolution
-* `solidity_ast.rs` — Solidity AST parsing for function and variable discovery
-* `stack_tracker.rs` — EVM stack analysis to recover variable values
-* `structlog.rs` — `debug_traceTransaction` structlog parsing
-* `call_tree.rs` — call graph reconstruction from trace data
-* `contract_registry.rs` — deployed contract address tracking
-* `storage_layout.rs` — contract storage layout resolution
-* `source_fetcher.rs` — verified source code retrieval for on-chain contracts
-* `trace_fetcher.rs` — remote trace data retrieval for replay
-* `replay.rs` — on-chain transaction replay
+- `recorder.rs` — top-level recording orchestration and trace file output
+- `inspector.rs` — EVM opcode inspection and step-level tracing
+- `source_map.rs` — solc source mapping resolution
+- `solidity_ast.rs` — Solidity AST parsing for function and variable discovery
+- `stack_tracker.rs` — EVM stack analysis to recover variable values
+- `structlog.rs` — `debug_traceTransaction` structlog parsing
+- `call_tree.rs` — call graph reconstruction from trace data
+- `contract_registry.rs` — deployed contract address tracking
+- `storage_layout.rs` — contract storage layout resolution
+- `source_fetcher.rs` — verified source code retrieval for on-chain contracts
+- `trace_fetcher.rs` — remote trace data retrieval for replay
+- `replay.rs` — on-chain transaction replay
 
 ### Testing
 
@@ -86,20 +86,20 @@ just test
 
 Convention: `Recorder-CLI-Conventions.md` §5.
 
-| Variable                            | CLI equivalent | Description                                                                                                 |
-| ----------------------------------- | -------------- | ----------------------------------------------------------------------------------------------------------- |
-| `CODETRACER_EVM_RECORDER_OUT_DIR`   | `--out-dir`    | Output directory for traces. Falls back here when the CLI flag is omitted; the CLI flag always wins.        |
-| `CODETRACER_EVM_RECORDER_DISABLED`  | —              | Set to `1` or `true` to skip recording entirely. The recorder still validates inputs but does not spin up Anvil or write any trace artefacts. |
-| `RUST_LOG`                          | —              | Recorder log verbosity (standard `env_logger` syntax, e.g. `RUST_LOG=debug`).                               |
+| Variable                           | CLI equivalent | Description                                                                                                                                   |
+| ---------------------------------- | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CODETRACER_EVM_RECORDER_OUT_DIR`  | `--out-dir`    | Output directory for traces. Falls back here when the CLI flag is omitted; the CLI flag always wins.                                          |
+| `CODETRACER_EVM_RECORDER_DISABLED` | —              | Set to `1` or `true` to skip recording entirely. The recorder still validates inputs but does not spin up Anvil or write any trace artefacts. |
+| `RUST_LOG`                         | —              | Recorder log verbosity (standard `env_logger` syntax, e.g. `RUST_LOG=debug`).                                                                 |
 
 ### Contributing
 
 We'd be very happy if the community finds this useful, and if anyone wants to:
 
-* Use and test the EVM/Solidity support or CodeTracer.
-* Provide feedback and discuss alternative implementation ideas: in the issue tracker, or in our [discord](https://discord.gg/qSDCAFMP).
-* Contribute code to enhance the EVM/Solidity support of CodeTracer.
-* Provide [sponsorship](https://opencollective.com/codetracer), so we can hire dedicated full-time maintainers for this project.
+- Use and test the EVM/Solidity support or CodeTracer.
+- Provide feedback and discuss alternative implementation ideas: in the issue tracker, or in our [discord](https://discord.gg/qSDCAFMP).
+- Contribute code to enhance the EVM/Solidity support of CodeTracer.
+- Provide [sponsorship](https://opencollective.com/codetracer), so we can hire dedicated full-time maintainers for this project.
 
 ### Legal info
 

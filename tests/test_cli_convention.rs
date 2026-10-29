@@ -140,10 +140,8 @@ fn test_help_mentions_ct_print() {
 /// Real recorder run — requires solc + anvil on PATH (Nix dev shell).
 #[test]
 fn test_env_out_dir_used_when_flag_omitted() {
-    if !has_solc() || !has_anvil() {
-        eprintln!("skipping: solc/anvil unavailable");
-        return;
-    }
+    assert!(has_solc(), "solc required on PATH");
+    assert!(has_anvil(), "anvil required on PATH");
 
     let tmp_dir = tempfile::tempdir().expect("tempdir");
     let env_out_dir = tmp_dir.path().join("via-env");
@@ -222,10 +220,8 @@ fn test_env_disabled_skips_recording() {
 /// deprecation note.  See `Recorder-CLI-Conventions.md` §3.
 #[test]
 fn test_trace_dir_alias_still_works_with_deprecation_note() {
-    if !has_solc() || !has_anvil() {
-        eprintln!("skipping: solc/anvil unavailable");
-        return;
-    }
+    assert!(has_solc(), "solc required on PATH");
+    assert!(has_anvil(), "anvil required on PATH");
 
     let tmp_dir = tempfile::tempdir().expect("tempdir");
     let out_dir = tmp_dir.path().join("legacy-trace-dir");
@@ -316,20 +312,15 @@ fn test_trace_dir_alias_still_works_with_deprecation_note() {
 /// with every CBOR `ValueRecord` decoded to a structured form.
 #[test]
 fn test_recorded_trace_via_ct_print_json() {
-    if !has_solc() || !has_anvil() {
-        eprintln!("skipping: solc/anvil unavailable");
-        return;
-    }
+    assert!(has_solc(), "solc required on PATH");
+    assert!(has_anvil(), "anvil required on PATH");
 
     let ct_print = ct_print_path();
-    if !ct_print.exists() {
-        eprintln!(
-            "SKIP: ct-print not found at {} — only available within the \
-             metacraft workspace where codetracer-trace-format-nim is a sibling.",
-            ct_print.display()
-        );
-        return;
-    }
+    assert!(
+        ct_print.is_file(),
+        "ct-print required at {}",
+        ct_print.display()
+    );
 
     let tmp_dir = tempfile::tempdir().expect("tempdir");
     let out_dir = tmp_dir.path().join("traces");

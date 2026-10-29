@@ -28,30 +28,35 @@ name: publish-deb
 
 on:
   push:
-    tags: ['v*']
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       version:
-        description: 'Recorder semver to publish'
+        description: "Recorder semver to publish"
         required: true
-        default: '0.1.0'
+        default: "0.1.0"
       arch:
-        description: 'Target architecture (amd64 / arm64)'
+        description: "Target architecture (amd64 / arm64)"
         required: true
-        default: 'amd64'
+        default: "amd64"
         type: choice
         options:
           - amd64
           - arm64
       dry_run:
-        description: 'Build the .deb but skip the upload'
+        description: "Build the .deb but skip the upload"
         required: false
         type: boolean
         default: false
 
 jobs:
   build-and-publish-deb:
-    runs-on: [self-hosted, linux, "${{ (inputs.arch || 'amd64') == 'arm64' && 'arm64' || 'x64' }}"]
+    runs-on:
+      [
+        self-hosted,
+        linux,
+        "${{ (inputs.arch || 'amd64') == 'arm64' && 'arm64' || 'x64' }}",
+      ]
     name: deb / ${{ inputs.arch || 'amd64' }}
     environment: deb
     env:
@@ -175,9 +180,9 @@ jobs:
       - name: Upload .deb to deb.codetracer.com (R2)
         if: ${{ inputs.dry_run == false }}
         env:
-          AWS_ACCESS_KEY_ID:     ${{ secrets.CODETRACER_DEB_BUCKET_ACCESS_KEY_ID }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.CODETRACER_DEB_BUCKET_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.CODETRACER_DEB_BUCKET_ACCESS_KEY }}
-          AWS_SESSION_TOKEN:     ${{ secrets.CODETRACER_DEB_BUCKET_TOKEN }}
+          AWS_SESSION_TOKEN: ${{ secrets.CODETRACER_DEB_BUCKET_TOKEN }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail

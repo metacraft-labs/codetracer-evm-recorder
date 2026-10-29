@@ -253,8 +253,7 @@ mod null_types_tests {
 
     #[test]
     fn a_stateless_contracts_layout_is_empty_not_missing() {
-        let layout: StorageLayout =
-            serde_json::from_str(r#"{"storage":[],"types":null}"#).unwrap();
+        let layout: StorageLayout = serde_json::from_str(r#"{"storage":[],"types":null}"#).unwrap();
         assert!(layout.storage.is_empty() && layout.types.is_empty());
         // Control: a layout with no `storage` member is still refused.
         assert!(serde_json::from_str::<StorageLayout>(r#"{"types":null}"#).is_err());
