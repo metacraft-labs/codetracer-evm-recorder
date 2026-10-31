@@ -132,27 +132,86 @@ def terminal(argv: list[str], cwd: Path, env: dict[str, str]) -> str:
 from types import MappingProxyType
 
 
+# `nix derivation show` has printed four JSON shapes across the Nix releases
+# this repository is entered with. Each is identified by its whole structure,
+# not by a version key alone, because the oldest shape has no version key and
+# a shape is only accepted when every distinguishing property agrees:
+#
+#   schema         top level                     body version  name spelling  inputs
+#   legacy         {"/nix/store/<x>.drv": body}  absent        absolute       inputDrvs+inputSrcs
+#   v3             {"<x>.drv": body}             3             basename       inputDrvs+inputSrcs
+#   v4 (bare)      {"<x>.drv": body}             4             basename       inputs
+#   v4 (envelope)  {"version": 4,                4             basename       inputs
+#                   "derivations": {...}}
+#
+# Measured 2026-10-31 on one .drv: legacy from Nix 2.28.5 (the Nix Repro 0.2.17
+# drives) and 2.31.5, v3 from 2.32.6, bare v4 from
+# 2.33pre20251107, envelope v4 from 2.34.7 and 2.35pre20260504. The captured
+# outputs are tests/fixtures/nix-derivation-show/. Nix documents the formats in
+# its manual under "Derivation JSON Format"
+# (https://nix.dev/manual/nix/latest/protocols/json/derivation).
+DERIVATION_SCHEMAS = MappingProxyType({
+    # schema: (body version, store paths spelled absolute, input keys)
+    'legacy': (None, True, frozenset({'inputDrvs', 'inputSrcs'})),
+    'v3': (3, False, frozenset({'inputDrvs', 'inputSrcs'})),
+    'v4': (4, False, frozenset({'inputs'})),
+})
+DERIVATION_BODY_KEYS = frozenset({'args', 'builder', 'env', 'name', 'outputs', 'system'})
+# Present in every schema only for a __structuredAttrs derivation.
+OPTIONAL_DERIVATION_BODY_KEYS = frozenset({'structuredAttrs'})
+
+
+def derivation_schema(body, enveloped):
+    """Name the schema of one derivation body, or raise naming what is unknown."""
+    if not isinstance(body, dict):
+        raise RuntimeError('package constructor body is not an object')
+    version = body.get('version')
+    if 'version' in body and type(version) is not int:
+        raise RuntimeError('package constructor body version is not an integer')
+    keys = set(body) - OPTIONAL_DERIVATION_BODY_KEYS
+    for schema, (expected_version, _, input_keys) in DERIVATION_SCHEMAS.items():
+        expected_keys = DERIVATION_BODY_KEYS | input_keys | (set() if expected_version is None else {'version'})
+        if version == expected_version and keys == expected_keys:
+            # Only the v4 schema is ever wrapped in the version envelope.
+            if enveloped and schema != 'v4':
+                break
+            return schema
+    raise RuntimeError(
+        'unsupported package constructor derivation JSON: body version ' + repr(version)
+        + ' with keys ' + repr(sorted(body)) + (' inside a version envelope' if enveloped else '')
+        + '; supported are the legacy (Nix <= 2.31), v3 (Nix 2.32) and v4 (Nix >= 2.33) schemas')
+
+
 def selected_derivation_body(decoded, drv):
+    """Return the body of the one derivation `nix derivation show <drv>` printed.
+
+    Accepts exactly the schemas in DERIVATION_SCHEMAS and refuses anything
+    else, including a shape whose parts belong to different schemas."""
     if not isinstance(decoded, dict):
         raise RuntimeError('package constructor JSON is not an object')
-    if 'version' in decoded or 'derivations' in decoded:
+    enveloped = 'version' in decoded or 'derivations' in decoded
+    if enveloped:
         if set(decoded) != {'version', 'derivations'} or type(decoded['version']) is not int or decoded['version'] != 4:
             raise RuntimeError('unsupported package constructor JSON envelope')
         entries = decoded['derivations']
         if not isinstance(entries, dict):
             raise RuntimeError('package constructor derivations is not an object')
-        versioned = True
     else:
         entries = decoded
-        versioned = False
     if len(entries) != 1:
         raise RuntimeError('ambiguous package constructor')
     name, body = next(iter(entries.items()))
-    if name not in (str(drv), drv.name) or not isinstance(body, dict):
+    schema = derivation_schema(body, enveloped)
+    absolute = DERIVATION_SCHEMAS[schema][1]
+    if name != (str(drv) if absolute else drv.name):
         raise RuntimeError('package constructor does not name the exact selected derivation')
-    expected_version = 4 if versioned else 3
-    if type(body.get('version')) is not int or body['version'] != expected_version:
-        raise RuntimeError('unsupported package constructor body version')
+    outputs = body['outputs']
+    if not isinstance(outputs, dict) or not isinstance(outputs.get('out'), dict) or not isinstance(outputs['out'].get('path'), str):
+        raise RuntimeError('package constructor has no out output path')
+    if outputs['out']['path'].startswith('/nix/store/') != absolute:
+        raise RuntimeError('package constructor output path spelling disagrees with its ' + schema + ' schema')
+    if not isinstance(body['env'], dict):
+        raise RuntimeError('package constructor env is not an object')
     return body
 
 
@@ -228,7 +287,11 @@ class SelectedFactory:
             raise RuntimeError('selected complete package has no actual immutable constructor authority: ' + repr({'package': str(package), 'source': str(source), 'deriver': deriver_value}))
         self.principals[str(drv)] = principal(drv)
         decoded = json.loads(terminal([str(nix), 'derivation', 'show', str(drv)], owner, self.env))
-        body = selected_derivation_body(decoded, drv)
+        try:
+            body = selected_derivation_body(decoded, drv)
+        except RuntimeError as error:
+            # `nix` comes from the entering environment's PATH, so say which one.
+            raise RuntimeError(str(error) + ' (printed by ' + str(nix) + ')') from error
         constructed_source = Path(body['env']['src'])
         if not str(constructed_source).startswith('/nix/store/'):
             raise RuntimeError('constructor source is outside immutable store authority')

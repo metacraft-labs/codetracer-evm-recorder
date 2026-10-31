@@ -1,0 +1,2 @@
+# Unedited `nix derivation show` captures; the test reads them as Nix printed them.
+tests/fixtures/nix-derivation-show/
