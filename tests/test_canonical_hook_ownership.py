@@ -109,6 +109,32 @@ class CommonHooksOwnership(unittest.TestCase):
             self.assertEqual(hashlib.sha256(target.read_bytes()).hexdigest(), expected)
         self.assertEqual({name: (self.primary / name).read_bytes() for name in INSTALLER.OWNING_DECLARATIONS}, source_before)
 
+    def test_shell_entry_installation_leaves_working_tree_clean(self) -> None:
+        # Run the installer exactly as the flake shell hook does: the real
+        # interpreter, no -B, and PYTHONDONTWRITEBYTECODE removed, so nothing
+        # but the installer itself can stop Python from caching the bytecode
+        # of its sibling imports under tools/. The other real-installer cases
+        # set PYTHONDONTWRITEBYTECODE and would hide such a write. The
+        # pre-push gate counts untracked files, so entering the declared
+        # environment must leave the working tree as clean as it found it.
+        repro = os.environ.get("REPROBUILD_REPRO") or shutil.which("repro")
+        if not repro:
+            self.fail("missing declared matching engine")
+        env = os.environ.copy()
+        env.pop("PYTHONDONTWRITEBYTECODE", None)
+        self.assertEqual(self.command("status", "--porcelain", "--untracked-files=all", "--ignored"), "")
+        for extra in (["--bootstrap-managed"], []):
+            result = subprocess.run(
+                [os.sys.executable, "tools/install-canonical-hooks.py", "--repro", repro, *extra],
+                cwd=self.primary, env=env, capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(
+            (self.primary / "tools/__pycache__").exists(),
+            "installer wrote a bytecode cache into the working tree",
+        )
+        self.assertEqual(self.command("status", "--porcelain", "--untracked-files=all", "--ignored"), "")
+
     def test_unknown_hook_refuses_before_bootstrap_writes(self) -> None:
         hook = self.primary / ".git/hooks/pre-commit"
         hook.write_bytes(b"#!/bin/sh\necho genuinely unknown owned fixture\n")

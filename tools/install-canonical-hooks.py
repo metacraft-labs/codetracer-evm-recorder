@@ -17,6 +17,14 @@ import subprocess
 import sys
 import tempfile
 
+# Entering the declared environment runs this installer, and it must leave the
+# working tree as clean as it found it: the pre-push gate counts untracked
+# files. Without this, importing the sibling modules below writes
+# tools/__pycache__/. Setting it here covers every caller (the flake shell
+# hook, the Justfile, and the sys.executable relaunch in main()) regardless of
+# -B or PYTHONDONTWRITEBYTECODE.
+sys.dont_write_bytecode = True
+
 from repro_hook_factory import SelectedFactory
 from held_hook_boundary import HeldHookBoundary
 
