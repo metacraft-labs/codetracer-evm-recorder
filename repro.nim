@@ -107,6 +107,12 @@ package codetracer_evm_recorder:
     "zstd"
     when defined(linux):
       "evmZstdDevelopment"
+    # zstd.h + libzstd for the sibling ct-print edge
+    # (``build_writer_artifacts.buildCtPrint`` compiles and links against
+    # them; ``zstd`` is the CLI only). The constructor cannot provision a
+    # tool from inside ``build:`` and refuses a recipe that omits it.
+    when not defined(windows):
+      "zstd-dev"
 
     # pkg-config + OpenSSL — openssl-sys consults pkg-config to find
     # OpenSSL on Linux/macOS. The Windows build uses the rustls-tls
@@ -188,15 +194,9 @@ package codetracer_evm_recorder:
         traceRoot / "codetracer_trace_types", traceRoot / "codetracer_trace_writer_nim",
         traceRoot / "codetracer_trace_reader", traceRoot / "codetracer_ctfs",
         nimRoot / "src", nimRoot / "include"])
+    # The constructor names the decoder compile's C backend and zstd-dev on
+    # its edge itself; this recipe only declares them in uses:.
     let decoderBuild = buildCtPrint(nimRoot)
-    # The decoder's `nim c` drives the C backend; scope it onto that edge.
-    when defined(macosx):
-      appendRegisteredActionToolIdentityRefs(decoderBuild.id, ["clang"])
-    else:
-      appendRegisteredActionToolIdentityRefs(decoderBuild.id, ["gcc"])
-    when defined(linux):
-      appendRegisteredActionToolIdentityRefs(decoderBuild.id,
-        ["evmZstdDevelopment"])
     let decoderBinary = ctPrintPath(nimRoot)
 
     var recorderCompilerEnv: seq[(string, string)] = @[]
