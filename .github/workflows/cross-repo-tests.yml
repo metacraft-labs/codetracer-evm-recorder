@@ -99,7 +99,7 @@ jobs:
         # checkout at workspace-lock-pinned revisions. workflow_dispatch /
         # repository_dispatch ref inputs override the locked revision for
         # codetracer + the extension (empty => lock).
-        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@142b12da267e48d7322960aa77ec33d7761f9082
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@a515a0a1ed7917688345138d15f2210b53a6c694
         with:
           env-flavor: nix
           consumer-directory: ${{ env.EVM_CI_NAMESPACE }}/codetracer-evm-recorder
