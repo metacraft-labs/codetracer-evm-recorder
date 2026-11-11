@@ -1,0 +1,87 @@
+#!/usr/bin/env sh
+# reprobuild managed post-checkout hook
+# managed-by: reprobuild hooks ensure
+# dispatches to: repro hooks dispatch post-checkout
+set -eu
+set +x
+REPROBUILD_CAPTURED_INTERNAL_CONTEXT=${REPROBUILD_INTERNAL_HOOK_CONTEXT:-}
+unset REPROBUILD_INTERNAL_HOOK_CONTEXT
+if [ "$REPROBUILD_CAPTURED_INTERNAL_CONTEXT" = "reprobuild.driven-operation.v1" ]; then exit 0; fi
+REPRO_CMD=
+REPRO_CMD_SOURCE=
+find_repro_cmd() {
+  if [ -n "${REPROBUILD_REPRO:-}" ]; then
+    if [ -x "$REPROBUILD_REPRO" ]; then
+      REPRO_CMD=$REPROBUILD_REPRO
+      REPRO_CMD_SOURCE=REPROBUILD_REPRO
+      return 0
+    fi
+    return 1
+  fi
+  if command -v repro >/dev/null 2>&1; then
+    REPRO_CMD=$(command -v repro)
+    REPRO_CMD_SOURCE=PATH
+    return 0
+  fi
+  return 1
+}
+
+repro_contract_refusal() {
+  REPRO_CMD_VERSION=$("$REPRO_CMD" --version 2>/dev/null | head -1)
+  [ -n "$REPRO_CMD_VERSION" ] || REPRO_CMD_VERSION="unknown; it did not answer --version"
+  echo "repro hooks: post-checkout: this hook could not be evaluated." >&2
+  echo "repro hooks: The 'repro' it resolved does not generate this hook, so it cannot" >&2
+  echo "repro hooks: service it. The policy was never applied and has not objected to" >&2
+  echo "repro hooks: anything: this is a tooling mismatch on this machine." >&2
+  echo "repro hooks:   resolved binary: $REPRO_CMD (resolved from $REPRO_CMD_SOURCE)" >&2
+  echo "repro hooks:   its version:     $REPRO_CMD_VERSION" >&2
+  echo "repro hooks:   hook contract:   reprobuild.managed-hook.v1.post-checkout.891d75050f4f2352" >&2
+  if [ "${REPRO_PROBE_STATUS:-1}" = "3" ]; then
+    echo "repro hooks: That build speaks this handshake and simply builds a different" >&2
+    echo "repro hooks: hook. Re-anchor this repository to it and retry:" >&2
+    echo "repro hooks:      $REPRO_CMD hooks ensure --vcs $REPO_ROOT" >&2
+  else
+    echo "repro hooks: That build predates this handshake, so it cannot service this" >&2
+    echo "repro hooks: hook at all. Do NOT run 'repro hooks ensure' with it: that rewrites" >&2
+    echo "repro hooks: this file with its own older body, the contract line disappears," >&2
+    echo "repro hooks: and you silence this message instead of fixing it. Instead:" >&2
+    echo "repro hooks:   1. Refresh whatever supplies repro here:" >&2
+    echo "repro hooks:        direnv reload    (or just open a new shell)" >&2
+    echo "repro hooks:      A shell started before the last pin bump keeps serving the" >&2
+    echo "repro hooks:      binary it was born with, however current the pins now are." >&2
+    echo "repro hooks:   2. If it survives that, the install is behind the workspace:" >&2
+    echo "repro hooks:      update the reprobuild pin and rebuild your environment." >&2
+    if [ -x /nix/store/kx1sdp8m39k6zwppr6rl51m1zz54a3cv-reprobuild-0.2.5/bin/.reprobuild-wrapped ]; then
+      echo "repro hooks:   3. To push right now with the build that installed this hook:" >&2
+      echo 'repro hooks:        REPROBUILD_REPRO=/nix/store/kx1sdp8m39k6zwppr6rl51m1zz54a3cv-reprobuild-0.2.5/bin/.reprobuild-wrapped git push' >&2
+    fi
+  fi
+  echo "repro hooks: Do not reach for --no-verify: it also turns off the refusals that" >&2
+  echo "repro hooks: are working, such as pushing an unpublished or unlocked head." >&2
+}
+
+repro_dispatch_attribution() {
+  echo "repro hooks: post-checkout above was produced by $REPRO_CMD (resolved from $REPRO_CMD_SOURCE)." >&2
+}
+
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+cd "$REPO_ROOT"
+unset GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_OBJECT_DIRECTORY GIT_DIR GIT_WORK_TREE GIT_IMPLICIT_WORK_TREE GIT_GRAFT_FILE GIT_INDEX_FILE GIT_NO_REPLACE_OBJECTS GIT_REPLACE_REF_BASE GIT_PREFIX GIT_SHALLOW_FILE GIT_COMMON_DIR GIT_NAMESPACE GIT_QUARANTINE_PATH GIT_INTERNAL_SUPER_PREFIX
+for REPROBUILD_GIT_CONFIG_NAME in $(env | sed -n -e 's/^\(GIT_CONFIG_KEY_[A-Za-z0-9_]*\)=.*/\1/p' -e 's/^\(GIT_CONFIG_VALUE_[A-Za-z0-9_]*\)=.*/\1/p'); do
+  unset "$REPROBUILD_GIT_CONFIG_NAME"
+done
+unset REPROBUILD_GIT_CONFIG_NAME
+if find_repro_cmd; then
+  REPRO_PROBE_STATUS=0
+  "$REPRO_CMD" hooks protocol --require=2 --hook-contract=reprobuild.managed-hook.v1.post-checkout.891d75050f4f2352 >/dev/null 2>&1 || REPRO_PROBE_STATUS=$?
+  if [ "$REPRO_PROBE_STATUS" -ne 0 ]; then
+    repro_contract_refusal
+    exit 0
+  fi
+  REPRO_STATUS=0
+  "$REPRO_CMD" hooks dispatch post-checkout --repo-root "$REPO_ROOT" -- "$@" || REPRO_STATUS=$?
+  if [ "$REPRO_STATUS" -ne 0 ]; then repro_dispatch_attribution; fi
+  exit $REPRO_STATUS
+fi
+echo "repro hooks: repro CLI not found on PATH; skipping post-checkout" >&2
+exit 0
