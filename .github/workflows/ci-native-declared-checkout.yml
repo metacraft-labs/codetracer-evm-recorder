@@ -106,14 +106,20 @@ jobs:
           printf '%s\n' "$git_root/bin" >> "$GITHUB_PATH"
 
       - name: Setup dev env
-        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@142b12da267e48d7322960aa77ec33d7761f9082
+        # setup-dev-env a515a0a1 is the first pin of this workflow that accepts
+        # repro-version; the earlier 142b12da did not.
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@a515a0a1ed7917688345138d15f2210b53a6c694
         env:
           EVM_CI_GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
         with:
           env-flavor: ${{ inputs.env-flavor }}
           sibling-strategy: repro-lock
+          # reprobuild v0.2.20 (a650b203), the revision the owning flake.nix
+          # selects. Every leg here is Unix and builds that commit from source;
+          # repro-version names the same release for the record.
           repro-from-source: "true"
-          repro-build-pin: "76659f5730ecf698b1963c656494d2cb66eb256d"
+          repro-version: v0.2.20
+          repro-build-pin: "a650b2034947eba87c809b1a7c9169f489aebd24"
           consumer-directory: ${{ env.EVM_CI_NAMESPACE }}/codetracer-evm-recorder
           workspace-directory: ${{ env.EVM_CI_NAMESPACE }}
           gh-token: ${{ steps.app-token.outputs.token }}

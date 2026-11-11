@@ -109,7 +109,9 @@ jobs:
           printf '%s\n' "$git_root/bin" >> "$GITHUB_PATH"
 
       - name: Setup dev env (reprobuild flavor)
-        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@440187b477282220f1c4a8432b77b6d06f2a7146
+        # setup-dev-env a515a0a1 is the first pin of this workflow that accepts
+        # repro-version; the earlier 440187b4 always built from source.
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@a515a0a1ed7917688345138d15f2210b53a6c694
         env:
           EVM_CI_GITHUB_TOKEN: ${{ matrix.os != 'windows' && steps.ci_token.outputs.token || '' }}
         with:
@@ -117,14 +119,36 @@ jobs:
           sibling-strategy: ${{ matrix.os != 'windows' && 'repro-lock' || 'auto' }}
           consumer-directory: ${{ matrix.os != 'windows' && format('{0}/codetracer-evm-recorder', env.EVM_CI_NAMESPACE) || '.' }}
           workspace-directory: ${{ matrix.os != 'windows' && env.EVM_CI_NAMESPACE || '.' }}
-          repro-from-source: "true"
-          repro-build-pin: "76659f5730ecf698b1963c656494d2cb66eb256d"
+          # reprobuild v0.2.20 (a650b203) on every leg, the same revision the
+          # owning flake.nix selects for the dev shell and hook factory. Unix
+          # legs build that commit from source and the step below asserts it;
+          # Windows x64 installs the v0.2.20 release archive. Windows arm64 has
+          # no v0.2.20 archive and falls back to a source build of the same
+          # commit. v0.2.20 reads the committed repro.lock schema
+          # (reprobuild.solved-graph-lock.v3); 76659f57, pinned before, does not.
+          repro-from-source: ${{ matrix.os != 'windows' && 'true' || 'false' }}
+          repro-version: v0.2.20
+          repro-build-pin: "a650b2034947eba87c809b1a7c9169f489aebd24"
           gh-token: ${{ steps.ci_token.outputs.token }}
           substituters: ${{ vars.SUBSTITUTERS }}
           trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
           attic-token: ${{ secrets.ATTIC_TOKEN }}
           attic-cache: ${{ vars.ATTIC_CACHE }}
           attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
+
+      - name: Assert newly built source and helper identity
+        if: matrix.os != 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_root="${GITHUB_WORKSPACE}/${EVM_CI_NAMESPACE}/.reprobuild-src"
+          test "$(git -C "$source_root" rev-parse HEAD)" = a650b2034947eba87c809b1a7c9169f489aebd24
+          test -z "$(git -C "$source_root" status --porcelain)"
+          test "$(command -v repro)" = "${source_root}/build/bin/repro"
+          test "${REPROBUILD_NIX_DAEMON_BIN}" = "${source_root}/build/bin/reprobuild-nix-daemon"
+          test -x "${REPROBUILD_NIX_DAEMON_BIN}"
+          "${REPROBUILD_NIX_DAEMON_BIN}" --help
+          repro --version
 
       - name: Bind declared Windows POSIX tool companions
         if: matrix.os == 'windows'
