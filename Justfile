@@ -17,6 +17,7 @@ test: build-decoder
   cargo test
   bash tests/verify-cli-convention-no-silent-skip.sh
   python3 -B -m unittest tests/test_derivation_show_schemas.py
+  python3 -B -m unittest tests/test_ci_provision_git.py
 
 t: test
 

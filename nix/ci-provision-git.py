@@ -5,6 +5,13 @@ The SDK deliberately removes indexed Git configuration at a cross-repository
 boundary. This declared Git wrapper reconstructs only the caller's authorized
 CI org header immediately before the genuine Git executable. It writes no
 credential files and places no credential on an argument vector.
+
+A caller that hands Git its own global configuration (``GIT_CONFIG_GLOBAL``)
+owns authentication for that command, and the wrapper adds nothing.
+setup-dev-env's locked-sibling fetch does exactly that: it renders the org
+header into a private global config file for the one command. Adding the
+wrapper's header as well gave Git the same ``extraHeader`` twice, and GitHub
+refused the request ("Duplicate header: \"Authorization\"", HTTP 400).
 """
 import base64
 import os
@@ -23,7 +30,7 @@ def git_environment(source):
             del result[name]
     result["GIT_TERMINAL_PROMPT"] = "0"
     token = result.get(TOKEN_ENV, "")
-    if not token:
+    if not token or result.get("GIT_CONFIG_GLOBAL"):
         return result
     if any(ord(c) < 33 or ord(c) > 126 for c in token):
         raise ValueError("CI Git credential has an invalid character")
