@@ -6,22 +6,46 @@ boundary. This declared Git wrapper reconstructs only the caller's authorized
 CI org header immediately before the genuine Git executable. It writes no
 credential files and places no credential on an argument vector.
 
-A caller that hands Git its own global configuration (``GIT_CONFIG_GLOBAL``)
-owns authentication for that command, and the wrapper adds nothing.
-setup-dev-env's locked-sibling fetch does exactly that: it renders the org
-header into a private global config file for the one command. Adding the
-wrapper's header as well gave Git the same ``extraHeader`` twice, and GitHub
-refused the request ("Duplicate header: \"Authorization\"", HTTP 400).
+When the caller's own global configuration (``GIT_CONFIG_GLOBAL``) already
+sets an ``extraHeader`` for the org URL, that file owns authentication for
+the command and the wrapper adds nothing. setup-dev-env's locked-sibling fetch
+does exactly that: it renders the org header into a private global config file
+for the one command. Adding the wrapper's header as well gave Git the same
+``extraHeader`` twice, and GitHub refused the request ("Duplicate header:
+\"Authorization\"", HTTP 400). A global config that carries no such header
+(the job-wide one some steps point at) does not count: there the wrapper's
+header is still the only credential.
 """
 import base64
 import os
+import subprocess
 import sys
 
 TOKEN_ENV = "EVM_CI_GITHUB_TOKEN"
 ORG_URL = "https://github.com/metacraft-labs/"
 
 
-def git_environment(source):
+def global_config_sets_org_header(git, source):
+    """Whether the ``GIT_CONFIG_GLOBAL`` file in ``source`` sets the org header.
+
+    Read with the genuine Git so the file's own syntax rules apply; only the
+    config path is on the argument vector, never a credential.
+    """
+    path = source.get("GIT_CONFIG_GLOBAL", "")
+    if not path or git is None:
+        return False
+    probe = subprocess.run(
+        [git, "config", "--file", path, "--get-all", "http." + ORG_URL + ".extraheader"],
+        env={"PATH": source.get("PATH", ""), "HOME": source.get("HOME", "")},
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return probe.returncode == 0 and bool(probe.stdout.strip())
+
+
+def git_environment(source, git=None):
     result = dict(source)
     for name in tuple(result):
         if name in {"GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS"} or name.startswith(
@@ -30,7 +54,7 @@ def git_environment(source):
             del result[name]
     result["GIT_TERMINAL_PROMPT"] = "0"
     token = result.get(TOKEN_ENV, "")
-    if not token or result.get("GIT_CONFIG_GLOBAL"):
+    if not token or global_config_sets_org_header(git, result):
         return result
     if any(ord(c) < 33 or ord(c) > 126 for c in token):
         raise ValueError("CI Git credential has an invalid character")
@@ -54,7 +78,7 @@ def main():
     if len(sys.argv) < 2 or not os.path.isabs(sys.argv[1]):
         raise ValueError("Declared absolute Git executable is required")
     git = sys.argv[1]
-    os.execve(git, [git, *sys.argv[2:]], git_environment(os.environ))
+    os.execve(git, [git, *sys.argv[2:]], git_environment(os.environ, git))
 
 
 if __name__ == "__main__":
