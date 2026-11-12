@@ -131,7 +131,11 @@ package codetracer_evm_recorder:
     "git"
     when defined(windows):
       # The owning ctPrint producer uses GCC independently of Cargo MSVC.
-      "gcc"
+      # A range, so that path mode refuses an old gcc found first on PATH
+      # (a Windows runner lists Free Pascal's gcc 2.95 ahead of a usable one,
+      # which fails every C compile with "<header>: Invalid argument") and
+      # falls through to the declared archive (WinLibs).
+      "gcc >=12"
 
     # Language-specific compiler / runtime tools. ``solc`` compiles the
     # Solidity test fixtures the integration tests record against;
