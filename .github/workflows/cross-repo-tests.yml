@@ -76,7 +76,7 @@ jobs:
           path: evm-ci-bootstrap
 
       - name: Setup declared Nix before shell activation
-        uses: metacraft-labs/metacraft-github-actions/setup-nix@3fcbb26dd920adf6ccc64a87c6d24797ab0b5d94
+        uses: metacraft-labs/metacraft-github-actions/setup-nix@a515a0a1ed7917688345138d15f2210b53a6c694
         with:
           substituters: ${{ vars.SUBSTITUTERS }}
           trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
@@ -105,6 +105,11 @@ jobs:
           consumer-directory: ${{ env.EVM_CI_NAMESPACE }}/codetracer-evm-recorder
           workspace-directory: ${{ env.EVM_CI_NAMESPACE }}
           gh-token: ${{ steps.app-token.outputs.token }}
+          # Keeps the Nix GitHub credential valid past the token's one-hour
+          # lifetime: a job-scoped broker re-mints it while setup and the
+          # build run (setup-dev-env app-id / app-private-key).
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          app-private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
           substituters: ${{ vars.SUBSTITUTERS }}
           trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
           attic-token: ${{ secrets.ATTIC_TOKEN }}
@@ -128,34 +133,6 @@ jobs:
           DEST="$GITHUB_WORKSPACE/$EVM_CI_NAMESPACE/codetracer/libs/codetracer-trace-format"
           rm -rf "$DEST"
           cp -a "$SRC" "$DEST"
-
-      - name: Fetch the dev shells later steps enter, while the token is valid
-        # The job's one GitHub token expires an hour after "Generate CI token"
-        # minted it, and a job mints exactly once, so it cannot be refreshed.
-        # Nix keeps presenting it, and GitHub answers `401 Bad credentials`
-        # for every fetch nix has not cached. "Build codetracer" below takes
-        # about an hour, so the steps after it start with a dead token.
-        # PR #17 job 130769541203: minted 21:08:10, and at 22:16:31 "Record
-        # Solidity trace fixture" failed fetching the private
-        # reprobuild-ct-test-runner tarball, an input of the reprobuild
-        # package this recorder's dev shell carries.
-        #
-        # Evaluating each dev shell here does every authenticated fetch while
-        # the token works; the later `nix develop` of the same locked revision
-        # is answered from nix's fetcher cache under this job's $HOME. This is
-        # the fix codetracer's launcher-recorder-e2e.yml and
-        # codetracer-wasm-recorder's cross-repo job apply. Evaluation only:
-        # nothing is built.
-        run: |
-          set -euo pipefail
-          SYSTEM="$(nix eval --impure --raw --expr builtins.currentSystem)"
-          for dir in codetracer-evm-recorder codetracer-vscode-extension; do
-            (cd "$GITHUB_WORKSPACE/$EVM_CI_NAMESPACE/$dir" &&
-              nix eval --raw --no-write-lock-file ".#devShells.${SYSTEM}.default.drvPath" >/dev/null) || {
-              echo "::error::could not evaluate the dev shell of ${dir} while this job's GitHub token is still valid; a later step enters it after the token has expired"
-              exit 1
-            }
-          done
 
       - name: Build codetracer
         run: |
