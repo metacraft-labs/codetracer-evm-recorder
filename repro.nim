@@ -110,9 +110,9 @@ package codetracer_evm_recorder:
     # zstd.h + libzstd for the sibling ct-print edge
     # (``build_writer_artifacts.buildCtPrint`` compiles and links against
     # them; ``zstd`` is the CLI only). The constructor cannot provision a
-    # tool from inside ``build:`` and refuses a recipe that omits it.
-    when not defined(windows):
-      "zstd-dev"
+    # tool from inside ``build:`` and refuses a recipe that omits it. On
+    # Windows it is the MinGW libzstd the GCC-built ct-print links.
+    "zstd-dev"
 
     # pkg-config + OpenSSL — openssl-sys consults pkg-config to find
     # OpenSSL on Linux/macOS. The Windows build uses the rustls-tls
