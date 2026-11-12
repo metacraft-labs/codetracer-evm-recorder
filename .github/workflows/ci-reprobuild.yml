@@ -78,7 +78,7 @@ jobs:
 
       - name: Setup declared Nix before Unix shell activation
         if: matrix.os != 'windows'
-        uses: metacraft-labs/metacraft-github-actions/setup-nix@a515a0a1ed7917688345138d15f2210b53a6c694
+        uses: metacraft-labs/metacraft-github-actions/setup-nix@80d5d9e496882eea0dacce37bbd22cb7e9814f03
         with:
           substituters: ${{ vars.SUBSTITUTERS }}
           trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
@@ -109,9 +109,10 @@ jobs:
           printf '%s\n' "$git_root/bin" >> "$GITHUB_PATH"
 
       - name: Setup dev env (reprobuild flavor)
-        # setup-dev-env a515a0a1 is the first pin of this workflow that accepts
-        # repro-version; the earlier 440187b4 always built from source.
-        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@a515a0a1ed7917688345138d15f2210b53a6c694
+        # setup-dev-env 80d5d9e4: repro-version support (from a515a0a1), and the
+        # job credential broker's token for the steps after the repro CLI
+        # install, so a long source build no longer outlives the job-start token.
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@80d5d9e496882eea0dacce37bbd22cb7e9814f03
         env:
           EVM_CI_GITHUB_TOKEN: ${{ matrix.os != 'windows' && steps.ci_token.outputs.token || '' }}
         with:

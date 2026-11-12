@@ -78,7 +78,7 @@ jobs:
           owner: metacraft-labs
 
       - name: Setup declared Nix before shell activation
-        uses: metacraft-labs/metacraft-github-actions/setup-nix@a515a0a1ed7917688345138d15f2210b53a6c694
+        uses: metacraft-labs/metacraft-github-actions/setup-nix@80d5d9e496882eea0dacce37bbd22cb7e9814f03
         with:
           substituters: ${{ vars.SUBSTITUTERS }}
           trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
@@ -106,9 +106,10 @@ jobs:
           printf '%s\n' "$git_root/bin" >> "$GITHUB_PATH"
 
       - name: Setup dev env
-        # setup-dev-env a515a0a1 is the first pin of this workflow that accepts
-        # repro-version; the earlier 142b12da did not.
-        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@a515a0a1ed7917688345138d15f2210b53a6c694
+        # setup-dev-env 80d5d9e4 accepts repro-version (from a515a0a1; the
+        # earlier 142b12da did not) and hands the job credential broker's token
+        # to the steps after the repro CLI install.
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@80d5d9e496882eea0dacce37bbd22cb7e9814f03
         env:
           EVM_CI_GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
         with:
