@@ -22,10 +22,10 @@
 #   ];
 
 {
-  lib ? (import <nixpkgs> {}).lib,
-  rustPlatform ? (import <nixpkgs> {}).rustPlatform,
-  stdenv ? (import <nixpkgs> {}).stdenv,
-  fetchFromGitHub ? (import <nixpkgs> {}).fetchFromGitHub,
+  lib ? (import <nixpkgs> { }).lib,
+  rustPlatform ? (import <nixpkgs> { }).rustPlatform,
+  stdenv ? (import <nixpkgs> { }).stdenv,
+  fetchFromGitHub ? (import <nixpkgs> { }).fetchFromGitHub,
   # When `srcOverride` is set the build uses the supplied source tree;
   # otherwise it fetches from the public repo at the pinned tag.
   # Source-tree override is the path Nix-based CI takes (it already
@@ -39,16 +39,17 @@ rustPlatform.buildRustPackage rec {
   inherit version;
 
   src =
-    if srcOverride != null
-    then srcOverride
-    else fetchFromGitHub {
-      owner = "metacraft-labs";
-      repo  = "codetracer-evm-recorder";
-      rev   = "v${version}";
-      # The publish workflow rewrites this placeholder before
-      # tagging. When building locally pass `srcOverride = ./.;`.
-      sha256 = lib.fakeSha256;
-    };
+    if srcOverride != null then
+      srcOverride
+    else
+      fetchFromGitHub {
+        owner = "metacraft-labs";
+        repo = "codetracer-evm-recorder";
+        rev = "v${version}";
+        # The publish workflow rewrites this placeholder before
+        # tagging. When building locally pass `srcOverride = ./.;`.
+        sha256 = lib.fakeSha256;
+      };
 
   # Cargo.lock pins every dep — `cargoLock.lockFile` keeps the build
   # reproducible without requiring `outputHashes` for every git dep.
@@ -64,15 +65,15 @@ rustPlatform.buildRustPackage rec {
   # library, which is built and linked at the Cargo level. The
   # generator emits a `buildInputs` list below sourced from the
   # recorder's metadata so the right system libs are present.
-  buildInputs = with (import <nixpkgs> {}); [ zstd ];
+  buildInputs = with (import <nixpkgs> { }); [ zstd ];
 
-  doCheck = false;  # `cargo test` runs in the recorder's own CI
+  doCheck = false; # `cargo test` runs in the recorder's own CI
 
   meta = with lib; {
     description = "CodeTracer recorder for EVM smart contracts (Solidity/Vyper)";
-    homepage    = "https://github.com/metacraft-labs/codetracer-evm-recorder";
-    license     = licenses.asl20;
-    platforms   = platforms.unix;
+    homepage = "https://github.com/metacraft-labs/codetracer-evm-recorder";
+    license = licenses.asl20;
+    platforms = platforms.unix;
     mainProgram = "codetracer-evm-recorder";
   };
 }

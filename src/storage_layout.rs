@@ -2,16 +2,28 @@ use serde::Deserialize;
 use std::collections::HashMap;
 
 /// Parsed representation of solc's `storageLayout` JSON output.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct StorageLayout {
     /// Ordered list of storage variable entries.
     pub storage: Vec<StorageEntry>,
     /// Map from type identifier (e.g. `"t_uint256"`) to type metadata.
+    ///
+    /// solc writes `"types": null` for a contract with no state variables. That is an EMPTY
+    /// layout, not a missing one, and refusing it dropped the layout of every stateless
+    /// contract (a proxy, a router, a transformer) a recompile produced.
+    #[serde(default, deserialize_with = "null_as_empty")]
     pub types: HashMap<String, StorageTypeInfo>,
 }
 
+fn null_as_empty<'de, D>(d: D) -> Result<HashMap<String, StorageTypeInfo>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<HashMap<String, StorageTypeInfo>>::deserialize(d)?.unwrap_or_default())
+}
+
 /// A single storage variable entry from the storageLayout.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageEntry {
     /// Variable name as written in the source.
@@ -33,7 +45,7 @@ pub struct StorageEntry {
 }
 
 /// Type metadata from the storageLayout types map.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageTypeInfo {
     /// Encoding strategy: "inplace", "mapping", "dynamic_array", etc.
@@ -232,6 +244,19 @@ impl StorageLayout {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod null_types_tests {
+    use super::*;
+
+    #[test]
+    fn a_stateless_contracts_layout_is_empty_not_missing() {
+        let layout: StorageLayout = serde_json::from_str(r#"{"storage":[],"types":null}"#).unwrap();
+        assert!(layout.storage.is_empty() && layout.types.is_empty());
+        // Control: a layout with no `storage` member is still refused.
+        assert!(serde_json::from_str::<StorageLayout>(r#"{"types":null}"#).is_err());
     }
 }
 

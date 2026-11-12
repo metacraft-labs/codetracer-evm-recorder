@@ -1,6 +1,6 @@
 use codetracer_trace_types::{EventLogKind, Line, NONE_VALUE, TypeId, TypeKind, ValueRecord};
 use codetracer_trace_writer_nim::trace_writer::TraceWriter;
-use codetracer_trace_writer_nim::{TraceEventsFileFormat, create_trace_writer};
+use codetracer_trace_writer_nim::{NimTraceWriter, TraceEventsFileFormat, create_trace_writer};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -17,6 +17,90 @@ use crate::storage_layout::StorageLayout;
 use crate::structlog::StructLog;
 
 const INTERNAL_CALL_LOOKAHEAD: usize = 5;
+
+/// What an internal `[in]` jump opened, so that the matching `[out]` jump
+/// closes the same thing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JumpFrame {
+    /// A jump into a user function, recorded as a call.
+    User,
+    /// A jump into, or within, code solc generated (checked arithmetic,
+    /// ABI coding, ...). solc emits these as `[in]`/`[out]` jumps like any
+    /// internal call, but there is no user function to enter: the source
+    /// line that performs the operation is still executing.
+    Generated,
+}
+
+/// Whether the jump at `current_index` lands in code solc generated rather
+/// than in a user function: the instruction executed right after it maps to
+/// no user source (a source index past the user sources, where solc numbers
+/// its generated Yul, or no source at all), and no instruction in the
+/// lookahead window lands inside a user function either. The second check
+/// keeps a user function whose entry JUMPDEST carries no source mapping a
+/// user call.
+fn jump_lands_in_generated_code(
+    struct_logs: &[StructLog],
+    current_index: usize,
+    source_map: &SourceMap,
+    pc_to_idx: &[usize],
+    user_source_count: usize,
+    solidity_ast: Option<&SolidityAst>,
+) -> bool {
+    let next_in_user_source = struct_logs
+        .get(current_index + 1)
+        .and_then(|next| source_map.get_entry_for_pc(next.pc as usize, pc_to_idx))
+        .is_some_and(|e| e.file_index >= 0 && (e.file_index as usize) < user_source_count);
+    !next_in_user_source
+        && resolve_internal_call_target(
+            struct_logs,
+            current_index,
+            source_map,
+            pc_to_idx,
+            solidity_ast,
+        )
+        .is_none()
+}
+
+/// Drop every label and size the symbolic stack to the concrete stack left
+/// by the JUMP whose pre-execution stack is `stack_before_jump` (the JUMP
+/// pops its destination). Slots are indexed from the stack bottom, so the
+/// depth must match the concrete stack for later labels to read the right
+/// values.
+fn resync_tracker_after_jump(
+    tracker: &mut StackTracker,
+    stack_before_jump: Option<&[alloy::primitives::U256]>,
+) {
+    match stack_before_jump {
+        Some(stack) => tracker.seed_top_labels(stack.len().saturating_sub(1), &[]),
+        None => tracker.reset(),
+    }
+}
+
+/// Close the frame an `[out]` jump returns from. A user call gets its
+/// return; generated code has none. An `[out]`
+/// with no open frame is recorded as a return, as before frames were tracked.
+///
+/// Returning from generated code leaves the tracker alone: it followed the
+/// helper's instructions, so the caller's labels are still in place.
+fn close_jump_frame(
+    frames: &mut Vec<JumpFrame>,
+    writer: &mut dyn TraceWriter,
+    tracker: &mut StackTracker,
+    stack_before_jump: Option<&[alloy::primitives::U256]>,
+    return_type_id: TypeId,
+) {
+    match frames.pop() {
+        Some(JumpFrame::Generated) => {}
+        Some(JumpFrame::User) | None => {
+            let ret_val = ValueRecord::Raw {
+                r: "0x".to_string(),
+                type_id: return_type_id,
+            };
+            TraceWriter::register_return(writer, ret_val);
+            resync_tracker_after_jump(tracker, stack_before_jump);
+        }
+    }
+}
 
 /// Map a Solidity type name to the appropriate CodeTracer `TypeKind`.
 fn type_kind_for_solidity_type(type_name: &str) -> TypeKind {
@@ -301,6 +385,22 @@ pub struct EvmRecorder {
     /// registration wins per the Nim writer's semantics — see
     /// `codetracer_trace_writer_nim::NimTraceWriter::register_path_with_line_lengths`).
     paths_with_line_lengths: HashSet<PathBuf>,
+    /// Executed steps whose frame had no artifacts at all: no source map and no
+    /// disassembly listing, so the step could only be dropped. Zero in a correct
+    /// recording, whether or not verified source was found, because every executed
+    /// address is given at least a listing; see [`Self::steps_without_artifacts`].
+    steps_without_artifacts: u64,
+    /// Executed steps whose frame HAD artifacts, at a PC those artifacts' code does not
+    /// have as an instruction: past its end, or inside a PUSH's data. The artifacts then
+    /// describe some other code than the code that ran, so the step was dropped or, worse,
+    /// placed on an instruction that never executed. Zero in a correct recording.
+    steps_off_code: u64,
+    /// Executed steps that resolved to a line of VERIFIED SOURCE, and those that resolved to
+    /// a line of a disassembly listing. Counted per executed instruction, before consecutive
+    /// steps on one line are merged into one, so the two over the replay's own count are the
+    /// share of the execution that has backing source.
+    steps_on_source: u64,
+    steps_on_listing: u64,
 }
 
 /// Compute the per-line UTF-8 byte-length table required by the
@@ -348,12 +448,38 @@ impl EvmRecorder {
     /// multi-stream format is well-tested across Ruby/Python and is the
     /// CTFS-migration target tracked by mission goal #6.
     pub fn new(program: &str, output_dir: &Path) -> eyre::Result<Self> {
-        let writer = create_trace_writer(program, &[], TraceEventsFileFormat::Ctfs);
+        Self::with_recording_id(program, output_dir, None)
+    }
+
+    /// As [`EvmRecorder::new`], with the container's `recording_id` pinned
+    /// instead of minted when `recording_id` is `Some`.  The id has to reach
+    /// the writer before the trace begins, and the setter lives on the Nim
+    /// writer rather than on the `TraceWriter` trait, so the concrete writer
+    /// is constructed here.  `create_trace_writer` builds the same
+    /// `NimTraceWriter` for `Ctfs`.
+    pub fn with_recording_id(
+        program: &str,
+        output_dir: &Path,
+        recording_id: Option<&str>,
+    ) -> eyre::Result<Self> {
+        let writer: Box<dyn TraceWriter + Send> = match recording_id {
+            None => create_trace_writer(program, &[], TraceEventsFileFormat::Ctfs),
+            Some(id) => {
+                let mut nim = NimTraceWriter::new(program, &[], TraceEventsFileFormat::Ctfs);
+                nim.set_recording_id(id)
+                    .map_err(|e| eyre::eyre!("the writer refused recording id {id}: {e}"))?;
+                Box::new(nim)
+            }
+        };
         Ok(Self {
             writer,
             type_names: Vec::new(),
             output_dir: output_dir.to_path_buf(),
             paths_with_line_lengths: HashSet::new(),
+            steps_without_artifacts: 0,
+            steps_off_code: 0,
+            steps_on_source: 0,
+            steps_on_listing: 0,
         })
     }
 
@@ -517,23 +643,15 @@ impl EvmRecorder {
         let mut prev_line: Option<(i32, u32, u32)> = None; // (file_index, line, column)
         let mut prev_depth: u64 = 1;
 
-        // --- First internal call merging ---
-        // The Solidity compiler's function dispatcher (contract preamble) runs
-        // before the actual user function. `TraceWriter::start()` opens a
-        // `<toplevel>` call at depth 0, and the first JumpType::Into from the
-        // dispatcher into the target function would normally push depth to 1.
-        //
-        // This is problematic because the db-backend's "step over" (next)
-        // skips all steps at deeper call depths. If the user function body
-        // is at depth 1, stepping from the entry point skips the ENTIRE body.
-        //
-        // Fix: absorb the first JumpType::Into into `<toplevel>` by not
-        // emitting a register_call for it, and skip the matching OutOf return.
-        // This keeps the target function's steps at depth 0.
-        let mut first_internal_call_absorbed = false;
-        // Track the call nesting depth relative to the absorbed call so we
-        // know when the matching return (OutOf) happens.
-        let mut absorbed_call_nesting: i32 = 0;
+        // `start` opens the format's literal <toplevel> root. A genuine
+        // dispatcher jump into a user entry function opens its own call,
+        // using the same AST identity, argument and balanced-return path as
+        // subsequent user calls. Replay starts inside that recorded entry.
+        let mut dispatcher_entry_seen = false;
+        // Per EVM call depth (depth 1 = index 0), one entry per `[in]` jump
+        // still open, so each `[out]` closes what its `[in]` opened (see
+        // `JumpFrame`). A contract's jumps never pair with another's.
+        let mut jump_frames: Vec<Vec<JumpFrame>> = Vec::new();
 
         // --- Local variable tracking (M5) ---
         // One StackTracker per call-stack depth.  We keep a small Vec indexed
@@ -550,8 +668,8 @@ impl EvmRecorder {
         // variables visible in the debugger at every subsequent step, we cache
         // the last written value per variable name and re-emit the full set
         // whenever a new source-line step is registered.
-        let mut storage_state: std::collections::HashMap<String, ValueRecord> =
-            std::collections::HashMap::new();
+        let mut storage_state: std::collections::BTreeMap<String, ValueRecord> =
+            std::collections::BTreeMap::new();
 
         // Raw-slot index keyed by storage slot number, used to assemble
         // compound `ValueRecord::Sequence` / `Struct` snapshots for
@@ -633,6 +751,17 @@ impl EvmRecorder {
 
                 let depth_diff = prev_depth - log.depth;
                 for _ in 0..depth_diff {
+                    // User calls the exited contract left open end with it,
+                    // innermost first, before the external call itself.
+                    for frame in jump_frames.pop().unwrap_or_default().into_iter().rev() {
+                        if frame == JumpFrame::User {
+                            let ret_val = ValueRecord::Raw {
+                                r: "0x".to_string(),
+                                type_id: uint256_type_id,
+                            };
+                            TraceWriter::register_return(&mut *self.writer, ret_val);
+                        }
+                    }
                     let ret_val = ValueRecord::Raw {
                         r: "0x".to_string(),
                         type_id: uint256_type_id,
@@ -651,8 +780,12 @@ impl EvmRecorder {
             while memory_trackers.len() < log.depth as usize {
                 memory_trackers.push(MemoryTracker::new());
             }
+            while jump_frames.len() < log.depth as usize {
+                jump_frames.push(Vec::new());
+            }
             let tracker_idx = (log.depth as usize).saturating_sub(1);
             let tracker = &mut stack_trackers[tracker_idx];
+            let jump_frames = &mut jump_frames[tracker_idx];
 
             // Decode the opcode byte (first byte of log.op hex, or look up by name).
             let opcode: Option<u8> = opcode_from_name(log.op.as_ref());
@@ -791,50 +924,17 @@ impl EvmRecorder {
                 if let Some(entry) = source_map.get_entry_for_pc(pc, &pc_to_idx) {
                     match entry.jump_type {
                         JumpType::Into => {
-                            if !first_internal_call_absorbed {
-                                // Absorb the first internal call (dispatcher → target
-                                // function) into <toplevel>. This keeps the target
-                                // function's steps at depth 0 so step-over works.
-                                first_internal_call_absorbed = true;
-                                absorbed_call_nesting = 1;
-                                // Still reset the tracker for a clean start.
-                                tracker.reset();
-
-                                // Even though we don't emit a `register_call`
-                                // for the absorbed dispatcher → entry-point
-                                // jump, we still want the entry-point function
-                                // (e.g. `run`) to appear in the trace's
-                                // `functions` table.  This is what the
-                                // recorder-test-requirements §1 strict
-                                // assertion "function table includes the
-                                // entry-point name" expects (see
-                                // `test_nested_calls_function_names_resolved`).
-                                if let Some(target_fn) = resolve_internal_call_target(
-                                    struct_logs,
-                                    i,
-                                    source_map,
-                                    &pc_to_idx,
-                                    solidity_ast,
-                                ) {
-                                    let fn_path = source_paths
-                                        .get(file_idx as usize)
-                                        .copied()
-                                        .unwrap_or(main_path);
-                                    let display_name = solidity_ast
-                                        .map(|ast| ast.qualified_function_name(target_fn))
-                                        .unwrap_or_else(|| target_fn.name.clone());
-                                    let _ = TraceWriter::ensure_function_id(
-                                        &mut *self.writer,
-                                        &display_name,
-                                        fn_path,
-                                        Line(line as i64),
-                                    );
-                                }
+                            if jump_lands_in_generated_code(
+                                struct_logs,
+                                i,
+                                source_map,
+                                &pc_to_idx,
+                                source_contents.len(),
+                                solidity_ast,
+                            ) {
+                                jump_frames.push(JumpFrame::Generated);
                             } else {
-                                // Track nesting within the absorbed scope.
-                                if absorbed_call_nesting > 0 {
-                                    absorbed_call_nesting += 1;
-                                }
+                                jump_frames.push(JumpFrame::User);
 
                                 // Internal function call.
                                 //
@@ -921,34 +1021,28 @@ impl EvmRecorder {
                                     1,
                                 );
                                 TraceWriter::register_call(&mut *self.writer, fn_id, vec![]);
+                                // The first genuine dispatcher-to-user transition
+                                // supplies entry authority. Unresolved first targets
+                                // never make a later nested call masquerade as entry.
+                                if !dispatcher_entry_seen {
+                                    dispatcher_entry_seen = true;
+                                    if target_fn.is_some() {
+                                        TraceWriter::mark_current_call_as_entry(&mut *self.writer)
+                                            .map_err(|error| eyre::eyre!("{error}"))?;
+                                    }
+                                }
                             }
                         }
                         JumpType::OutOf => {
-                            if absorbed_call_nesting > 0 {
-                                absorbed_call_nesting -= 1;
-                                if absorbed_call_nesting == 0 {
-                                    // This is the return from the absorbed call.
-                                    // Don't emit register_return — the <toplevel>
-                                    // call will be closed by finalize().
-                                    tracker.reset();
-                                } else {
-                                    // Return from a nested call within the absorbed scope.
-                                    let ret_val = ValueRecord::Raw {
-                                        r: "0x".to_string(),
-                                        type_id: uint256_type_id,
-                                    };
-                                    TraceWriter::register_return(&mut *self.writer, ret_val);
-                                    tracker.reset();
-                                }
-                            } else {
-                                // Internal function return outside the absorbed scope.
-                                let ret_val = ValueRecord::Raw {
-                                    r: "0x".to_string(),
-                                    type_id: uint256_type_id,
-                                };
-                                TraceWriter::register_return(&mut *self.writer, ret_val);
-                                tracker.reset();
-                            }
+                            // Close the genuine user entry or internal frame;
+                            // finalization separately closes <toplevel>.
+                            close_jump_frame(
+                                jump_frames,
+                                &mut *self.writer,
+                                tracker,
+                                log.stack.as_deref(),
+                                uint256_type_id,
+                            );
                         }
                         JumpType::Regular => {}
                     }
@@ -957,6 +1051,22 @@ impl EvmRecorder {
                 // No source location — still advance the tracker.
                 if let Some(op) = opcode {
                     let _ = tracker.process_step(op, pc, source_offset, &[]);
+                }
+                // Jumps inside code with no user source (solc's generated
+                // helpers) still open and close frames: the `[out]` of a
+                // helper entered from user code is here.
+                if let Some(entry) = source_map.get_entry_for_pc(pc, &pc_to_idx) {
+                    match entry.jump_type {
+                        JumpType::Into => jump_frames.push(JumpFrame::Generated),
+                        JumpType::OutOf => close_jump_frame(
+                            jump_frames,
+                            &mut *self.writer,
+                            tracker,
+                            log.stack.as_deref(),
+                            uint256_type_id,
+                        ),
+                        JumpType::Regular => {}
+                    }
                 }
             }
 
@@ -1203,6 +1313,34 @@ impl EvmRecorder {
         Ok(())
     }
 
+    /// Executed steps that ran in a frame with neither a source map nor a
+    /// disassembly listing, so they are absent from the container.
+    ///
+    /// A route that registers artifacts for every executed address reports 0. It is
+    /// reported rather than asserted because `--no-disassembly-fallback` makes a non-zero
+    /// count the requested outcome; the caller decides. It is the check that two defects
+    /// passed: a lookup cap that also bounded which contracts were listed, and a
+    /// DELEGATECALL keyed by its context rather than its code. Both left the receipt
+    /// matching and the trace short.
+    pub fn steps_without_artifacts(&self) -> u64 {
+        self.steps_without_artifacts
+    }
+
+    /// Executed steps at a PC the frame's artifacts do not have as an instruction, so the
+    /// artifacts describe other code than what ran; see the field. Reported beside
+    /// [`Self::steps_without_artifacts`]: that one catches a frame with no listing, this one a
+    /// frame with the WRONG listing, such as an EIP-7702 account's 23-byte designator.
+    pub fn steps_off_code(&self) -> u64 {
+        self.steps_off_code
+    }
+
+    /// Executed steps that resolved to a line of verified source, and to a line of a
+    /// disassembly listing; see the fields. The rest of the replay's steps resolved to no
+    /// line (compiler-generated code with no source range, or an implicit STOP).
+    pub fn steps_on_source_and_listing(&self) -> (u64, u64) {
+        (self.steps_on_source, self.steps_on_listing)
+    }
+
     /// Process structLog entries with multi-contract support.
     ///
     /// Uses the [`ContractRegistry`] to switch source maps, storage layouts
@@ -1232,34 +1370,11 @@ impl EvmRecorder {
 
         // ---------- initial artifacts for the entry-point contract ----------
         let initial_artifacts = registry.get(&contract_address);
-        let (
-            init_source_map,
-            init_bytecode,
-            init_source_paths,
-            init_source_contents,
-            init_storage_layout,
-            init_solidity_ast,
-        ) = match initial_artifacts {
-            Some(a) => (
-                Some(&a.source_map),
-                a.runtime_bytecode.as_slice(),
-                a.source_paths.as_slice(),
-                a.source_contents.as_slice(),
-                a.storage_layout.as_ref(),
-                a.solidity_ast.as_ref(),
-            ),
-            None => (None, &[][..], &[][..], &[][..], None, None),
-        };
-
-        // Build pc_to_idx for the initial contract.
-        let init_pc_to_idx_owned;
-        let init_pc_to_idx: &[usize] = if !init_bytecode.is_empty() {
-            init_pc_to_idx_owned = source_map::build_pc_to_instruction_index(init_bytecode);
-            &init_pc_to_idx_owned
-        } else if let Some(a) = initial_artifacts {
-            &a.pc_to_idx
-        } else {
-            &[]
+        // Only the entry contract's paths are read here: they name the container's main
+        // source. Its source map is NOT a fallback for frames the registry does not know.
+        let (init_source_paths, init_source_contents) = match initial_artifacts {
+            Some(a) => (a.source_paths.as_slice(), a.source_contents.as_slice()),
+            None => (&[][..], &[][..]),
         };
 
         // Determine the main source path for TraceWriter::start.
@@ -1326,8 +1441,12 @@ impl EvmRecorder {
         // Vec corresponds to an EVM call depth (depth 1 = index 0).  When a
         // new call frame is entered, a fresh map is pushed; when a frame is
         // exited, its map is popped.
-        let mut storage_states: Vec<std::collections::HashMap<String, ValueRecord>> =
-            vec![std::collections::HashMap::new()];
+        // A BTreeMap, not a HashMap: the set is re-emitted at every source-line
+        // step, so its iteration order is the order variables are interned and
+        // written. A HashMap's order is per process, and two runs over the same
+        // replay wrote two different containers for it.
+        let mut storage_states: Vec<std::collections::BTreeMap<String, ValueRecord>> =
+            vec![std::collections::BTreeMap::new()];
 
         // Raw-slot index per call frame (mirror of `storage_states` but
         // keyed by storage slot number) so we can assemble compound
@@ -1396,8 +1515,21 @@ impl EvmRecorder {
                             .unwrap_or(Address::ZERO);
                         (addr, CallType::StaticCall, false, None)
                     }
-                    "CREATE" => (Address::ZERO, CallType::Create, false, None),
-                    "CREATE2" => (Address::ZERO, CallType::Create2, false, None),
+                    // The frame runs the INITCODE, which no address holds: it is keyed by
+                    // `onchain::initcode_address`, recomputed here from the creating step's
+                    // memory so the frame and the registry agree with no side table.
+                    "CREATE" => (
+                        create_frame_address(prev_log),
+                        CallType::Create,
+                        false,
+                        None,
+                    ),
+                    "CREATE2" => (
+                        create_frame_address(prev_log),
+                        CallType::Create2,
+                        false,
+                        None,
+                    ),
                     _ => (Address::ZERO, CallType::Call, false, None),
                 };
 
@@ -1445,7 +1577,7 @@ impl EvmRecorder {
                 }
                 // Fresh storage state for the new call frame.
                 while storage_states.len() < log.depth as usize {
-                    storage_states.push(std::collections::HashMap::new());
+                    storage_states.push(std::collections::BTreeMap::new());
                 }
                 while slot_values_per_frame.len() < log.depth as usize {
                     slot_values_per_frame.push(std::collections::HashMap::new());
@@ -1549,17 +1681,28 @@ impl EvmRecorder {
                         a.solidity_ast.as_ref(),
                     )
                 } else {
-                    // Fall back to initial contract's data for unknown addresses.
-                    (
-                        init_source_map,
-                        init_pc_to_idx,
-                        init_source_paths,
-                        init_source_contents,
-                        init_storage_layout,
-                        init_solidity_ast,
-                    )
+                    // NOT the entry contract's artifacts. Resolving an unknown frame's PCs
+                    // against another contract's map attributed its steps to code that never
+                    // ran wherever the PC happened to fall inside that map; an absent step is
+                    // preferable to a wrong one, and it is counted below.
+                    (None, &[], &[], &[], None, None)
                 }
             };
+            if cur_source_map.is_none() {
+                self.steps_without_artifacts += 1;
+            } else {
+                let p = pc;
+                // Running off the end of the code is the EVM's implicit STOP: a real step
+                // at pc == code length that no instruction byte holds. It is not other code,
+                // so it is not counted, and having no instruction it has no line to land on.
+                let implicit_stop = p == cur_pc_to_idx.len() && log.op.as_ref() == "STOP";
+                let on_instruction = implicit_stop
+                    || (p < cur_pc_to_idx.len()
+                        && (p == 0 || cur_pc_to_idx[p] != cur_pc_to_idx[p - 1]));
+                if !on_instruction {
+                    self.steps_off_code += 1;
+                }
+            }
 
             // Convert &[String] to &[&str] slices that the existing helpers expect.
             // We do this with a small temporary Vec allocated per step only when needed.
@@ -1585,6 +1728,17 @@ impl EvmRecorder {
                 let file_idx = location.file_index;
                 let line = location.line;
                 let column = location.column;
+                // A listing is the one artifact whose source is the bytecode itself
+                // (`onchain::disassembly_artifacts` names it `<address>.evmasm`).
+                let on_listing = source_paths_paths
+                    .get(file_idx as usize)
+                    .and_then(|p| p.extension())
+                    .is_some_and(|e| e == "evmasm");
+                if on_listing {
+                    self.steps_on_listing += 1;
+                } else {
+                    self.steps_on_source += 1;
+                }
                 // (file_index, line, column) — track the column too so
                 // multi-statement-per-line moves emit distinct steps
                 // under column-aware navigation.
@@ -1872,7 +2026,7 @@ impl EvmRecorder {
                 // Cache for carry-forward to subsequent steps in this frame.
                 let ss_idx = (log.depth as usize).saturating_sub(1);
                 while storage_states.len() <= ss_idx {
-                    storage_states.push(std::collections::HashMap::new());
+                    storage_states.push(std::collections::BTreeMap::new());
                 }
                 while slot_values_per_frame.len() <= ss_idx {
                     slot_values_per_frame.push(std::collections::HashMap::new());
@@ -2150,6 +2304,38 @@ fn precompile_name_for_address(addr_lower160: u64) -> Option<&'static str> {
         0x09 => Some("blake2f"),
         _ => None,
     }
+}
+
+/// The address a CREATE / CREATE2 frame's initcode is registered under, from the
+/// creating step: its stack names the initcode's `offset` and `size` (below `value`),
+/// and its memory holds the bytes.  Bytes past the memory's current end read as zero,
+/// exactly as the EVM expands memory for the copy.  `Address::ZERO`, the old
+/// placeholder, when the step carries no memory (a replay run with `--no-memory`).
+pub(crate) fn create_frame_address(prev_log: Option<&StructLog>) -> Address {
+    let Some(log) = prev_log else {
+        return Address::ZERO;
+    };
+    let (Some(stack), Some(words)) = (log.stack.as_ref(), log.memory.as_ref()) else {
+        return Address::ZERO;
+    };
+    if stack.len() < 3 {
+        return Address::ZERO;
+    }
+    let as_usize = |v: &alloy::primitives::U256| usize::try_from(*v).ok();
+    let (Some(offset), Some(size)) = (
+        as_usize(&stack[stack.len() - 2]),
+        as_usize(&stack[stack.len() - 3]),
+    ) else {
+        return Address::ZERO;
+    };
+    let memory: Vec<u8> = words
+        .iter()
+        .flat_map(|w| alloy::hex::decode(w).unwrap_or_default())
+        .collect();
+    let init_code: Vec<u8> = (offset..offset.saturating_add(size))
+        .map(|i| memory.get(i).copied().unwrap_or(0))
+        .collect();
+    crate::onchain::initcode_address(&init_code)
 }
 
 /// Detect a CALL / STATICCALL / DELEGATECALL targeting one of the EVM

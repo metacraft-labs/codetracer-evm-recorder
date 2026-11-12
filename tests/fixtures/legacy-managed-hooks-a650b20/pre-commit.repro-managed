@@ -1,0 +1,175 @@
+#!/usr/bin/env sh
+# reprobuild managed pre-commit hook
+# managed-by: reprobuild hooks ensure
+# dispatches to: repro hooks dispatch pre-commit
+# certificate policy: the judged content's repro.lock [certificate_policy]
+set -eu
+set +x
+REPRO_REFUSAL_RECORD_DIR=''
+REPRO_REFUSAL_RECORD_NAME=pre-commit-contract-refusal.json
+REPROBUILD_CAPTURED_INTERNAL_CONTEXT=${REPROBUILD_INTERNAL_HOOK_CONTEXT:-}
+unset REPROBUILD_INTERNAL_HOOK_CONTEXT
+if [ "$REPROBUILD_CAPTURED_INTERNAL_CONTEXT" = "reprobuild.lock-commit.v1" ]; then exit 0; fi
+REPRO_CMD=
+REPRO_CMD_SOURCE=
+REPRO_CMD_VERSION=
+REPRO_PROBE_STATUS=0
+REPRO_PROBE_DIAGNOSTIC=
+find_repro_cmd() {
+  if [ -n "${REPROBUILD_REPRO:-}" ]; then
+    if [ -x "$REPROBUILD_REPRO" ]; then
+      REPRO_CMD=$REPROBUILD_REPRO
+      REPRO_CMD_SOURCE=REPROBUILD_REPRO
+      return 0
+    fi
+    return 1
+  fi
+  if command -v repro >/dev/null 2>&1; then
+    REPRO_CMD=$(command -v repro)
+    REPRO_CMD_SOURCE=PATH
+    return 0
+  fi
+  return 1
+}
+
+repro_json_string() {
+  printf '%s' "${1:-}" \
+    | LC_ALL=C tr '\011' ' ' \
+    | LC_ALL=C tr -d '\000-\010\013\014\016-\037\177' \
+    | LC_ALL=C sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' \
+    | LC_ALL=C sed -e ':a' -e 'N' -e '$!ba' -e 's/\n/\\n/g'
+}
+
+repro_refusal_record_path() {
+  printf '%s' "$REPRO_REFUSAL_RECORD_DIR/$REPRO_REFUSAL_RECORD_NAME"
+}
+
+repro_file_contract_refusal_record() {
+  [ -n "$REPRO_REFUSAL_RECORD_DIR" ] || return 1
+  mkdir -p "$REPRO_REFUSAL_RECORD_DIR" 2>/dev/null || return 1
+  REPRO_RECORD_EXIT=-1
+  case "${REPRO_PROBE_STATUS:-}" in
+    ''|*[!0-9]*) ;;
+    *) REPRO_RECORD_EXIT=$REPRO_PROBE_STATUS ;;
+  esac
+  REPRO_RECORD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)
+  REPRO_RECORD_TMP=$(mktemp "$REPRO_REFUSAL_RECORD_DIR/.contract-refusal.XXXXXX" 2>/dev/null) || return 1
+  chmod 644 "$REPRO_RECORD_TMP" 2>/dev/null || true
+  {
+    printf '{\n'
+    printf '  "schema": "%s",\n' reprobuild.managed-hook.contract-refusal.v1
+    printf '  "outcome": "%s",\n' refused-contract-mismatch
+    printf '  "hook": "%s",\n' pre-commit
+    printf '  "timestamp": "%s",\n' "$(repro_json_string "$REPRO_RECORD_TIME")"
+    printf '  "repoRoot": "%s",\n' "$(repro_json_string "$REPO_ROOT")"
+    printf '  "resolvedBinary": "%s",\n' "$(repro_json_string "$REPRO_CMD")"
+    printf '  "resolvedFrom": "%s",\n' "$(repro_json_string "$REPRO_CMD_SOURCE")"
+    printf '  "resolvedVersion": "%s",\n' "$(repro_json_string "$REPRO_CMD_VERSION")"
+    printf '  "hookContract": "%s",\n' "$(repro_json_string reprobuild.managed-hook.v1.pre-commit.317d12ff5e18024d)"
+    printf '  "hookAuthorBin": "%s",\n' "$(repro_json_string /nix/store/41j8nyfwaszxv2879yclmzayz8sb9gz7-reprobuild-0.2.20/bin/.reprobuild-wrapped)"
+    printf '  "probeExit": %s,\n' "$REPRO_RECORD_EXIT"
+    printf '  "probeDiagnostic": "%s",\n' "$(repro_json_string "$REPRO_PROBE_DIAGNOSTIC")"
+    printf '  "dispatched": false\n'
+    printf '}\n'
+  } > "$REPRO_RECORD_TMP" 2>/dev/null || { rm -f "$REPRO_RECORD_TMP"; return 1; }
+  mv -f "$REPRO_RECORD_TMP" "$(repro_refusal_record_path)" 2>/dev/null || { rm -f "$REPRO_RECORD_TMP"; return 1; }
+  return 0
+}
+
+repro_clear_contract_refusal_record() {
+  [ -n "$REPRO_REFUSAL_RECORD_DIR" ] || return 0
+  rm -f "$(repro_refusal_record_path)" 2>/dev/null || true
+  return 0
+}
+
+repro_contract_refusal() {
+  REPRO_CMD_VERSION=$("$REPRO_CMD" --version 2>/dev/null | head -1)
+  [ -n "$REPRO_CMD_VERSION" ] || REPRO_CMD_VERSION="unknown; it did not answer --version"
+  echo "repro hooks: pre-commit: this hook could not be evaluated." >&2
+  echo "repro hooks: The 'repro' it resolved does not generate this hook, so it cannot" >&2
+  echo "repro hooks: service it. The policy was never applied and has not objected to" >&2
+  echo "repro hooks: anything: this is a tooling mismatch on this machine." >&2
+  echo "repro hooks:   resolved binary: $REPRO_CMD (resolved from $REPRO_CMD_SOURCE)" >&2
+  echo "repro hooks:   its version:     $REPRO_CMD_VERSION" >&2
+  echo "repro hooks:   hook contract:   reprobuild.managed-hook.v1.pre-commit.317d12ff5e18024d" >&2
+  if [ -n "$REPRO_PROBE_DIAGNOSTIC" ]; then
+    echo "repro hooks:   and it said, verbatim:" >&2
+    printf '%s\n' "$REPRO_PROBE_DIAGNOSTIC" | sed -e 's/^/repro hooks:     | /' >&2
+  fi
+  if [ "${REPRO_PROBE_STATUS:-1}" = "3" ]; then
+    echo "repro hooks: That build speaks this handshake and simply builds a different" >&2
+    echo "repro hooks: hook. Re-anchor this repository to it and retry:" >&2
+    echo "repro hooks:      $REPRO_CMD hooks ensure --vcs $REPO_ROOT" >&2
+  else
+    echo "repro hooks: That build predates this handshake, so it cannot service this" >&2
+    echo "repro hooks: hook at all. Do NOT run 'repro hooks ensure' with it: that rewrites" >&2
+    echo "repro hooks: this file with its own older body, the contract line disappears," >&2
+    echo "repro hooks: and you silence this message instead of fixing it. Instead:" >&2
+    echo "repro hooks:   1. Refresh whatever supplies repro here:" >&2
+    echo "repro hooks:        direnv reload    (or just open a new shell)" >&2
+    echo "repro hooks:      A shell started before the last pin bump keeps serving the" >&2
+    echo "repro hooks:      binary it was born with, however current the pins now are." >&2
+    echo "repro hooks:   2. If it survives that, the install is behind the workspace:" >&2
+    echo "repro hooks:      update the reprobuild pin and rebuild your environment." >&2
+    if [ -x /nix/store/41j8nyfwaszxv2879yclmzayz8sb9gz7-reprobuild-0.2.20/bin/.reprobuild-wrapped ]; then
+      echo "repro hooks:   3. To push right now with the build that installed this hook:" >&2
+      echo 'repro hooks:        REPROBUILD_REPRO=/nix/store/41j8nyfwaszxv2879yclmzayz8sb9gz7-reprobuild-0.2.20/bin/.reprobuild-wrapped git push' >&2
+    fi
+  fi
+  echo "repro hooks: Do not reach for --no-verify: it also turns off the refusals that" >&2
+  echo "repro hooks: are working, such as pushing an unpublished or unlocked head." >&2
+  if repro_file_contract_refusal_record; then
+    echo "repro hooks:   recorded in:    $(repro_refusal_record_path)" >&2
+  elif [ -n "$REPRO_REFUSAL_RECORD_DIR" ]; then
+    echo "repro hooks:   NOT RECORDED:   could not write into $REPRO_REFUSAL_RECORD_DIR; this refusal" >&2
+    echo "repro hooks:                   survives only in this terminal." >&2
+  else
+    echo "repro hooks:   NOT RECORDED:   pre-commit was installed outside an initialized" >&2
+    echo "repro hooks:                   Reprobuild workspace, so there is nowhere to file a" >&2
+    echo "repro hooks:                   record. This refusal survives only in this terminal." >&2
+  fi
+}
+
+repro_dispatch_attribution() {
+  echo "repro hooks: pre-commit above was produced by $REPRO_CMD (resolved from $REPRO_CMD_SOURCE)." >&2
+}
+
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+cd "$REPO_ROOT"
+REPROBUILD_CAPTURED_GIT_INDEX_FILE=${GIT_INDEX_FILE:-}
+case "$REPROBUILD_CAPTURED_GIT_INDEX_FILE" in
+  ''|/*) ;;
+  *) REPROBUILD_CAPTURED_GIT_INDEX_FILE="$REPO_ROOT/$REPROBUILD_CAPTURED_GIT_INDEX_FILE" ;;
+esac
+REPRO_HOOK_PHASE=refresh
+REPRO_HOOK_DISPLACED=0
+if [ "${1:-}" = --repro-phase=certificate-gate ]; then
+  REPRO_HOOK_PHASE=certificate-gate
+  shift
+  case "${1:-}" in
+    --repro-dispatcher-displaced=1) REPRO_HOOK_DISPLACED=1; shift ;;
+    --repro-dispatcher-displaced=*) shift ;;
+  esac
+fi
+unset GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_OBJECT_DIRECTORY GIT_DIR GIT_WORK_TREE GIT_IMPLICIT_WORK_TREE GIT_GRAFT_FILE GIT_INDEX_FILE GIT_NO_REPLACE_OBJECTS GIT_REPLACE_REF_BASE GIT_PREFIX GIT_SHALLOW_FILE GIT_COMMON_DIR GIT_NAMESPACE GIT_QUARANTINE_PATH GIT_INTERNAL_SUPER_PREFIX
+for REPROBUILD_GIT_CONFIG_NAME in $(env | sed -n -e 's/^\(GIT_CONFIG_KEY_[A-Za-z0-9_]*\)=.*/\1/p' -e 's/^\(GIT_CONFIG_VALUE_[A-Za-z0-9_]*\)=.*/\1/p'); do
+  unset "$REPROBUILD_GIT_CONFIG_NAME"
+done
+unset REPROBUILD_GIT_CONFIG_NAME
+if find_repro_cmd; then
+  REPRO_PROBE_STATUS=0
+  REPRO_PROBE_DIAGNOSTIC=$("$REPRO_CMD" hooks protocol --require=2 --hook-contract=reprobuild.managed-hook.v1.pre-commit.317d12ff5e18024d 2>&1) || REPRO_PROBE_STATUS=$?
+  if [ "$REPRO_PROBE_STATUS" -ne 0 ]; then
+    [ "$REPRO_HOOK_PHASE" = refresh ] || exit 0
+    repro_contract_refusal
+    exit 0
+  fi
+  repro_clear_contract_refusal_record
+  REPRO_STATUS=0
+  REPROBUILD_HOOK_GIT_INDEX_FILE="$REPROBUILD_CAPTURED_GIT_INDEX_FILE" "$REPRO_CMD" hooks dispatch pre-commit --repo-root "$REPO_ROOT" --phase="$REPRO_HOOK_PHASE" --dispatcher-displaced="$REPRO_HOOK_DISPLACED" -- "$@" || REPRO_STATUS=$?
+  if [ "$REPRO_STATUS" -ne 0 ]; then repro_dispatch_attribution; fi
+  exit $REPRO_STATUS
+fi
+[ "$REPRO_HOOK_PHASE" = refresh ] || exit 0
+echo "repro hooks: repro CLI not found on PATH; skipping pre-commit" >&2
+exit 0

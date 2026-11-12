@@ -1,0 +1,7 @@
+# Unedited `nix derivation show` captures; the test reads them as Nix printed them.
+tests/fixtures/nix-derivation-show/
+# Genuine managed hook bodies captured from the reprobuild 76659f and v0.2.20
+# (a650b20) packages; the ownership test pins each one to its legacy hash, byte
+# for byte.
+tests/fixtures/legacy-managed-hooks-76659f/
+tests/fixtures/legacy-managed-hooks-a650b20/

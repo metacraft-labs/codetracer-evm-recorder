@@ -197,7 +197,7 @@ impl FunctionDef {
 }
 
 /// The parsed Solidity AST for one compilation unit (one or more files).
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct SolidityAst {
     /// All function/constructor/fallback definitions found in the AST.
     pub functions: Vec<FunctionDef>,

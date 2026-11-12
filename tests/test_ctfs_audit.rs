@@ -194,10 +194,8 @@ fn call_arg_count(reader: &NimTraceReaderHandle, call_key: u64) -> usize {
 /// one CallRecord in the trace.
 #[tokio::test]
 async fn audit_ctfs_internal_call_emitted() {
-    if !has_solc() || !has_anvil() {
-        eprintln!("skipping: solc/anvil unavailable");
-        return;
-    }
+    assert!(has_solc(), "solc required on PATH");
+    assert!(has_anvil(), "anvil required on PATH");
 
     let tmp_dir = record_flow_test().await;
     let reader = open_reader(tmp_dir.path());
@@ -250,22 +248,21 @@ async fn audit_ctfs_internal_call_emitted() {
 }
 
 /// Audit (c): EVM LOG opcodes route through register_special_event with the
-/// canonical `EventLogKind::EvmEvent` kind (numeric 13) — not Write (0) or
-/// WriteOther (2) which are reserved for stdout/stderr-style I/O streams.
+/// exact `EventLogKind::EvmEvent` kind (numeric 13). A recorder uses the
+/// exact kind for what it records: `Write` (0) is stdout output,
+/// `WriteStderr` (14) is stderr output, and the `WriteOther` (2) catch-all is
+/// only for writes no other kind describes, so none of them fits a LOG.
 ///
-/// This is the EVM analogue of the JS recorder's stderr→WriteOther fix from
-/// handoff entry 1.38.  EVM has no stdout concept; misrouting LOG events as
-/// `Write` makes them surface in the terminal-output pane alongside Python /
-/// Ruby print output.  `EvmEvent` is the kind the codetracer frontend's
-/// `event_log.nim` and `flow.nim` special-case for EVM-style structured
-/// events (matches the Stylus tracer convention; see
+/// EVM has no stdout concept; misrouting LOG events as `Write` makes them
+/// surface in the terminal-output pane alongside Python / Ruby print output.
+/// `EvmEvent` is the kind the codetracer frontend's `event_log.nim` and
+/// `flow.nim` special-case for EVM-style structured events (matches the
+/// Stylus tracer convention; see
 /// `codetracer/src/db-backend/tests/stylus_flow_integration.rs`).
 #[tokio::test]
 async fn audit_ctfs_log_event_kind_is_evmevent() {
-    if !has_solc() || !has_anvil() {
-        eprintln!("skipping: solc/anvil unavailable");
-        return;
-    }
+    assert!(has_solc(), "solc required on PATH");
+    assert!(has_anvil(), "anvil required on PATH");
 
     let tmp_dir = record_flow_test().await;
     let reader = open_reader(tmp_dir.path());
@@ -276,49 +273,31 @@ async fn audit_ctfs_log_event_kind_is_evmevent() {
         "no Event records emitted — FlowTest::compute() does emit a `Computed(uint256)` log"
     );
 
-    // The Nim multi-stream writer collapses the 13-variant `EventLogKind`
-    // into 4 multi-stream `IOEventKind` buckets (stdout / stderr / fileOp /
-    // error) — see `codetracer_trace_writer_ffi.nim::toIOEventKind`.
-    // The relevant collapse for this audit:
-    //
-    //     EventLogKind::Write      (stdout-style writes)        → "stdout"
-    //     EventLogKind::WriteOther (non-stdout writes)          → "stdout"
-    //     EventLogKind::EvmEvent   (EVM LOG opcodes / Stylus)   → "stderr"
-    //     EventLogKind::TraceLogEvent                            → "stderr"
-    //     EventLogKind::Error                                    → "error"
-    //
-    // Pre-fix, the EVM recorder emitted LOG opcodes as `Write` →
-    // `stdout`, which mixed them with stdout terminal writes from
-    // recorders like Python/Ruby.  Post-fix (this audit), they emit as
-    // `EvmEvent` → `stderr`, segregating them from stdout.  We assert
-    // every Event record from the EVM recorder lands in the `stderr`
-    // bucket and none in `stdout` — that's the canonical
-    // "EvmEvent-as-the-CTFS-multi-stream-presents-it" check.
-    //
-    // This is necessarily weaker than the JS recorder's audit-time
-    // check (1.38) which compares the raw `RecordEvent.kind` byte
-    // against the upstream enum, because the multi-stream IO format
-    // has discarded the original kind by the time we read it back.
-    // See `AUDIT-CTFS-2026-05.md` for the open infrastructure
-    // follow-up that would preserve `EvmEvent` end-to-end.
-    let mut stderr_count = 0usize;
+    // The reader reports each record's exact kind name, so this asserts
+    // `EvmEvent` itself: a reader or writer that collapsed kinds into
+    // coarser buckets (e.g. putting `EvmEvent` and `TraceLogEvent` together)
+    // fails here.
+    let mut evm_event_count = 0usize;
     let mut other_kinds = Vec::new();
     for i in 0..event_count {
         let raw = reader.event_json(i).expect("event record JSON missing");
         let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
         let kind = parsed["kind"].as_str().unwrap_or("<missing>").to_string();
-        if kind == "stderr" {
-            stderr_count += 1;
+        if kind == "EvmEvent" {
+            evm_event_count += 1;
         } else {
             other_kinds.push(kind);
         }
     }
     assert!(
         other_kinds.is_empty(),
-        "EVM recorder produced events with non-EvmEvent kinds: {:?}",
+        "EVM recorder produced events whose kind is not EvmEvent: {:?}",
         other_kinds
     );
-    assert!(stderr_count > 0, "no stderr-bucket events found");
+    assert_eq!(
+        evm_event_count, event_count as usize,
+        "every Event record must carry kind EvmEvent"
+    );
 }
 
 /// Audit (e): Step records are emitted for source-line navigation.
@@ -329,10 +308,8 @@ async fn audit_ctfs_log_event_kind_is_evmevent() {
 /// source line so the frontend's "next line" navigation can land on them.
 #[tokio::test]
 async fn audit_ctfs_step_records_emitted() {
-    if !has_solc() || !has_anvil() {
-        eprintln!("skipping: solc/anvil unavailable");
-        return;
-    }
+    assert!(has_solc(), "solc required on PATH");
+    assert!(has_anvil(), "anvil required on PATH");
 
     let tmp_dir = record_flow_test().await;
     let reader = open_reader(tmp_dir.path());
@@ -435,10 +412,8 @@ fn audit_ctfs_linked_writer_staged_args_roundtrip() {
 /// is now the strict positive assertion the original guard pointed at.
 #[tokio::test]
 async fn audit_ctfs_call_args_writer_attaches_add_xy() {
-    if !has_solc() || !has_anvil() {
-        eprintln!("skipping: solc/anvil unavailable");
-        return;
-    }
+    assert!(has_solc(), "solc required on PATH");
+    assert!(has_anvil(), "anvil required on PATH");
 
     let tmp_dir = record_flow_test().await;
     let reader = open_reader(tmp_dir.path());

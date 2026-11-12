@@ -16,13 +16,13 @@ name: publish-homebrew
 
 on:
   push:
-    tags: ['v*']
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       version:
-        description: 'Recorder semver that was released to GitHub'
+        description: "Recorder semver that was released to GitHub"
         required: true
-        default: '0.1.0'
+        default: "0.1.0"
 
 # Least privilege. The only GITHUB_TOKEN use in this workflow is the
 # release-assets preflight gate below, which only reads releases; the
@@ -168,9 +168,9 @@ jobs:
       - name: Rewrite formula
         env:
           VERSION: ${{ steps.version.outputs.version }}
-          SHA_LINUX_X86_64:   ${{ steps.hashes.outputs.linux-x86_64 }}
-          SHA_LINUX_AARCH64:  ${{ steps.hashes.outputs.linux-aarch64 }}
-          SHA_DARWIN_X86_64:  ${{ steps.hashes.outputs.darwin-x86_64 }}
+          SHA_LINUX_X86_64: ${{ steps.hashes.outputs.linux-x86_64 }}
+          SHA_LINUX_AARCH64: ${{ steps.hashes.outputs.linux-aarch64 }}
+          SHA_DARWIN_X86_64: ${{ steps.hashes.outputs.darwin-x86_64 }}
           SHA_DARWIN_AARCH64: ${{ steps.hashes.outputs.darwin-aarch64 }}
         run: |
           set -euo pipefail

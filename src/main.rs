@@ -1,9 +1,14 @@
 //! CLI entry point for the CodeTracer EVM recorder.
 //!
-//! Supports the `record` subcommand which compiles a Solidity file, deploys
-//! it to a local Anvil node, calls a specified function, fetches the
-//! `debug_traceTransaction` structlogs, processes them through the EVM
-//! recorder pipeline, and writes the trace output files.
+//! Two entry points, one for a local program and one for a live network:
+//!
+//! * `record` compiles a Solidity file, deploys it to a local Anvil node,
+//!   calls a specified function, fetches the `debug_traceTransaction`
+//!   structlogs, processes them through the EVM recorder pipeline, and
+//!   writes the trace output files.
+//! * `trace-onchain` traces a transaction that is already on a live EVM
+//!   network, by replaying it against archive state rather than by asking
+//!   for a tracer.  See [`codetracer_evm_recorder::onchain`].
 //!
 //! # Usage
 //!
@@ -11,6 +16,10 @@
 //! codetracer-evm-recorder record <solidity-file> \
 //!     --out-dir <output-dir> \
 //!     [--function <name>]
+//!
+//! codetracer-evm-recorder trace-onchain <tx-hash> \
+//!     --rpc-url <archive-endpoint> \
+//!     --out-dir <output-dir>
 //! ```
 //!
 //! The recorder always writes a canonical CodeTracer multi-stream CTFS
@@ -36,7 +45,9 @@
 //!   flag is not given. The CLI flag always wins.
 //! * `CODETRACER_EVM_RECORDER_DISABLED` — set to `1` or `true` to skip
 //!   recording entirely. The recorder still validates inputs but does not
-//!   spin up Anvil or write any trace artefacts.
+//!   spin up Anvil (nor contact any endpoint) and writes no trace artefacts.
+//! * `CODETRACER_EVM_RECORDER_RPC_URL` — fallback for `trace-onchain`'s
+//!   `--rpc-url`. The CLI flag always wins.
 //!
 //! # Deprecated flags
 //!
@@ -55,6 +66,7 @@ use alloy::providers::ProviderBuilder;
 use clap::{Parser, Subcommand};
 use eyre::{Context, Result};
 
+use codetracer_evm_recorder::onchain;
 use codetracer_evm_recorder::recorder::EvmRecorder;
 use codetracer_evm_recorder::revert_decode;
 use codetracer_evm_recorder::solidity_ast::SolidityAst;
@@ -75,6 +87,10 @@ const ENV_OUT_DIR: &str = "CODETRACER_EVM_RECORDER_OUT_DIR";
 /// entirely — the recorder runs as a pass-through (no Anvil spin-up, no
 /// output written).  Convention: §5.
 const ENV_DISABLED: &str = "CODETRACER_EVM_RECORDER_DISABLED";
+
+/// Environment variable used as a fallback for `trace-onchain`'s
+/// `--rpc-url`.  Convention: §5.
+const ENV_RPC_URL: &str = "CODETRACER_EVM_RECORDER_RPC_URL";
 
 // ---------------------------------------------------------------------------
 // CLI definition
@@ -115,6 +131,133 @@ enum Commands {
     /// Anvil node, calls the specified entry-point function, and writes the
     /// CodeTracer CTFS bundle to `--out-dir`.
     Record(RecordArgs),
+
+    /// Trace a transaction that is already on a live EVM network.
+    ///
+    /// Pins a fork at the target block's PARENT, replays the preceding
+    /// transactions in the block to rebuild the prestate, then replays the
+    /// target transaction under the CodeTracer inspector and writes the
+    /// CTFS bundle to `--out-dir`.  This is the `replay-preceding`
+    /// prestate strategy: the endpoint must serve ARCHIVE state at depth
+    /// (balance, nonce, code, storage), and needs no `debug_*` or
+    /// `trace_*` method at all.
+    ///
+    /// Verified source is recovered from Sourcify where it is available
+    /// and the matching solc release can be found; where it is not, the
+    /// transaction is still recorded at EVM-opcode granularity and the
+    /// per-address outcome is printed.
+    #[command(name = "trace-onchain")]
+    TraceOnchain(TraceOnchainArgs),
+
+    /// Trace EVERY transaction of one block on a live EVM network.
+    ///
+    /// Pins a fork at the block's parent and replays the block once, in
+    /// order, recording each transaction into its own container in
+    /// `--out-dir` as it goes. The prestate is `trace-onchain`'s
+    /// (`replay-preceding`), paid once per block instead of once per
+    /// transaction. Prints one line per transaction and writes
+    /// `<out-dir>/block-<number>.json` accounting for every transaction the
+    /// block holds: recorded, not recorded (with the reason), or not reached
+    /// because an earlier transaction could not be executed.
+    #[command(name = "trace-block")]
+    TraceBlock(TraceBlockArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct TraceBlockArgs {
+    /// The block number to trace.
+    block: u64,
+    /// As for `trace-onchain`.
+    #[arg(long, value_name = "URL")]
+    rpc_url: Option<String>,
+    /// As for `trace-onchain`.
+    #[arg(short = 'o', long)]
+    out_dir: Option<PathBuf>,
+    /// As for `trace-onchain`.
+    #[arg(long)]
+    skip_source_fetch: bool,
+    /// As for `trace-onchain`; `derive` derives each container's id from
+    /// its own transaction.
+    #[arg(long, value_name = "UUID|derive")]
+    recording_id: Option<String>,
+    /// As for `trace-onchain`.
+    #[arg(long, value_name = "N", default_value_t = onchain::DEFAULT_MAX_SOURCE_LOOKUPS)]
+    max_source_lookups: usize,
+    /// As for `trace-onchain`.
+    #[arg(long)]
+    no_memory: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct TraceOnchainArgs {
+    /// Hash of the transaction to trace (`0x`-prefixed, 32 bytes).
+    tx_hash: String,
+
+    /// JSON-RPC endpoint serving ARCHIVE state for the target block's
+    /// parent.
+    ///
+    /// Falls back to the `CODETRACER_EVM_RECORDER_RPC_URL` environment
+    /// variable when the flag is omitted.
+    #[arg(long, value_name = "URL")]
+    rpc_url: Option<String>,
+
+    /// Directory where the trace files will be written.
+    ///
+    /// Falls back to the `CODETRACER_EVM_RECORDER_OUT_DIR` environment
+    /// variable when the flag is omitted.
+    #[arg(short = 'o', long)]
+    out_dir: Option<PathBuf>,
+
+    /// Record at EVM-opcode granularity without contacting Sourcify.
+    ///
+    /// Useful when the endpoint is the only network dependency wanted, or
+    /// when every address in the transaction is known to be unverified.
+    #[arg(long)]
+    skip_source_fetch: bool,
+
+    /// The container's recording id: a UUIDv7, or `derive` to build one from
+    /// the block timestamp and the transaction hash.
+    ///
+    /// Omitted, the writer mints a fresh id and every run's bytes differ.
+    /// `derive` makes two runs over the same inputs write the same container,
+    /// which a producer needs when it publishes the container at a URL derived
+    /// from the inputs (BlockTracer's chain snapshots).
+    #[arg(long, value_name = "UUID|derive")]
+    recording_id: Option<String>,
+
+    /// Keep recompiled artifacts whose bytecode disagrees with the code
+    /// deployed at the target block.
+    ///
+    /// Off by default: a source map that does not describe the deployed
+    /// bytecode attributes steps to the wrong source lines, which is worse
+    /// than leaving the address unmapped.
+    #[arg(long)]
+    allow_source_mismatch: bool,
+
+    /// Maximum number of distinct addresses to look up on Sourcify.
+    ///
+    /// Bounds the lookups only: every executed address still gets its
+    /// disassembly listing, so the cap never costs a step.
+    #[arg(long, value_name = "N", default_value_t = onchain::DEFAULT_MAX_SOURCE_LOOKUPS)]
+    max_source_lookups: usize,
+
+    /// Do not capture the executing frame's memory at every step.
+    ///
+    /// Memory capture is the dominant cost of a replay; without it the
+    /// recorder cannot decode `string` / `bytes` values or `LOG*`
+    /// payloads, so this trades fidelity for time and memory.
+    #[arg(long)]
+    no_memory: bool,
+
+    /// Do not register a disassembly listing for addresses without usable
+    /// verified source.
+    ///
+    /// The recorder emits a step only where a source map resolves the PC,
+    /// so WITHOUT the listing an unverified address contributes no steps at
+    /// all and the container holds only its header step.  Pass this when
+    /// you want verified source or nothing.
+    #[arg(long)]
+    no_disassembly_fallback: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -240,7 +383,324 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Record(args) => record(args).await,
+        Commands::TraceOnchain(args) => trace_onchain(args).await,
+        Commands::TraceBlock(args) => trace_block(args).await,
     }
+}
+
+// ---------------------------------------------------------------------------
+// `trace-onchain` implementation
+// ---------------------------------------------------------------------------
+
+/// Execute the `trace-onchain` subcommand: a real transaction on a live EVM
+/// network to a CTFS container in `--out-dir`.
+///
+/// The work is in [`onchain::record_onchain_transaction`]; this function
+/// resolves the CLI surface and prints the ledger — including the addresses
+/// whose source could NOT be recovered, because a container recorded at
+/// opcode granularity and one recorded with source attribution are
+/// different artefacts and the caller has to be able to tell which it got.
+async fn trace_onchain(args: TraceOnchainArgs) -> Result<()> {
+    let tx_hash = alloy::primitives::TxHash::from_str(args.tx_hash.trim()).with_context(|| {
+        format!(
+            "not a valid 0x-prefixed 32-byte transaction hash: {}",
+            args.tx_hash
+        )
+    })?;
+
+    if recording_disabled() {
+        eprintln!(
+            "{ENV_DISABLED} is set; skipping trace recording (no output written, no endpoint contacted)."
+        );
+        return Ok(());
+    }
+
+    let rpc_url = resolve_rpc_url(args.rpc_url.clone())?;
+    let out_dir = resolve_out_dir(args.out_dir.clone(), None)?;
+
+    let mut options = onchain::OnchainOptions::new(rpc_url.clone(), tx_hash, &out_dir);
+    options.skip_source_fetch = args.skip_source_fetch;
+    options.recording_id = args.recording_id.as_deref().map(|v| {
+        if v == "derive" {
+            onchain::RecordingId::Derive
+        } else {
+            onchain::RecordingId::Pinned(v.to_string())
+        }
+    });
+    options.allow_source_mismatch = args.allow_source_mismatch;
+    options.max_source_lookups = args.max_source_lookups;
+    options.capture_memory = !args.no_memory;
+    options.disassembly_fallback = !args.no_disassembly_fallback;
+
+    eprintln!("Replaying {tx_hash} from {rpc_url}");
+    eprintln!("  prestate strategy: replay-preceding (fork pinned at the parent block)");
+
+    let recording = onchain::record_onchain_transaction(&options).await?;
+
+    eprint!("{}", render_recording(&recording));
+    Ok(())
+}
+
+/// The report `trace-onchain` prints for one recording, as text.
+///
+/// One function for both commands, because BlockTracer's producer parses these lines (status,
+/// gas, the captured shape, the entry point, the per-address listing census): `trace-block`
+/// writes the same text beside each container, so the producer reads a block capture exactly
+/// as it reads a single one.
+fn render_recording(recording: &onchain::OnchainRecording) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "chain {} block {} tx index {} ({} preceding transaction(s) replayed), hardfork {}",
+        recording.chain_id,
+        recording.block_number,
+        recording.tx_index,
+        recording.preceding_replayed,
+        recording.spec_id,
+    );
+    let _ = writeln!(
+        out,
+        "entry point {}, status {}, gas used {}",
+        recording.entry_point,
+        if recording.succeeded {
+            "ok"
+        } else {
+            "reverted"
+        },
+        recording.gas_used,
+    );
+    let _ = writeln!(
+        out,
+        "captured {} step(s), {} call(s), {} log(s); frame memory {}",
+        recording.step_count,
+        recording.call_count,
+        recording.log_count,
+        if recording.memory_captured {
+            "captured"
+        } else {
+            "NOT captured (--no-memory)"
+        },
+    );
+
+    let _ = writeln!(
+        out,
+        "source attribution: {} of {} address(es) mapped",
+        recording.mapped_addresses,
+        recording.source_lookups.len(),
+    );
+    for lookup in &recording.source_lookups {
+        let mut line = format!("  {} {}", lookup.address, describe_source(&lookup.outcome));
+        if let Some(instructions) = lookup.disassembly_instructions {
+            line.push_str(&format!(
+                "; registered a {instructions}-instruction disassembly listing, \
+                 so its opcodes are navigable"
+            ));
+        }
+        let _ = writeln!(out, "{line}");
+    }
+
+    let _ = writeln!(
+        out,
+        "Container {} ({} bytes); reopened through the current reader, which sees {} step(s)",
+        recording.container_path.display(),
+        recording.container_bytes,
+        recording.container_steps_read_back,
+    );
+    let _ = writeln!(
+        out,
+        "{} executed step(s) ran where no listing or source map was registered, and are not in the container",
+        recording.steps_without_artifacts,
+    );
+    let _ = writeln!(
+        out,
+        "{} executed step(s) ran at a PC the registered code has no instruction at, so it describes other code",
+        recording.steps_off_code,
+    );
+    let _ = writeln!(
+        out,
+        "{} executed step(s) resolved to verified source and {} to a disassembly listing",
+        recording.steps_on_source, recording.steps_on_listing,
+    );
+    let _ = writeln!(out, "Trace written to {}", recording.out_dir.display());
+    out
+}
+
+/// Execute the `trace-block` subcommand. See [`onchain::record_onchain_block`].
+async fn trace_block(args: TraceBlockArgs) -> Result<()> {
+    if recording_disabled() {
+        eprintln!(
+            "{ENV_DISABLED} is set; skipping trace recording (no output written, no endpoint contacted)."
+        );
+        return Ok(());
+    }
+    let rpc_url = resolve_rpc_url(args.rpc_url.clone())?;
+    let out_dir = resolve_out_dir(args.out_dir.clone(), None)?;
+    let mut options =
+        onchain::OnchainOptions::new(rpc_url.clone(), alloy::primitives::TxHash::ZERO, &out_dir);
+    options.skip_source_fetch = args.skip_source_fetch;
+    options.max_source_lookups = args.max_source_lookups;
+    options.capture_memory = !args.no_memory;
+    if args.recording_id.as_deref() == Some("derive") {
+        options.recording_id = Some(onchain::RecordingId::Derive);
+    } else if args.recording_id.is_some() {
+        // One pinned id for many containers would give them all one identity.
+        return Err(eyre::eyre!(
+            "trace-block takes `--recording-id derive` or nothing: one pinned id cannot name \
+             every container of a block"
+        ));
+    }
+
+    eprintln!("Replaying block {} from {rpc_url}", args.block);
+    eprintln!("  prestate strategy: replay-preceding, the block replayed once in order");
+    let outcomes = onchain::record_onchain_block(&options, args.block).await?;
+
+    let mut rows = Vec::with_capacity(outcomes.len());
+    let (mut recorded, mut not_recorded, mut not_reached) = (0usize, 0usize, 0usize);
+    for (index, (tx_hash, outcome)) in outcomes.iter().enumerate() {
+        let row = match outcome {
+            onchain::BlockTxOutcome::Recorded(rec) => {
+                recorded += 1;
+                // The same report `trace-onchain` prints, beside the container, so a consumer
+                // that parses one recording's report reads each of a block's the same way.
+                let report_path = rec.container_path.with_extension("log");
+                std::fs::write(&report_path, render_recording(rec))
+                    .with_context(|| format!("cannot write {}", report_path.display()))?;
+                eprintln!(
+                    "tx {index} {tx_hash} recorded {} ({} bytes, {} steps read back, status {})",
+                    rec.container_path.display(),
+                    rec.container_bytes,
+                    rec.container_steps_read_back,
+                    if rec.succeeded { "ok" } else { "reverted" },
+                );
+                serde_json::json!({
+                    "index": index, "txHash": format!("{tx_hash}"), "outcome": "recorded",
+                    "container": rec.container_path.file_name().map(|n| n.to_string_lossy().to_string()),
+                    "containerBytes": rec.container_bytes,
+                    "stepsReadBack": rec.container_steps_read_back,
+                    "stepsWithoutArtifacts": rec.steps_without_artifacts,
+                    "stepsOffCode": rec.steps_off_code,
+                    "stepsOnSource": rec.steps_on_source,
+                    "stepsOnListing": rec.steps_on_listing,
+                    "succeeded": rec.succeeded, "gasUsed": rec.gas_used,
+                    "logs": rec.log_count, "calls": rec.call_count,
+                    "mappedAddresses": rec.mapped_addresses,
+                    "lookedUpAddresses": rec.source_lookups.len(),
+                    "report": report_path.file_name().map(|n| n.to_string_lossy().to_string()),
+                })
+            }
+            onchain::BlockTxOutcome::NotRecorded(reason) => {
+                not_recorded += 1;
+                eprintln!("tx {index} {tx_hash} not recorded: {reason}");
+                serde_json::json!({"index": index, "txHash": format!("{tx_hash}"),
+                                   "outcome": "not-recorded", "reason": reason})
+            }
+            onchain::BlockTxOutcome::NotReached(reason) => {
+                not_reached += 1;
+                eprintln!("tx {index} {tx_hash} not reached: {reason}");
+                serde_json::json!({"index": index, "txHash": format!("{tx_hash}"),
+                                   "outcome": "not-reached", "reason": reason})
+            }
+        };
+        rows.push(row);
+    }
+    let summary = serde_json::json!({
+        "block": args.block,
+        "transactions": outcomes.len(),
+        "recorded": recorded,
+        "notRecorded": not_recorded,
+        "notReached": not_reached,
+        "rows": rows,
+    });
+    let summary_path = out_dir.join(format!("block-{}.json", args.block));
+    std::fs::write(&summary_path, serde_json::to_string_pretty(&summary)?)
+        .with_context(|| format!("cannot write {}", summary_path.display()))?;
+    eprintln!(
+        "block {}: {} transaction(s): {recorded} recorded, {not_recorded} not recorded, \
+         {not_reached} not reached; ledger at {}",
+        args.block,
+        outcomes.len(),
+        summary_path.display()
+    );
+    Ok(())
+}
+
+/// One-line rendering of a per-address source-resolution outcome.
+fn describe_source(outcome: &onchain::SourceOutcome) -> String {
+    use onchain::SourceOutcome as O;
+    match outcome {
+        O::Mapped {
+            contract_name,
+            source_files,
+            prefix_match,
+            deployed_len,
+            ast,
+            storage_layout,
+        } => format!(
+            "mapped as {contract_name} ({source_files} source file(s)); \
+             recompiled code matches the first {prefix_match} of {deployed_len} deployed bytes; \
+             source map, {}, {}",
+            if *ast { "AST" } else { "no AST" },
+            if *storage_layout {
+                "storage layout"
+            } else {
+                "no storage layout"
+            }
+        ),
+        O::NotVerified => "no usable verified source".to_string(),
+        O::LookupCapped { limit } => format!(
+            "not looked up on Sourcify: {limit} address(es) already were (--max-source-lookups)"
+        ),
+        O::BytecodeMismatch {
+            prefix_match,
+            recompiled_len,
+            deployed_len,
+            kept,
+        } => format!(
+            "RECOMPILE DOES NOT DESCRIBE THE DEPLOYED CODE \
+             (common prefix {prefix_match} B; recompiled {recompiled_len} B, \
+             deployed {deployed_len} B) — {}",
+            if *kept {
+                "kept anyway (--allow-source-mismatch): source lines may be wrong"
+            } else {
+                "dropped"
+            }
+        ),
+        O::RecompileFailed { reason, solc } => {
+            if solc.is_empty() {
+                format!("source unavailable: {reason}")
+            } else {
+                format!("source unavailable (solc `{solc}`): {reason}")
+            }
+        }
+        O::Initcode { bytes } => format!(
+            "contract-creation initcode ({bytes} bytes), keyed by its keccak256; no deployed code to verify"
+        ),
+        O::NoCode => "no code at the target block (EOA or self-destructed)".to_string(),
+    }
+}
+
+/// Resolve the effective JSON-RPC endpoint:
+///   1. `--rpc-url` if given on the CLI.
+///   2. `CODETRACER_EVM_RECORDER_RPC_URL` env var.
+///   3. An error.  There is no default endpoint on purpose: which endpoint
+///      is used decides whether the archive reads this route depends on are
+///      served at all, so it is the caller's measured choice and not a
+///      value this binary should pick for them.
+fn resolve_rpc_url(cli_rpc_url: Option<String>) -> Result<String> {
+    if let Some(url) = cli_rpc_url.filter(|u| !u.trim().is_empty()) {
+        return Ok(url);
+    }
+    if let Ok(value) = std::env::var(ENV_RPC_URL)
+        && !value.trim().is_empty()
+    {
+        return Ok(value);
+    }
+    Err(eyre::eyre!(
+        "no JSON-RPC endpoint specified: pass --rpc-url <URL> (or set {ENV_RPC_URL}). \
+         The endpoint must serve ARCHIVE state at the target block's parent; it does \
+         not need any debug_* or trace_* method."
+    ))
 }
 
 // ---------------------------------------------------------------------------
