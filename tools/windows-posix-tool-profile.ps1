@@ -2,11 +2,15 @@ $ErrorActionPreference = 'Stop'
 
 # The declared Windows environment already supplies Git for Windows. Bind
 # its companion POSIX tools to that installation before Repro resolves roles.
-$gitCommand = Get-Command git.exe -CommandType Application -ErrorAction Stop
+# PATH order decides, as it does for every later `git` call. A runner can carry
+# two Git installations (Windows arm64 images ship clangarm64 Git beside the
+# x64 one); Get-Command then returns both, and their joined paths are no
+# executable at all.
+$gitCommand = Get-Command git.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1
 $gitExecutable = (Get-Item -LiteralPath $gitCommand.Source).FullName
 $execPath = (& $gitExecutable --exec-path).Trim().Replace('/', '\')
 if ($LASTEXITCODE -ne 0) { throw 'Selected Git could not report its executable directory' }
-if ($execPath -notmatch '^(.*)\\mingw(?:32|64|arm64)\\libexec\\git-core$') {
+if ($execPath -notmatch '^(.*)\\(?:mingw(?:32|64|arm64)|clangarm64)\\libexec\\git-core$') {
     throw 'Selected Git does not have the declared Git for Windows installation layout'
 }
 $gitRoot = (Get-Item -LiteralPath $Matches[1]).FullName
