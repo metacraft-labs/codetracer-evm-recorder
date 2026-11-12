@@ -142,8 +142,17 @@
                 && [ -f "$_ct_hook_root/flake.nix" ] \
                 && [ "$(${pkgs.coreutils}/bin/sha256sum "$_ct_hook_root/flake.nix" | ${pkgs.coreutils}/bin/cut -d' ' -f1)" = "${builtins.hashFile "sha256" ./flake.nix}" ]; then
                 _ct_matching_repro="''${REPROBUILD_REPRO:-$(command -v repro)}"
-                ${pkgs.python3}/bin/python3 tools/install-canonical-hooks.py --repro "$_ct_matching_repro" --bootstrap-managed || return $?
-                ${pkgs.python3}/bin/python3 tools/install-canonical-hooks.py --repro "$_ct_matching_repro" || return $?
+                # `nix develop --command` runs this file as a script and an
+                # interactive `nix develop` sources it, so `return` is wrong in
+                # the first case (it is an error and execution continues).
+                # `exit` fails the declared entrypoint in both: the command is
+                # never run, and an interactive entry is refused rather than
+                # left half-initialized.
+                if ! ${pkgs.python3}/bin/python3 tools/install-canonical-hooks.py --repro "$_ct_matching_repro" --bootstrap-managed \
+                  || ! ${pkgs.python3}/bin/python3 tools/install-canonical-hooks.py --repro "$_ct_matching_repro"; then
+                  echo "codetracer-evm-recorder: hook installer failed; refusing to enter the dev shell" >&2
+                  exit 1
+                fi
                 unset _ct_matching_repro
               fi
               unset _ct_hook_root
