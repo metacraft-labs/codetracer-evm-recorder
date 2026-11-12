@@ -119,16 +119,17 @@ jobs:
           sibling-strategy: ${{ matrix.os != 'windows' && 'repro-lock' || 'auto' }}
           consumer-directory: ${{ matrix.os != 'windows' && format('{0}/codetracer-evm-recorder', env.EVM_CI_NAMESPACE) || '.' }}
           workspace-directory: ${{ matrix.os != 'windows' && env.EVM_CI_NAMESPACE || '.' }}
-          # reprobuild v0.2.20 (a650b203) on every leg, the same revision the
+          # reprobuild v0.2.23 (9dbf4e710d) on every leg, the same revision the
           # owning flake.nix selects for the dev shell and hook factory. Unix
           # legs build that commit from source and the step below asserts it;
-          # Windows x64 installs the v0.2.20 release archive. Windows arm64 has
-          # no v0.2.20 archive and falls back to a source build of the same
-          # commit. v0.2.20 reads the committed repro.lock schema
-          # (reprobuild.solved-graph-lock.v3); 76659f57, pinned before, does not.
+          # Windows x64 installs the v0.2.23 release archive, and Windows arm64
+          # runs that x86_64 archive under emulation. v0.2.23 carries the fix
+          # for the PATH-provisioned gcc probe that failed on Windows with
+          # "Invalid argument", and reads the committed repro.lock schema
+          # (reprobuild.solved-graph-lock.v3).
           repro-from-source: ${{ matrix.os != 'windows' && 'true' || 'false' }}
-          repro-version: v0.2.20
-          repro-build-pin: "a650b2034947eba87c809b1a7c9169f489aebd24"
+          repro-version: v0.2.23
+          repro-build-pin: "9dbf4e710d7cc0b9a79a4bcd54c931afb6849dd0"
           gh-token: ${{ steps.ci_token.outputs.token }}
           # Keeps the Nix GitHub credential valid past the token's one-hour
           # lifetime: a job-scoped broker re-mints it while setup and the
@@ -147,7 +148,7 @@ jobs:
         run: |
           set -euo pipefail
           source_root="${GITHUB_WORKSPACE}/${EVM_CI_NAMESPACE}/.reprobuild-src"
-          test "$(git -C "$source_root" rev-parse HEAD)" = a650b2034947eba87c809b1a7c9169f489aebd24
+          test "$(git -C "$source_root" rev-parse HEAD)" = 9dbf4e710d7cc0b9a79a4bcd54c931afb6849dd0
           test -z "$(git -C "$source_root" status --porcelain)"
           test "$(command -v repro)" = "${source_root}/build/bin/repro"
           test "${REPROBUILD_NIX_DAEMON_BIN}" = "${source_root}/build/bin/reprobuild-nix-daemon"
@@ -166,12 +167,17 @@ jobs:
         # `repro.nim`. Verifies the primary shipping artefact (the
         # recorder binary or extension) materialises through the
         # reprobuild engine identically to `just build`.
-        run: ${{ matrix.os == 'macos' && 'nix develop --command' || '' }} dev-exec repro build ${{ matrix.os == 'linux' && '--tool-provisioning=nix' || '' }}
+        # reprobuild v0.2.23 refuses `uses:` declarations without an explicit
+        # provisioning mode ("refusing implicit PATH fallback"). Linux
+        # provisions through Nix; macOS (inside the dev shell) and Windows
+        # resolve their tools from the prepared environment's PATH.
+        run: ${{ matrix.os == 'macos' && 'nix develop --command' || '' }} dev-exec repro build ${{ matrix.os == 'linux' && '--tool-provisioning=nix' || '--tool-provisioning=path' }}
 
       - name: repro test
         working-directory: ${{ matrix.os != 'windows' && format('{0}/codetracer-evm-recorder', env.EVM_CI_NAMESPACE) || '.' }}
-        # Materialises the `test` collection.
-        run: ${{ matrix.os == 'macos' && 'nix develop --command' || '' }} dev-exec repro test ${{ matrix.os == 'linux' && '--tool-provisioning=nix' || '' }}
+        # Materialises the `test` collection, with the same provisioning
+        # mode as `repro build` above.
+        run: ${{ matrix.os == 'macos' && 'nix develop --command' || '' }} dev-exec repro test ${{ matrix.os == 'linux' && '--tool-provisioning=nix' || '--tool-provisioning=path' }}
 
       - name: Authorize declared Nim decoder environment
         if: matrix.os != 'windows'

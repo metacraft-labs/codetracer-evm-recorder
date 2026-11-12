@@ -4,12 +4,17 @@ Each case owns a temporary primary/linked worktree populated with the actual
 owning declaration bytes. It never changes the production checkout or a user
 hook. Native installer/template/default-hook controls remain separate tests.
 
-The workspace cases start from the ten managed bodies the previously selected
-package (reprobuild 76659f) actually wrote, kept byte for byte under
-tests/fixtures/legacy-managed-hooks-76659f/. They are captured output, not a
-mock: that package is not part of the declared shell, and each fixture must
-hash to its entry in the installer's LEGACY_MANAGED_BODIES before it is used,
-so a drifted fixture fails the test instead of being admitted.
+The workspace cases start from the ten managed bodies a previously selected
+package actually wrote, kept byte for byte under
+tests/fixtures/legacy-managed-hooks-<revision>/: reprobuild 76659f and
+reprobuild v0.2.20 (a650b20). They are captured output, not a mock: neither
+package is part of the declared shell, and each fixture must hash to its
+role's entry in that revision's set in the installer's
+LEGACY_MANAGED_BODY_SETS before it is used, so a drifted fixture fails the
+test instead of being admitted. The v0.2.20 fixtures are the factory bodies
+(refusal-record directory `''`); the workspace case bakes into them the value
+the real current engine wrote for the same checkout, as a v0.2.20 ensure run
+there would have.
 """
 from __future__ import annotations
 import importlib.util
@@ -24,7 +29,10 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-LEGACY_FIXTURES = ROOT / "tests/fixtures/legacy-managed-hooks-76659f"
+LEGACY_FIXTURES = {
+    "76659f5730ecf698b1963c656494d2cb66eb256d": ROOT / "tests/fixtures/legacy-managed-hooks-76659f",
+    "a650b2034947eba87c809b1a7c9169f489aebd24": ROOT / "tests/fixtures/legacy-managed-hooks-a650b20",
+}
 # The installer imports its sibling helpers the way a script run finds them.
 sys.path.insert(0, str(ROOT / "tools"))
 SPEC = importlib.util.spec_from_file_location("owned_hook_installer", ROOT / "tools/install-canonical-hooks.py")
@@ -295,7 +303,8 @@ class CommonHooksOwnership(unittest.TestCase):
                 INSTALLER.native_install_environment(env, self.git, self.primary, self.primary / ".git/hooks")
             self.assertEqual(self.inventory(), original)
 
-    # --- Reprobuild v0.2.20 successor: the one machine-local managed line. ---
+    # --- Reprobuild v0.2.20/v0.2.23 successors: legacy sets and the one
+    # --- machine-local managed line. ---
 
     def make_workspace_checkout(self) -> None:
         # A real workspace checkout: the parent directory holds a workspace
@@ -306,17 +315,35 @@ class CommonHooksOwnership(unittest.TestCase):
         self.command("add", "--", "repro.lock")
         self.command("commit", "-q", "-m", "Commit the workspace lock")
 
-    def install_legacy_bodies(self) -> None:
+    def install_legacy_bodies(self, revision: str, value: bytes | None = None) -> None:
+        """Write one revision's captured legacy bodies, optionally baking `value`
+        into the refusal-record assignment of each body that carries one."""
         hooks = self.primary / ".git/hooks"
-        names = sorted(p.name for p in LEGACY_FIXTURES.iterdir())
-        self.assertEqual(names, sorted(INSTALLER.LEGACY_MANAGED_BODIES))
+        fixtures = LEGACY_FIXTURES[revision]
+        expected = INSTALLER.LEGACY_MANAGED_BODY_SETS[revision]
+        names = sorted(p.name for p in fixtures.iterdir())
+        self.assertEqual(names, sorted(expected))
         for name in names:
-            body = (LEGACY_FIXTURES / name).read_bytes()
+            body = (fixtures / name).read_bytes()
             self.assertEqual(
-                hashlib.sha256(body).hexdigest(), INSTALLER.LEGACY_MANAGED_BODIES[name],
-                f"legacy fixture is not the qualified 76659f body: {name}")
+                hashlib.sha256(body).hexdigest(), expected[name],
+                f"legacy fixture is not the qualified {revision[:7]} body: {name}")
+            self.assertNotEqual(expected[name], INSTALLER.KNOWN_MANAGED_BODIES.get(name),
+                                f"legacy {revision[:7]} body equals the current one: {name}")
+            if value is not None and INSTALLER.split_refusal_record_dir(body)[1] is not None:
+                body = INSTALLER.render_refusal_record_dir(body, value)
             (hooks / name).write_bytes(body)
             (hooks / name).chmod(0o755)
+
+    def test_legacy_sets_are_explicit_and_distinct(self) -> None:
+        self.assertEqual(set(INSTALLER.LEGACY_MANAGED_BODY_SETS), set(LEGACY_FIXTURES))
+        for revision, bodies in INSTALLER.LEGACY_MANAGED_BODY_SETS.items():
+            with self.subTest(revision=revision):
+                self.assertEqual(set(bodies), set(INSTALLER.KNOWN_MANAGED_BODIES))
+                for name, digest in bodies.items():
+                    self.assertIn(digest, INSTALLER.LEGACY_MANAGED_BODIES[name])
+                    self.assertTrue(INSTALLER.qualified_managed_prior(name, digest))
+        self.assertFalse(INSTALLER.qualified_managed_prior("pre-push.repro-managed", "0" * 64))
 
     def run_installer(self, bootstrap: bool) -> subprocess.CompletedProcess:
         repro = os.environ.get("REPROBUILD_REPRO") or shutil.which("repro")
@@ -330,12 +357,18 @@ class CommonHooksOwnership(unittest.TestCase):
             cwd=self.primary, env=env, capture_output=True, text=True,
         )
 
-    def migrated_workspace_values(self) -> dict[str, bytes]:
-        self.make_workspace_checkout()
-        self.install_legacy_bodies()
+    def migrate(self) -> dict[str, bytes]:
         for bootstrap in (True, False):
             result = self.run_installer(bootstrap)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return self.current_values()
+
+    def migrated_workspace_values(self) -> dict[str, bytes]:
+        self.make_workspace_checkout()
+        self.install_legacy_bodies("76659f5730ecf698b1963c656494d2cb66eb256d")
+        return self.migrate()
+
+    def current_values(self) -> dict[str, bytes]:
         hooks = self.primary / ".git/hooks"
         values = {}
         for name, digest in INSTALLER.KNOWN_MANAGED_BODIES.items():
@@ -356,6 +389,29 @@ class CommonHooksOwnership(unittest.TestCase):
         INSTALLER.validate_refusal_record_dir(value, self.primary.resolve())
         record = Path(os.fsdecode(INSTALLER.unquote_shell_posix_word(value)))
         self.assertIn(record.parents[4], {self.primary.resolve(), *self.primary.resolve().parents})
+
+    def test_workspace_checkout_migrates_v0220_bodies_to_current(self) -> None:
+        # The real current engine writes this checkout's refusal-record value
+        # first; the v0.2.20 bodies then carry that same value, exactly as a
+        # v0.2.20 ensure in this workspace checkout would have left them.
+        value = next(iter(self.migrated_workspace_values().values()))
+        self.assertNotEqual(value, b"''")
+        self.install_legacy_bodies("a650b2034947eba87c809b1a7c9169f489aebd24", value)
+        hooks = self.primary / ".git/hooks"
+        for name, digest in INSTALLER.LEGACY_MANAGED_BODY_SETS["a650b2034947eba87c809b1a7c9169f489aebd24"].items():
+            canonical, carried = INSTALLER.split_refusal_record_dir((hooks / name).read_bytes())
+            self.assertEqual(hashlib.sha256(canonical).hexdigest(), digest, name)
+            self.assertIn(carried, (None, value), name)
+        values = self.migrate()
+        self.assertEqual(len(values), 5, values)
+        self.assertEqual(set(values.values()), {value})
+
+    def test_v0220_body_with_foreign_value_refuses(self) -> None:
+        self.make_workspace_checkout()
+        outside = INSTALLER.quote_shell_posix(
+            b"/nonexistent-elsewhere/.repro/build/reports/managed-hook-refusals/" + b"0" * 64)
+        self.install_legacy_bodies("a650b2034947eba87c809b1a7c9169f489aebd24", outside)
+        self.assert_installer_refuses("outside the checkout and its ancestors", bootstrap=True)
 
     def rewrite_refusal_value(self, name: str, value: bytes) -> None:
         target = self.primary / ".git/hooks" / name

@@ -16,6 +16,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from types import MappingProxyType
 
 # Entering the declared environment runs this installer, and it must leave the
 # working tree as clean as it found it: the pre-push gate counts untracked
@@ -102,21 +103,34 @@ def validate_prior_owned_body(body: bytes, mode: int, prek: str) -> None:
     if body not in (native_generated_body(prek), canonical_body(prek)):
         raise RuntimeError("unknown or modified owning local hook body")
 
-KNOWN_MANAGED_BODIES = {'post-checkout': '559e7ef6b042c686c97eaa0e39fb388224376d8b3c7f8d2b8014f2b72db5592c', 'post-checkout.repro-managed': 'ce6e4c183d402be1bd172c9c2855c3a817f1d390f4eea9ee5cf889ad258d2ad5', 'post-commit': 'd32025c9c8d3d940f0b8a4628365abd9a6f473c6285074ae75095a9d70e2d98b', 'post-commit.repro-managed': '2099a6223344a521d4372a7f67e9418f0a91d0d3f1cd189661f73e24c4704a89', 'post-merge': 'bfbe09e064471797f5927251a76c81a4d647edc876bdc6186118b5f810ec13fd', 'post-merge.repro-managed': '95bfb444c1504e76e5ab88cfd3003463373ef554d0682a5d6f29210290f87113', 'pre-commit': '183bb091beac3d855ba679e6432341a9eacdbe4e0c7c06e9a2b605da5e86f3b1', 'pre-commit.repro-managed': '72506ba8e629bc254e05ed4cf1b30c9ec49b6647b6ecba8a693c61ab1a5e8dc4', 'pre-push': 'f5084841c5edfe6bfdaba3ad55c142b87e4e93b725754de0af553b57709e5c29', 'pre-push.repro-managed': 'ac3c25c9cf84e52c3abc157c5ec0f72bbd38116682c5f3f80fa9b0ad88926d26'}
+KNOWN_MANAGED_BODIES = {'post-checkout': 'eb0e31f2cc352a4124f1d05bf7967bc2efa5864735200790de42a1530d5abee3', 'post-checkout.repro-managed': '5b7377795c638c8d64969dbb5506e0036acd948e376c4e93e4e622ec88acb52f', 'post-commit': '3ed1d3fb7ef995712b59b6ec27d9570a89cdb8948a3645bc996b41f2fa8184f3', 'post-commit.repro-managed': 'c59baec2dd12c3f8852ed2564b919bf1eab03199250ef86ed9e6a8655f20ec2b', 'post-merge': '9e6811d36766c781d21a83d1decc7e847e44d5ca78e7cda86a3768a5e6108c38', 'post-merge.repro-managed': 'c97b026fdd61dcb31dfc8d5de139120e4daa6502c8b7909581db3f09f1a2a4cf', 'pre-commit': 'b5701da3f4fa84c627af6871f7c9d8cfbc27111f6200780a563b8d9da0daa5a2', 'pre-commit.repro-managed': '00251d3475c18ef4e01400e0f528608acd3075af277102b6334c6cfed9129b7d', 'pre-push': '12118a64bade0979ea838dd95d9e44110851fd99cc6b84cf3bf4a15e6759c96b', 'pre-push.repro-managed': '8acf3546870c24c49179733dadbd68b8213b42ddd7fc0d4a12645a7d419b3040'}
 
 
 # Previously qualified Linux-author bodies remain explicit legacy preimages, so
-# a checkout whose hooks the former selected package wrote still migrates. They
-# are the ten bodies the factory produced from Reprobuild
-# 76659f5730ecf698b1963c656494d2cb66eb256d (contract
-# reprobuild.managed-hook.v1.pre-commit.434c2eeac4079591), measured again
-# 2026-11-11 by running that package through SelectedFactory. Its post-checkout,
-# post-commit, post-merge and pre-push bodies are byte-identical to the current
-# ones; the six others differ.
-LEGACY_MANAGED_BODIES = {'post-checkout': '559e7ef6b042c686c97eaa0e39fb388224376d8b3c7f8d2b8014f2b72db5592c', 'post-checkout.repro-managed': '9f2984dd9a84a7c0e8fe35e27e85b3d1119439d30941641d2c52e0180fa9a67d', 'post-commit': 'd32025c9c8d3d940f0b8a4628365abd9a6f473c6285074ae75095a9d70e2d98b', 'post-commit.repro-managed': '7547f2c80dc2ede98ed08c6458995aca9ae36ada500f09af034b9fc0cda9224b', 'post-merge': 'bfbe09e064471797f5927251a76c81a4d647edc876bdc6186118b5f810ec13fd', 'post-merge.repro-managed': 'd5ef6453ef70840bbb0d2c333ccc429447d7a089701623c6db8c41e7da08f65e', 'pre-commit': '06cfcb59c42b99e9432c469f6bce7dc4fa5b0fa7c6f4f4e0548a1161233cf576', 'pre-commit.repro-managed': '598ed91d257d1d236de042e708bd239837e069b2ee6fd583cf6b2d121f294507', 'pre-push': 'f5084841c5edfe6bfdaba3ad55c142b87e4e93b725754de0af553b57709e5c29', 'pre-push.repro-managed': '642c37aca860a03ee6e7c2d0f941bf6fbdd1202c9f356c4fe68bf3ad3bfe6da6'}
+# a checkout whose hooks a former selected package wrote still migrates. Each
+# set is the ten bodies the factory produced from that Reprobuild revision,
+# keyed by the revision; a body is admitted only when its digest (after the
+# refusal-record value is normalized, below) equals that role's entry in one
+# of these sets. Nothing else is legacy.
+#
+# - 76659f5730ecf698b1963c656494d2cb66eb256d (contract
+#   reprobuild.managed-hook.v1.pre-commit.434c2eeac4079591), measured
+#   2026-11-11 by running that package through SelectedFactory.
+# - a650b2034947eba87c809b1a7c9169f489aebd24, release v0.2.20 (contract
+#   reprobuild.managed-hook.v1.pre-commit.317d12ff5e18024d), measured
+#   2026-11-12 the same way, before the selected package moved to v0.2.23.
+LEGACY_MANAGED_BODY_SETS = MappingProxyType({
+    '76659f5730ecf698b1963c656494d2cb66eb256d': MappingProxyType({'post-checkout': '559e7ef6b042c686c97eaa0e39fb388224376d8b3c7f8d2b8014f2b72db5592c', 'post-checkout.repro-managed': '9f2984dd9a84a7c0e8fe35e27e85b3d1119439d30941641d2c52e0180fa9a67d', 'post-commit': 'd32025c9c8d3d940f0b8a4628365abd9a6f473c6285074ae75095a9d70e2d98b', 'post-commit.repro-managed': '7547f2c80dc2ede98ed08c6458995aca9ae36ada500f09af034b9fc0cda9224b', 'post-merge': 'bfbe09e064471797f5927251a76c81a4d647edc876bdc6186118b5f810ec13fd', 'post-merge.repro-managed': 'd5ef6453ef70840bbb0d2c333ccc429447d7a089701623c6db8c41e7da08f65e', 'pre-commit': '06cfcb59c42b99e9432c469f6bce7dc4fa5b0fa7c6f4f4e0548a1161233cf576', 'pre-commit.repro-managed': '598ed91d257d1d236de042e708bd239837e069b2ee6fd583cf6b2d121f294507', 'pre-push': 'f5084841c5edfe6bfdaba3ad55c142b87e4e93b725754de0af553b57709e5c29', 'pre-push.repro-managed': '642c37aca860a03ee6e7c2d0f941bf6fbdd1202c9f356c4fe68bf3ad3bfe6da6'}),
+    'a650b2034947eba87c809b1a7c9169f489aebd24': MappingProxyType({'post-checkout': '559e7ef6b042c686c97eaa0e39fb388224376d8b3c7f8d2b8014f2b72db5592c', 'post-checkout.repro-managed': 'ce6e4c183d402be1bd172c9c2855c3a817f1d390f4eea9ee5cf889ad258d2ad5', 'post-commit': 'd32025c9c8d3d940f0b8a4628365abd9a6f473c6285074ae75095a9d70e2d98b', 'post-commit.repro-managed': '2099a6223344a521d4372a7f67e9418f0a91d0d3f1cd189661f73e24c4704a89', 'post-merge': 'bfbe09e064471797f5927251a76c81a4d647edc876bdc6186118b5f810ec13fd', 'post-merge.repro-managed': '95bfb444c1504e76e5ab88cfd3003463373ef554d0682a5d6f29210290f87113', 'pre-commit': '183bb091beac3d855ba679e6432341a9eacdbe4e0c7c06e9a2b605da5e86f3b1', 'pre-commit.repro-managed': '72506ba8e629bc254e05ed4cf1b30c9ec49b6647b6ecba8a693c61ab1a5e8dc4', 'pre-push': 'f5084841c5edfe6bfdaba3ad55c142b87e4e93b725754de0af553b57709e5c29', 'pre-push.repro-managed': 'ac3c25c9cf84e52c3abc157c5ec0f72bbd38116682c5f3f80fa9b0ad88926d26'}),
+})
+# Role name -> every admitted legacy digest for that role.
+LEGACY_MANAGED_BODIES = MappingProxyType({
+    name: frozenset(bodies[name] for bodies in LEGACY_MANAGED_BODY_SETS.values())
+    for name in sorted({n for bodies in LEGACY_MANAGED_BODY_SETS.values() for n in bodies})
+})
 
 def qualified_managed_prior(name: str, digest: str) -> bool:
-    return digest == KNOWN_MANAGED_BODIES.get(name) or digest == LEGACY_MANAGED_BODIES.get(name)
+    return digest == KNOWN_MANAGED_BODIES.get(name) or digest in LEGACY_MANAGED_BODIES.get(name, frozenset())
 
 
 # The one machine-local line of a current managed body (reprobuild PG-15).
@@ -161,7 +175,7 @@ def split_refusal_record_dir(body: bytes) -> tuple[bytes, bytes | None]:
 
     The single column-zero assignment's value is replaced by `''`; every other
     byte is returned unchanged, so the result's digest still pins them all. A
-    body without the assignment (every legacy body) returns `None`."""
+    body without the assignment (every 76659f legacy body) returns `None`."""
     lines = body.split(b"\n")
     found = [i for i, line in enumerate(lines) if line.startswith(REFUSAL_DIR_ASSIGNMENT)]
     if not found:
