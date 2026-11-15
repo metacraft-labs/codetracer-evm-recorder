@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 SOURCE = Path(__file__).resolve().parents[1] / "nix" / "ci-provision-git.py"
@@ -117,10 +118,10 @@ class JobCredentialBroker(unittest.TestCase):
     def write_tokens(self, text):
         (self.dir / "nix-access-tokens.conf").write_text(text)
 
-    def start(self, argv):
+    def start(self, argv, env=None):
         process = subprocess.Popen(
             argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL)
+            stderr=subprocess.DEVNULL, env=env)
 
         def stop():
             process.kill()
@@ -128,13 +129,42 @@ class JobCredentialBroker(unittest.TestCase):
         self.addCleanup(stop)
         return process
 
+    # The stand-in announces its pid itself, from inside the interpreter, so
+    # its exec has completed before broker.pid exists. job-credentials.cjs
+    # writes broker.pid from the parent right after spawn(), and that is
+    # harmless there because the first Git invocation comes whole steps
+    # later. Here the test reads /proc/<pid>/cmdline at once: with the pid
+    # written by the test right after Popen, the read could land while the
+    # exec was still in progress and see an empty command line (1 read in
+    # 200 on Linux), so a live broker was taken for a stranger.
+    STAND_IN = (
+        "import os, time\n"
+        "path = os.environ['STAND_IN_PID_FILE']\n"
+        "with open(path + '.tmp', 'w') as handle:\n"
+        "    handle.write('%d\\n' % os.getpid())\n"
+        "os.replace(path + '.tmp', path)\n"
+        "time.sleep(1e9)\n"
+    )
+
     def start_broker(self):
-        # The script path is never opened: `-c` runs the sleep, and the
+        # The script path is never opened: `-c` runs the stand-in, and the
         # remaining arguments only shape /proc/<pid>/cmdline.
-        process = self.start([
-            sys.executable, "-c", "import time; time.sleep(1e9)",
-            str(self.dir / "stand-in" / "job-credentials.cjs"), "daemon"])
-        (self.dir / "broker.pid").write_text("%d\n" % process.pid)
+        pid_file = self.dir / "broker.pid"
+        process = self.start(
+            [
+                sys.executable, "-c", self.STAND_IN,
+                str(self.dir / "stand-in" / "job-credentials.cjs"), "daemon",
+            ],
+            env=dict(os.environ, STAND_IN_PID_FILE=str(pid_file)))
+        # Wait for the stand-in's announcement; fail if it exits or stalls.
+        deadline = time.monotonic() + 30
+        while not pid_file.exists():
+            if process.poll() is not None:
+                self.fail("the broker stand-in exited before publishing its pid")
+            if time.monotonic() > deadline:
+                self.fail("the broker stand-in did not publish its pid in 30 s")
+            time.sleep(0.01)
+        self.assertEqual(pid_file.read_text(), "%d\n" % process.pid)
         return process
 
     def token(self, extra=None):
