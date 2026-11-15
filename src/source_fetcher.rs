@@ -1401,39 +1401,49 @@ mod tests {
         // strict guarantee that ties the recompile output to what
         // would have been deployed.
         let independent_dir = tempfile::TempDir::new().unwrap();
-        let independent_path = independent_dir.path().join("Counter.sol");
-        std::fs::write(&independent_path, source).unwrap();
+        std::fs::write(independent_dir.path().join("Counter.sol"), source).unwrap();
+        // solc keys its `--combined-json` `contracts` map by
+        // `<source-unit-name>:<contract-name>`. A relative input path names a
+        // source unit relative to the base path, which defaults to the working
+        // directory, so compiling `Counter.sol` from inside the temporary
+        // directory makes the key exactly `Counter.sol:Counter` on every OS.
+        // An absolute input path does not: on Windows solc's normalised form of
+        // the temporary path differs from the argument even with its
+        // backslashes replaced, and the rebuilt key named no entry.
+        // https://docs.soliditylang.org/en/latest/path-resolution.html#cli-path-normalization-and-stripping
         let independent = Command::new(&solc_cmd)
+            .current_dir(independent_dir.path())
             .args([
                 "--combined-json",
                 "bin-runtime,srcmap-runtime",
                 "--no-cbor-metadata",
                 "--evm-version",
                 "shanghai",
+                "Counter.sol",
             ])
-            .arg(&independent_path)
             .output()
             .unwrap();
-        assert!(independent.status.success());
+        assert!(
+            independent.status.success(),
+            "independent solc failed: {}",
+            String::from_utf8_lossy(&independent.stderr)
+        );
         let independent_json: serde_json::Value =
             serde_json::from_slice(&independent.stdout).unwrap();
-        // solc keys its `--combined-json` `contracts` map by
-        // `<source-path>:<contract-name>`, and it always normalises the
-        // source path to forward slashes -- even on Windows, where the path
-        // passed on the command line uses backslashes.  Build the lookup
-        // key with the same normalisation so it matches on every OS.
-        let key = format!(
-            "{}:Counter",
-            independent_path.display().to_string().replace('\\', "/")
+        let key = "Counter.sol:Counter";
+        assert!(
+            independent_json["contracts"].get(key).is_some(),
+            "solc output has no {key} entry: {}",
+            independent_json["contracts"]
         );
-        let independent_runtime_hex = independent_json["contracts"][&key]["bin-runtime"]
+        let independent_runtime_hex = independent_json["contracts"][key]["bin-runtime"]
             .as_str()
             .unwrap()
             .to_string();
         let independent_runtime = alloy::hex::decode(&independent_runtime_hex).unwrap();
         assert_eq!(artifacts.runtime_bytecode, independent_runtime);
 
-        let independent_srcmap = independent_json["contracts"][&key]["srcmap-runtime"]
+        let independent_srcmap = independent_json["contracts"][key]["srcmap-runtime"]
             .as_str()
             .unwrap()
             .to_string();
