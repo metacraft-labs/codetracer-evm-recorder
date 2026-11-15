@@ -4,7 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
-    reprobuild.url = "github:metacraft-labs/reprobuild/9dbf4e710d7cc0b9a79a4bcd54c931afb6849dd0";
+    reprobuild.url = "github:metacraft-labs/reprobuild/7c670d248b936188f8aad689f32bb7e64522c5ac";
   };
 
   outputs =

@@ -35,6 +35,6 @@ indent_size = unset
 [{tests/test_cli_convention.rs,tests/test_column_aware.rs,tests/test_ctfs_audit.rs,tests/test_onchain_route.rs,tests/test_programs_via_ct_print_full.rs}]
 indent_size = unset
 
-# Byte-exact captured hook body; the ownership test pins it to its legacy hash.
-[tests/fixtures/legacy-managed-hooks-a650b20/pre-commit]
+# Byte-exact captured hook bodies; the ownership test pins them to their legacy hashes.
+[{tests/fixtures/legacy-managed-hooks-a650b20/pre-commit,tests/fixtures/legacy-managed-hooks-9dbf4e7/pre-commit}]
 indent_size = unset

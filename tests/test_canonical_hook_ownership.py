@@ -6,15 +6,15 @@ hook. Native installer/template/default-hook controls remain separate tests.
 
 The workspace cases start from the ten managed bodies a previously selected
 package actually wrote, kept byte for byte under
-tests/fixtures/legacy-managed-hooks-<revision>/: reprobuild 76659f and
-reprobuild v0.2.20 (a650b20). They are captured output, not a mock: neither
-package is part of the declared shell, and each fixture must hash to its
-role's entry in that revision's set in the installer's
-LEGACY_MANAGED_BODY_SETS before it is used, so a drifted fixture fails the
-test instead of being admitted. The v0.2.20 fixtures are the factory bodies
-(refusal-record directory `''`); the workspace case bakes into them the value
-the real current engine wrote for the same checkout, as a v0.2.20 ensure run
-there would have.
+tests/fixtures/legacy-managed-hooks-<revision>/: reprobuild 76659f,
+reprobuild v0.2.20 (a650b20) and reprobuild v0.2.23 (9dbf4e7). They are
+captured output, not a mock: none of these packages is part of the declared
+shell, and each fixture must hash to its role's entry in that revision's set
+in the installer's LEGACY_MANAGED_BODY_SETS before it is used, so a drifted
+fixture fails the test instead of being admitted. The v0.2.20 and v0.2.23
+fixtures are the factory bodies (refusal-record directory `''`); the
+workspace cases bake into them the value the real current engine wrote for
+the same checkout, as an ensure run of that release there would have.
 """
 from __future__ import annotations
 import importlib.util
@@ -32,7 +32,11 @@ ROOT = Path(__file__).resolve().parents[1]
 LEGACY_FIXTURES = {
     "76659f5730ecf698b1963c656494d2cb66eb256d": ROOT / "tests/fixtures/legacy-managed-hooks-76659f",
     "a650b2034947eba87c809b1a7c9169f489aebd24": ROOT / "tests/fixtures/legacy-managed-hooks-a650b20",
+    "9dbf4e710d7cc0b9a79a4bcd54c931afb6849dd0": ROOT / "tests/fixtures/legacy-managed-hooks-9dbf4e7",
 }
+# Releases whose bodies carry the machine-local refusal-record line.
+V0220 = "a650b2034947eba87c809b1a7c9169f489aebd24"
+V0223 = "9dbf4e710d7cc0b9a79a4bcd54c931afb6849dd0"
 # The installer imports its sibling helpers the way a script run finds them.
 sys.path.insert(0, str(ROOT / "tools"))
 SPEC = importlib.util.spec_from_file_location("owned_hook_installer", ROOT / "tools/install-canonical-hooks.py")
@@ -303,8 +307,8 @@ class CommonHooksOwnership(unittest.TestCase):
                 INSTALLER.native_install_environment(env, self.git, self.primary, self.primary / ".git/hooks")
             self.assertEqual(self.inventory(), original)
 
-    # --- Reprobuild v0.2.20/v0.2.23 successors: legacy sets and the one
-    # --- machine-local managed line. ---
+    # --- Reprobuild v0.2.20/v0.2.23/v0.2.24 successors: legacy sets and the
+    # --- one machine-local managed line. ---
 
     def make_workspace_checkout(self) -> None:
         # A real workspace checkout: the parent directory holds a workspace
@@ -390,15 +394,15 @@ class CommonHooksOwnership(unittest.TestCase):
         record = Path(os.fsdecode(INSTALLER.unquote_shell_posix_word(value)))
         self.assertIn(record.parents[4], {self.primary.resolve(), *self.primary.resolve().parents})
 
-    def test_workspace_checkout_migrates_v0220_bodies_to_current(self) -> None:
+    def assert_release_bodies_migrate(self, revision: str) -> None:
         # The real current engine writes this checkout's refusal-record value
-        # first; the v0.2.20 bodies then carry that same value, exactly as a
-        # v0.2.20 ensure in this workspace checkout would have left them.
+        # first; the release's bodies then carry that same value, exactly as
+        # that release's ensure in this workspace checkout would have left them.
         value = next(iter(self.migrated_workspace_values().values()))
         self.assertNotEqual(value, b"''")
-        self.install_legacy_bodies("a650b2034947eba87c809b1a7c9169f489aebd24", value)
+        self.install_legacy_bodies(revision, value)
         hooks = self.primary / ".git/hooks"
-        for name, digest in INSTALLER.LEGACY_MANAGED_BODY_SETS["a650b2034947eba87c809b1a7c9169f489aebd24"].items():
+        for name, digest in INSTALLER.LEGACY_MANAGED_BODY_SETS[revision].items():
             canonical, carried = INSTALLER.split_refusal_record_dir((hooks / name).read_bytes())
             self.assertEqual(hashlib.sha256(canonical).hexdigest(), digest, name)
             self.assertIn(carried, (None, value), name)
@@ -406,12 +410,24 @@ class CommonHooksOwnership(unittest.TestCase):
         self.assertEqual(len(values), 5, values)
         self.assertEqual(set(values.values()), {value})
 
-    def test_v0220_body_with_foreign_value_refuses(self) -> None:
+    def assert_release_body_with_foreign_value_refuses(self, revision: str) -> None:
         self.make_workspace_checkout()
         outside = INSTALLER.quote_shell_posix(
             b"/nonexistent-elsewhere/.repro/build/reports/managed-hook-refusals/" + b"0" * 64)
-        self.install_legacy_bodies("a650b2034947eba87c809b1a7c9169f489aebd24", outside)
+        self.install_legacy_bodies(revision, outside)
         self.assert_installer_refuses("outside the checkout and its ancestors", bootstrap=True)
+
+    def test_workspace_checkout_migrates_v0220_bodies_to_current(self) -> None:
+        self.assert_release_bodies_migrate(V0220)
+
+    def test_v0220_body_with_foreign_value_refuses(self) -> None:
+        self.assert_release_body_with_foreign_value_refuses(V0220)
+
+    def test_workspace_checkout_migrates_v0223_bodies_to_current(self) -> None:
+        self.assert_release_bodies_migrate(V0223)
+
+    def test_v0223_body_with_foreign_value_refuses(self) -> None:
+        self.assert_release_body_with_foreign_value_refuses(V0223)
 
     def rewrite_refusal_value(self, name: str, value: bytes) -> None:
         target = self.primary / ".git/hooks" / name

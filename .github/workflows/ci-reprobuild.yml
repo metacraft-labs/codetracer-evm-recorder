@@ -122,17 +122,17 @@ jobs:
           sibling-strategy: ${{ matrix.os != 'windows' && 'repro-lock' || 'auto' }}
           consumer-directory: ${{ matrix.os != 'windows' && format('{0}/codetracer-evm-recorder', env.EVM_CI_NAMESPACE) || '.' }}
           workspace-directory: ${{ matrix.os != 'windows' && env.EVM_CI_NAMESPACE || '.' }}
-          # reprobuild v0.2.23 (9dbf4e710d) on every leg, the same revision the
+          # reprobuild v0.2.24 (7c670d248) on every leg, the same revision the
           # owning flake.nix selects for the dev shell and hook factory. Unix
           # legs build that commit from source and the step below asserts it;
-          # Windows x64 installs the v0.2.23 release archive, and Windows arm64
-          # runs that x86_64 archive under emulation. v0.2.23 carries the fix
+          # Windows x64 installs the v0.2.24 release archive, and Windows arm64
+          # runs that x86_64 archive under emulation. It keeps the v0.2.23 fix
           # for the PATH-provisioned gcc probe that failed on Windows with
           # "Invalid argument", and reads the committed repro.lock schema
           # (reprobuild.solved-graph-lock.v3).
           repro-from-source: ${{ matrix.os != 'windows' && 'true' || 'false' }}
-          repro-version: v0.2.23
-          repro-build-pin: "9dbf4e710d7cc0b9a79a4bcd54c931afb6849dd0"
+          repro-version: v0.2.24
+          repro-build-pin: "7c670d248b936188f8aad689f32bb7e64522c5ac"
           gh-token: ${{ steps.ci_token.outputs.token }}
           # Keeps the Nix GitHub credential valid past the token's one-hour
           # lifetime: a job-scoped broker re-mints it while setup and the
@@ -151,7 +151,7 @@ jobs:
         run: |
           set -euo pipefail
           source_root="${GITHUB_WORKSPACE}/${EVM_CI_NAMESPACE}/.reprobuild-src"
-          test "$(git -C "$source_root" rev-parse HEAD)" = 9dbf4e710d7cc0b9a79a4bcd54c931afb6849dd0
+          test "$(git -C "$source_root" rev-parse HEAD)" = 7c670d248b936188f8aad689f32bb7e64522c5ac
           test -z "$(git -C "$source_root" status --porcelain)"
           test "$(command -v repro)" = "${source_root}/build/bin/repro"
           test "${REPROBUILD_NIX_DAEMON_BIN}" = "${source_root}/build/bin/reprobuild-nix-daemon"
