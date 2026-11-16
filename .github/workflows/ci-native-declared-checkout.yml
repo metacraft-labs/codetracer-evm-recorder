@@ -112,8 +112,16 @@ jobs:
         with:
           env-flavor: ${{ inputs.env-flavor }}
           sibling-strategy: repro-lock
+          # The Reprobuild engine is the fleet pin: the `reprobuild` input of
+          # nixos-modules' (metacraft-labs/devops-modules) flake.lock, built from source on every leg so CI runs
+          # the engine the fleet runs. The companion pins are that revision's
+          # own flake.lock entries. These literals follow nixos-modules and are
+          # replaced when the pin moves into infra.
           repro-from-source: "true"
-          repro-build-pin: "76659f5730ecf698b1963c656494d2cb66eb256d"
+          repro-build-pin: "84b459adda91535f0b89424dfc95aa34bfa67a32"
+          repro-runquota-pin: "f9e1a4d3f3ba7840aefe56883127653af9c5a608"
+          repro-io-mon-pin: "35829647d603b481276d2632b39ec2a9ce3625b2"
+          repro-stackable-hooks-pin: "c1d55ce33fb2a29e4cf8d8bdbe1713f355370d0a"
           consumer-directory: ${{ env.EVM_CI_NAMESPACE }}/codetracer-evm-recorder
           workspace-directory: ${{ env.EVM_CI_NAMESPACE }}
           gh-token: ${{ steps.app-token.outputs.token }}
