@@ -488,15 +488,17 @@ fn test_recorded_trace_via_ct_print_json() {
         "expected 33 column-aware step events for FlowTest.sol \
          (one per distinct (line, column)); counts={counts}",
     );
-    // `compute()` makes one call, to `add`.  `compute` itself is absorbed
-    // into `<toplevel>`, the call tree's root that `start` opens at depth
-    // 0 (trace-events.md, "Recorder Integration — Starting a Recording"),
-    // and the checked arithmetic is a jump into compiler-generated code,
-    // not a call.
+    // The genuine dispatcher entry is distinct from the synthetic root.
+    // Recorded-entry-identity 4fc5486 and the owning dispatcher contract require
+    // root + compute + add, with the original 33 source steps unchanged.
     assert_eq!(
         counts["calls"].as_u64(),
-        Some(2),
-        "expected 2 call events (<toplevel> + add); counts={counts}",
+        Some(3),
+        "exact root/compute/add count; counts={counts}"
+    );
+    assert_eq!(
+        doc["metadata"]["entry"],
+        serde_json::json!({"call_key":1,"function_id":1,"entry_step":3})
     );
 
     let events = doc["events"].as_array().expect("events array");
@@ -509,7 +511,7 @@ fn test_recorded_trace_via_ct_print_json() {
         .collect();
     assert_eq!(
         call_entries,
-        vec!["<toplevel>", "add"],
+        vec!["<toplevel>", "compute", "add"],
         "call_entry sequence"
     );
     let call_exits: Vec<&str> = events
@@ -517,7 +519,31 @@ fn test_recorded_trace_via_ct_print_json() {
         .filter(|e| e["kind"] == "call_exit")
         .map(|e| e["function"].as_str().unwrap_or("<unresolved>"))
         .collect();
-    assert_eq!(call_exits, vec!["add", "<toplevel>"], "call_exit sequence");
+    assert_eq!(
+        call_exits,
+        vec!["add", "compute", "<toplevel>"],
+        "call_exit sequence"
+    );
+    let calls: Vec<_> = events
+        .iter()
+        .filter(|e| e["kind"] == "call_entry")
+        .collect();
+    assert_eq!(
+        calls
+            .iter()
+            .map(|e| e["depth"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .map(|e| e["parent_call_key"].as_i64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![-1, 0, 1]
+    );
+    assert_eq!(calls[0]["children"], serde_json::json!([1]));
+    assert_eq!(calls[1]["children"], serde_json::json!([2]));
 
     // ----- Strict ValueRecord variant invariant -----------------------
     // Every step var that surfaces must carry a `value.kind` field.
