@@ -201,9 +201,10 @@ async fn test_var_tracking_diagnostic() {
     let pc_to_idx = source_map::build_pc_to_instruction_index(&runtime_bytecode);
 
     // Deploy and call run()
-    let anvil = alloy::node_bindings::Anvil::new()
-        .arg("--steps-tracing")
-        .spawn();
+    let anvil = codetracer_evm_recorder::anvil_node::spawn(
+        alloy::node_bindings::Anvil::new().arg("--steps-tracing"),
+    )
+    .expect("anvil should start");
     let rpc_url = anvil.endpoint();
     let provider = alloy::providers::ProviderBuilder::new().connect_http(rpc_url.parse().unwrap());
     use alloy::providers::Provider;

@@ -69,6 +69,7 @@ The recorder is organized into the following modules:
 - `source_fetcher.rs` — verified source code retrieval for on-chain contracts
 - `trace_fetcher.rs` — remote trace data retrieval for replay
 - `replay.rs` — on-chain transaction replay
+- `anvil_node.rs` — starting the local Anvil node for `record` and the tests
 
 ### Testing
 

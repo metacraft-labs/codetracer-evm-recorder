@@ -1,3 +1,4 @@
+pub mod anvil_node;
 pub mod call_tree;
 pub mod contract_registry;
 pub mod inspector;
