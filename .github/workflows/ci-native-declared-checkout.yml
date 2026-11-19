@@ -117,12 +117,12 @@ jobs:
         with:
           env-flavor: ${{ inputs.env-flavor }}
           sibling-strategy: repro-lock
-          # reprobuild v0.2.24 (7c670d248), the revision the owning flake.nix
+          # reprobuild v0.2.26 (b9cf09b07), the revision the owning flake.nix
           # selects. Every leg here is Unix and builds that commit from source;
           # repro-version names the same release for the record.
           repro-from-source: "true"
-          repro-version: v0.2.24
-          repro-build-pin: "7c670d248b936188f8aad689f32bb7e64522c5ac"
+          repro-version: v0.2.26
+          repro-build-pin: "b9cf09b07e2c780f314c4244e4c8df7988fc2e78"
           consumer-directory: ${{ env.EVM_CI_NAMESPACE }}/codetracer-evm-recorder
           workspace-directory: ${{ env.EVM_CI_NAMESPACE }}
           gh-token: ${{ steps.app-token.outputs.token }}

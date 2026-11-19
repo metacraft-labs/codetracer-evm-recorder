@@ -143,6 +143,16 @@ package codetracer_evm_recorder:
     # node the integration tests drive against.
     "solc"
     "foundry"
+
+    # The trace-format siblings, consumed as SOURCE: the cargo edges below
+    # read `../codetracer-trace-format` (`traceRoot`) and the Nim FFI under
+    # `../codetracer-trace-format-nim` (`nimRoot`). `uses:` is the one place
+    # a dependency is declared, so these two lines are what make
+    # `repro lock refresh` pin them in repro.lock, and CI clones every
+    # sibling from that lock: .github/sibling-repos names both, and
+    # tools/prepare-ci-trace-nim-peer.py reads the trace-format-nim entry.
+    "codetracer-trace-format >=0"
+    "codetracer-trace-format-nim >=0"
     # `choco pack` / `choco push` in .github/workflows/publish-chocolatey.yml.
     # Windows-guarded because Chocolatey is a Windows package manager with no
     # POSIX build, so an unguarded entry would fail to resolve on Linux/macOS.

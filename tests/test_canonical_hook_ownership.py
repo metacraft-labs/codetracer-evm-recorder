@@ -7,14 +7,15 @@ hook. Native installer/template/default-hook controls remain separate tests.
 The workspace cases start from the ten managed bodies a previously selected
 package actually wrote, kept byte for byte under
 tests/fixtures/legacy-managed-hooks-<revision>/: reprobuild 76659f,
-reprobuild v0.2.20 (a650b20) and reprobuild v0.2.23 (9dbf4e7). They are
-captured output, not a mock: none of these packages is part of the declared
-shell, and each fixture must hash to its role's entry in that revision's set
-in the installer's LEGACY_MANAGED_BODY_SETS before it is used, so a drifted
-fixture fails the test instead of being admitted. The v0.2.20 and v0.2.23
-fixtures are the factory bodies (refusal-record directory `''`); the
-workspace cases bake into them the value the real current engine wrote for
-the same checkout, as an ensure run of that release there would have.
+reprobuild v0.2.20 (a650b20), v0.2.23 (9dbf4e7) and v0.2.24 (7c670d2). They
+are captured output, not a mock: none of these packages is part of the
+declared shell, and each fixture must hash to its role's entry in that
+revision's set in the installer's LEGACY_MANAGED_BODY_SETS before it is used,
+so a drifted fixture fails the test instead of being admitted. The v0.2.20,
+v0.2.23 and v0.2.24 fixtures are the factory bodies (refusal-record
+directory `''`); the workspace cases bake into them the value the real
+current engine wrote for the same checkout, as an ensure run of that release
+there would have.
 """
 from __future__ import annotations
 import importlib.util
@@ -33,10 +34,12 @@ LEGACY_FIXTURES = {
     "76659f5730ecf698b1963c656494d2cb66eb256d": ROOT / "tests/fixtures/legacy-managed-hooks-76659f",
     "a650b2034947eba87c809b1a7c9169f489aebd24": ROOT / "tests/fixtures/legacy-managed-hooks-a650b20",
     "9dbf4e710d7cc0b9a79a4bcd54c931afb6849dd0": ROOT / "tests/fixtures/legacy-managed-hooks-9dbf4e7",
+    "7c670d248b936188f8aad689f32bb7e64522c5ac": ROOT / "tests/fixtures/legacy-managed-hooks-7c670d2",
 }
 # Releases whose bodies carry the machine-local refusal-record line.
 V0220 = "a650b2034947eba87c809b1a7c9169f489aebd24"
 V0223 = "9dbf4e710d7cc0b9a79a4bcd54c931afb6849dd0"
+V0224 = "7c670d248b936188f8aad689f32bb7e64522c5ac"
 # The installer imports its sibling helpers the way a script run finds them.
 sys.path.insert(0, str(ROOT / "tools"))
 SPEC = importlib.util.spec_from_file_location("owned_hook_installer", ROOT / "tools/install-canonical-hooks.py")
@@ -307,8 +310,8 @@ class CommonHooksOwnership(unittest.TestCase):
                 INSTALLER.native_install_environment(env, self.git, self.primary, self.primary / ".git/hooks")
             self.assertEqual(self.inventory(), original)
 
-    # --- Reprobuild v0.2.20/v0.2.23/v0.2.24 successors: legacy sets and the
-    # --- one machine-local managed line. ---
+    # --- Reprobuild v0.2.20/v0.2.23/v0.2.24/v0.2.26 successors: legacy sets
+    # --- and the one machine-local managed line. ---
 
     def make_workspace_checkout(self) -> None:
         # A real workspace checkout: the parent directory holds a workspace
@@ -327,13 +330,18 @@ class CommonHooksOwnership(unittest.TestCase):
         expected = INSTALLER.LEGACY_MANAGED_BODY_SETS[revision]
         names = sorted(p.name for p in fixtures.iterdir())
         self.assertEqual(names, sorted(expected))
+        # A release may leave some roles byte-identical: v0.2.24 -> v0.2.26
+        # changed only the five `.repro-managed` bodies, not the dispatchers.
+        # Such a role is simply current. The set as a whole must still differ
+        # from the current one, or a migration from it would prove nothing.
+        self.assertTrue(
+            any(expected[name] != INSTALLER.KNOWN_MANAGED_BODIES.get(name) for name in names),
+            f"legacy {revision[:7]} bodies all equal the current ones")
         for name in names:
             body = (fixtures / name).read_bytes()
             self.assertEqual(
                 hashlib.sha256(body).hexdigest(), expected[name],
                 f"legacy fixture is not the qualified {revision[:7]} body: {name}")
-            self.assertNotEqual(expected[name], INSTALLER.KNOWN_MANAGED_BODIES.get(name),
-                                f"legacy {revision[:7]} body equals the current one: {name}")
             if value is not None and INSTALLER.split_refusal_record_dir(body)[1] is not None:
                 body = INSTALLER.render_refusal_record_dir(body, value)
             (hooks / name).write_bytes(body)
@@ -428,6 +436,12 @@ class CommonHooksOwnership(unittest.TestCase):
 
     def test_v0223_body_with_foreign_value_refuses(self) -> None:
         self.assert_release_body_with_foreign_value_refuses(V0223)
+
+    def test_workspace_checkout_migrates_v0224_bodies_to_current(self) -> None:
+        self.assert_release_bodies_migrate(V0224)
+
+    def test_v0224_body_with_foreign_value_refuses(self) -> None:
+        self.assert_release_body_with_foreign_value_refuses(V0224)
 
     def rewrite_refusal_value(self, name: str, value: bytes) -> None:
         target = self.primary / ".git/hooks" / name
