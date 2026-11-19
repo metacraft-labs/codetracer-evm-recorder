@@ -106,12 +106,14 @@ jobs:
           printf '%s\n' "$git_root/bin" >> "$GITHUB_PATH"
 
       - name: Setup dev env
-        # setup-dev-env c5ca015a accepts repro-version (from a515a0a1; the
-        # earlier 142b12da did not), hands the job credential broker's token
-        # to the steps after the repro CLI install, and replaces an inherited
-        # credential header instead of adding a second one (fa2c1803), which
-        # GitHub refused with 'Duplicate header: "Authorization"'.
-        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@c5ca015a90187db28decba4ae656fe23b64e7fa6
+        # setup-dev-env 5b9aecc: the source-built Reprobuild's RunQuota, io-mon
+        # and hook-library siblings default to the revisions that
+        # repro-build-pin's flake.lock records (reprobuild-provision f283d45),
+        # not to their `dev` tips: b9cf09b07 locks RunQuota 98ea3e58, whose
+        # runquota_client/pressure_text and runquota_core/cpu_profile
+        # `runquota@dev` lacks. It keeps c5ca015a's repro-version support,
+        # credential broker and single credential header.
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@5b9aeccf2027f74034229566ee51a59f1287e756
         env:
           EVM_CI_GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
         with:

@@ -153,6 +153,17 @@ package codetracer_evm_recorder:
     # tools/prepare-ci-trace-nim-peer.py reads the trace-format-nim entry.
     "codetracer-trace-format >=0"
     "codetracer-trace-format-nim >=0"
+
+    # The siblings the wdio-integration job (.github/workflows/
+    # cross-repo-tests.yml) clones beside this checkout to run the VS Code
+    # extension's Solidity tests against this recorder: `codetracer` for the
+    # `ct` binary it builds, `codetracer-vscode-extension` for the test
+    # harness and fixtures. No edge of this recipe reads them, but the job's
+    # `setup-dev-env` clones each bare-named sibling at the revision this
+    # repo's committed repro.lock pins and refuses one the lock does not pin,
+    # and the lock's dependency set comes from `uses:` alone.
+    "codetracer >=0"
+    "codetracer-vscode-extension >=0"
     # `choco pack` / `choco push` in .github/workflows/publish-chocolatey.yml.
     # Windows-guarded because Chocolatey is a Windows package manager with no
     # POSIX build, so an unguarded entry would fail to resolve on Linux/macOS.
