@@ -8,6 +8,9 @@
 #     codetracer-evm-recorder/                      <-- this repo (checked out)
 #     codetracer/                    <-- cloned (for ct binary)
 #     codetracer-vscode-extension/   <-- cloned (test harness + fixtures)
+#     codetracer-trace-format/       <-- cloned (Cargo path dependency)
+#     codetracer-trace-format-nim/   <-- cloned (Nim FFI, recipe import)
+#     reprobuild-packages/           <-- cloned (package catalog, see below)
 
 name: Cross-Repo Integration Tests
 
@@ -99,6 +102,13 @@ jobs:
         # checkout at workspace-lock-pinned revisions. workflow_dispatch /
         # repository_dispatch ref inputs override the locked revision for
         # codetracer + the extension (empty => lock).
+        # reprobuild-packages: prepare-solidity-fixture.sh builds this
+        # recorder through `repro exec`, which compiles this repo's repro.nim
+        # and, through its `uses: "codetracer >=0"`, ../codetracer/repro.nim.
+        # That recipe names packages the reprobuild-packages catalog defines
+        # (`shellcheck`, `sqlite3`, ...), and the compile finds the catalog
+        # only beside a checkout. repro.lock pins it, so it is cloned at
+        # that revision.
         # setup-dev-env 5b9aecc, the revision ci-reprobuild.yml and
         # ci-native-declared-checkout.yml pin, so one action revision serves
         # every workflow of this repository.
@@ -123,6 +133,7 @@ jobs:
             codetracer-vscode-extension=${{ github.event.inputs.vscode_extension_ref || github.event.client_payload.vscode_extension_ref }}
             codetracer-trace-format
             codetracer-trace-format-nim
+            reprobuild-packages
 
       - name: Provide codetracer-trace-format into codetracer/libs (CI override)
         # The codetracer Build step below uses
