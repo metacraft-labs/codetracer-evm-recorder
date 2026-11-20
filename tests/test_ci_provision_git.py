@@ -196,11 +196,24 @@ class JobCredentialBroker(unittest.TestCase):
         process.wait()
         self.assertEqual(self.token(), self.JOB_START)
 
-    def test_unrelated_live_process_owns_nothing(self):
+    def test_unrelated_live_process_per_platform_contract(self):
+        """A reused pid: what the broker's pid file names is someone else.
+
+        The contract differs by platform, as in the reference implementation
+        (metacraft-github-actions refresh-build-auth/job-credentials.cjs
+        isBrokerProcess, and setup-nix's broker_owns_token). With procfs the
+        argument vector is checked, so an unrelated live process owns
+        nothing. Without procfs (macOS) liveness alone decides, so the same
+        process is taken for the broker and its token is used. Each branch
+        is asserted on the platform where it applies; neither is skipped.
+        """
         process = self.start(
             [sys.executable, "-c", "import time; time.sleep(1e9)"])
         (self.dir / "broker.pid").write_text("%d\n" % process.pid)
-        self.assertEqual(self.token(), self.JOB_START)
+        if os.path.exists("/proc/self"):
+            self.assertEqual(self.token(), self.JOB_START)
+        else:
+            self.assertEqual(self.token(), self.FRESH)
 
     def test_malformed_pid_owns_nothing(self):
         process = self.start_broker()
