@@ -154,16 +154,19 @@ package codetracer_evm_recorder:
     "codetracer-trace-format >=0"
     "codetracer-trace-format-nim >=0"
 
-    # The siblings the wdio-integration job (.github/workflows/
-    # cross-repo-tests.yml) clones beside this checkout to run the VS Code
-    # extension's Solidity tests against this recorder: `codetracer` for the
-    # `ct` binary it builds, `codetracer-vscode-extension` for the test
-    # harness and fixtures. No edge of this recipe reads them, but the job's
-    # `setup-dev-env` clones each bare-named sibling at the revision this
-    # repo's committed repro.lock pins and refuses one the lock does not pin,
-    # and the lock's dependency set comes from `uses:` alone.
-    "codetracer >=0"
-    "codetracer-vscode-extension >=0"
+    # Not here: `codetracer` and `codetracer-vscode-extension`, the siblings
+    # the wdio-integration job (.github/workflows/cross-repo-tests.yml)
+    # clones to run the VS Code extension's Solidity tests against this
+    # recorder. No edge of this recipe reads them. A `uses:` entry would pin
+    # them in repro.lock, but it also compiles each one's recipe into this
+    # one's: every `repro exec` and typed CI leg then needs codetracer's
+    # catalog packages, and on a CI runner that builds reprobuild in its
+    # workspace the provider compile exceeded the Nim VM's loop budget
+    # inside codetracer's recipe (CI run 44698767694). The job pins both by
+    # commit in its `siblings:` input instead (reprobuild-pm issue
+    # 2026-11-20-pinning-a-ci-cloned-sibling-through-uses-folds-its-recipe-
+    # into-the-consumers-compile.md asks for a lock-pinned declaration that
+    # is not folded in).
     # `choco pack` / `choco push` in .github/workflows/publish-chocolatey.yml.
     # Windows-guarded because Chocolatey is a Windows package manager with no
     # POSIX build, so an unguarded entry would fail to resolve on Linux/macOS.

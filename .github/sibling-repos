@@ -2,12 +2,3 @@
 # revisions (see codetracer-specs/Testing/Cross-Repo-CI-Integration.md).
 codetracer-trace-format
 codetracer-trace-format-nim
-# The reprobuild-packages catalog. repro.nim's `uses: "codetracer >=0"`
-# compiles ../codetracer/repro.nim into this recipe, and that recipe names
-# catalog packages (`shellcheck`, `sqlite3`, ...) that reprobuild's stdlib no
-# longer bundles, so every `repro exec` here needs the catalog beside the
-# checkout. repro.lock already pins it, but `repro develop --all` does not
-# clone it (runquota's flake.nix pins it by recipe, which a bulk selection
-# never substitutes); a declared entry is what hands it to clone-siblings at
-# the committed lock revision.
-reprobuild-packages

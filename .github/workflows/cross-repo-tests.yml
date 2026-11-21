@@ -99,16 +99,14 @@ jobs:
 
       - name: Setup dev env
         # Installs nix and clones the cross-repo siblings adjacent to this
-        # checkout at workspace-lock-pinned revisions. workflow_dispatch /
-        # repository_dispatch ref inputs override the locked revision for
-        # codetracer + the extension (empty => lock).
-        # reprobuild-packages: prepare-solidity-fixture.sh builds this
-        # recorder through `repro exec`, which compiles this repo's repro.nim
-        # and, through its `uses: "codetracer >=0"`, ../codetracer/repro.nim.
-        # That recipe names packages the reprobuild-packages catalog defines
-        # (`shellcheck`, `sqlite3`, ...), and the compile finds the catalog
-        # only beside a checkout. repro.lock pins it, so it is cloned at
-        # that revision.
+        # checkout. The trace-format pair comes at the revisions this
+        # commit's repro.lock pins. codetracer and the extension are pinned
+        # by commit here, because no edge of this recipe uses them, and a
+        # `uses:` entry, the only way into the lock, would compile their
+        # recipes into this one (repro.nim, beside the trace-format
+        # entries). Move these two pins by hand, to commits published on
+        # their repositories; workflow_dispatch / repository_dispatch ref
+        # inputs override them.
         # setup-dev-env 5b9aecc, the revision ci-reprobuild.yml and
         # ci-native-declared-checkout.yml pin, so one action revision serves
         # every workflow of this repository.
@@ -129,11 +127,10 @@ jobs:
           attic-cache: ${{ vars.ATTIC_CACHE }}
           attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
           siblings: |
-            codetracer=${{ github.event.inputs.codetracer_ref || github.event.client_payload.codetracer_ref }}
-            codetracer-vscode-extension=${{ github.event.inputs.vscode_extension_ref || github.event.client_payload.vscode_extension_ref }}
+            codetracer=${{ github.event.inputs.codetracer_ref || github.event.client_payload.codetracer_ref || '2fdff9ce086a08ee07a4e86809bf68be2ed483fb' }}
+            codetracer-vscode-extension=${{ github.event.inputs.vscode_extension_ref || github.event.client_payload.vscode_extension_ref || 'bbc66cb8ed48ef0cadbaf3ecc74a43082fb5c204' }}
             codetracer-trace-format
             codetracer-trace-format-nim
-            reprobuild-packages
 
       - name: Provide codetracer-trace-format into codetracer/libs (CI override)
         # The codetracer Build step below uses
