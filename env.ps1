@@ -54,8 +54,8 @@ if ($env:WINDOWS_DIY_CL_EXE -and (Test-Path $env:WINDOWS_DIY_CL_EXE)) {
 
 # --- 3. solc + Foundry (anvil) ----------------------------------------------
 $devDepsRoot = if ($env:WINDOWS_DIY_INSTALL_ROOT) { $env:WINDOWS_DIY_INSTALL_ROOT }
-               elseif (Test-Path "D:\") { "D:\metacraft-dev-deps" }
-               else { Join-Path $env:LOCALAPPDATA "codetracer\windows-diy" }
+                elseif (Test-Path "D:\") { "D:\metacraft-dev-deps" }
+                else { Join-Path $env:LOCALAPPDATA "codetracer\windows-diy" }
 
 # solc -- the Nix dev shell pins 0.8.28; the `contracts/*.sol` fixtures only
 # require `pragma solidity ^0.8.0`.

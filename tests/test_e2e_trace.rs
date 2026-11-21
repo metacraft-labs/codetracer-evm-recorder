@@ -92,9 +92,10 @@ async fn test_e2e_trace() {
     // 2. Spawn anvil
     // `--steps-tracing` is required for debug_traceTransaction to return non-empty
     // structLogs in foundry/anvil >= 1.5.0. Without it, structLogs is always empty.
-    let anvil = alloy::node_bindings::Anvil::new()
-        .arg("--steps-tracing")
-        .spawn();
+    let anvil = codetracer_evm_recorder::anvil_node::spawn(
+        alloy::node_bindings::Anvil::new().arg("--steps-tracing"),
+    )
+    .expect("anvil should start");
     let rpc_url = anvil.endpoint();
 
     // 3. Deploy the contract

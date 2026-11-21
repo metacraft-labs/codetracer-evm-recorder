@@ -26,6 +26,22 @@ pub struct StepData {
     pub stack: Vec<U256>,
     /// Memory size before the instruction executes.
     pub memory_size: usize,
+    /// Gas remaining before the instruction executes.
+    ///
+    /// Mirrors a `debug_traceTransaction` structLog's `gas` field, which is
+    /// also sampled before the opcode runs.
+    pub gas: u64,
+    /// Contents of the current call frame's memory before the instruction
+    /// executes — `Some` only when the inspector was built with
+    /// [`CodeTracerInspector::with_memory_capture`].
+    ///
+    /// This is the one field the on-chain route cannot reconstruct after the
+    /// fact: the recorder reads memory to decode `string` / `bytes` values
+    /// and `LOG*` payloads, and memory is destroyed as execution proceeds.
+    /// It is opt-in because copying the frame's memory at every step is the
+    /// dominant cost of a replay — the same reason geth gates it behind
+    /// `enableMemory`.
+    pub memory: Option<Vec<u8>>,
 }
 
 /// A call / create event captured by the inspector.
@@ -36,11 +52,20 @@ pub struct CallData {
     /// Caller address.
     pub caller: Address,
     /// Target (callee) address, or Address::ZERO for CREATEs (address unknown before execution).
+    /// For DELEGATECALL and CALLCODE this is the CONTEXT the frame runs in (the caller's
+    /// storage and balance), not the contract whose code runs: see [`Self::code_address`].
     pub target: Address,
+    /// The address whose bytecode the frame executes. Equal to `target` for CALL and
+    /// STATICCALL; the implementation for DELEGATECALL and CALLCODE; Address::ZERO for
+    /// CREATEs, whose code is `init_code`.
+    pub code_address: Address,
     /// Value transferred (zero for static / delegate calls).
     pub value: U256,
     /// Gas limit passed to the callee.
     pub gas_limit: u64,
+    /// The initcode a CREATE / CREATE2 frame runs; `None` for calls.  A creation's
+    /// code is not at any address while it runs, so this is the only place it exists.
+    pub init_code: Option<alloy::primitives::Bytes>,
 }
 
 /// Distinguishes between CALL variants and CREATE variants.
@@ -95,24 +120,48 @@ impl ExecutionData {
 /// Inspector that records every EVM execution event into an `ExecutionData`
 /// buffer for post-execution processing.
 ///
-/// Usage:
-/// ```ignore
-/// let mut inspector = CodeTracerInspector::new();
-/// // ... run EVM with this inspector ...
+/// Collection API usage. Running an actual EVM requires host integration
+/// that installs this inspector on the execution context.
+/// ```
+/// use codetracer_evm_recorder::inspector::CodeTracerInspector;
+/// let inspector = CodeTracerInspector::new();
 /// let data = inspector.into_execution_data();
-/// // process data.steps, data.calls, data.logs etc.
+/// assert!(data.is_empty());
+/// assert_eq!(data.step_count(), 0);
 /// ```
 #[derive(Debug, Default)]
 pub struct CodeTracerInspector {
     data: ExecutionData,
     /// Current call depth (incremented on call/create, decremented on call_end/create_end).
     current_depth: u64,
+    /// Whether to copy the frame's memory into every [`StepData`].
+    capture_memory: bool,
+    /// `data.logs.len()` at the entry of every open call / create frame. A frame that does
+    /// not succeed discards the logs it and its children emitted, exactly as the EVM
+    /// discards them, so the captured logs are the ones the receipt can carry.
+    log_marks: Vec<usize>,
 }
 
 impl CodeTracerInspector {
-    /// Create a new, empty inspector.
+    /// Create a new, empty inspector.  Memory is NOT captured; see
+    /// [`Self::with_memory_capture`].
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create an inspector that copies the executing frame's memory into
+    /// every captured step.
+    ///
+    /// Required by the on-chain route: the structLog shape the recorder
+    /// consumes carries memory, and `debug_traceTransaction` is refused by
+    /// the public endpoints that serve the archive reads the replay needs
+    /// (measured; see `replay.rs`).  So the memory a tracer would have
+    /// supplied has to be captured here instead.
+    pub fn with_memory_capture() -> Self {
+        Self {
+            capture_memory: true,
+            ..Self::default()
+        }
     }
 
     /// Consume the inspector and return the collected execution data.
@@ -151,6 +200,16 @@ where
         // Clone the full stack (bottom-to-top ordering).
         let stack: Vec<U256> = interp.stack.data().to_vec();
         let memory_size = interp.memory.size();
+        let gas = interp.gas.remaining();
+        let memory = if self.capture_memory {
+            Some(if memory_size == 0 {
+                Vec::new()
+            } else {
+                interp.memory.slice(0..memory_size).to_vec()
+            })
+        } else {
+            None
+        };
 
         self.data.steps.push(StepData {
             pc,
@@ -159,11 +218,14 @@ where
             depth: self.current_depth,
             stack,
             memory_size,
+            gas,
+            memory,
         });
     }
 
     fn call(&mut self, _context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
         self.current_depth += 1;
+        self.log_marks.push(self.data.logs.len());
 
         let kind = match inputs.scheme {
             CallScheme::Call => CallKind::Call,
@@ -183,14 +245,24 @@ where
             kind,
             caller: inputs.caller,
             target: inputs.target_address,
+            code_address: inputs.bytecode_address,
             value,
             gas_limit: inputs.gas_limit,
+            init_code: None,
         });
 
         None // don't override the call result
     }
 
-    fn call_end(&mut self, _context: &mut CTX, _inputs: &CallInputs, _outcome: &mut CallOutcome) {
+    fn call_end(&mut self, _context: &mut CTX, _inputs: &CallInputs, outcome: &mut CallOutcome) {
+        // A reverted or failed frame's logs never reach the receipt. Counting them made 14
+        // reverted transactions in BlockTracer's pinned yield windows read "0 logs on chain,
+        // N replayed" while status and gas agreed.
+        if let Some(mark) = self.log_marks.pop()
+            && !outcome.result.is_ok()
+        {
+            self.data.logs.truncate(mark);
+        }
         if self.current_depth > 0 {
             self.current_depth -= 1;
         }
@@ -198,6 +270,7 @@ where
 
     fn create(&mut self, _context: &mut CTX, inputs: &mut CreateInputs) -> Option<CreateOutcome> {
         self.current_depth += 1;
+        self.log_marks.push(self.data.logs.len());
 
         let kind = match inputs.scheme() {
             revm::interpreter::CreateScheme::Create => CallKind::Create,
@@ -211,8 +284,10 @@ where
             kind,
             caller: inputs.caller(),
             target: Address::ZERO,
+            code_address: Address::ZERO,
             value: inputs.value(),
             gas_limit: inputs.gas_limit(),
+            init_code: Some(inputs.init_code().clone()),
         });
 
         None
@@ -222,8 +297,13 @@ where
         &mut self,
         _context: &mut CTX,
         _inputs: &CreateInputs,
-        _outcome: &mut CreateOutcome,
+        outcome: &mut CreateOutcome,
     ) {
+        if let Some(mark) = self.log_marks.pop()
+            && !outcome.result.is_ok()
+        {
+            self.data.logs.truncate(mark);
+        }
         if self.current_depth > 0 {
             self.current_depth -= 1;
         }
