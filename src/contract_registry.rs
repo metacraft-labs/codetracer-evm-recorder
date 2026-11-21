@@ -18,6 +18,7 @@ use crate::storage_layout::StorageLayout;
 // ---------------------------------------------------------------------------
 
 /// Compilation artifacts for a single deployed contract.
+#[derive(Clone)]
 pub struct ContractArtifacts {
     /// Human-readable contract name.
     pub name: String,
@@ -104,6 +105,17 @@ impl ContractRegistry {
             return self.contracts.get(default_addr);
         }
         None
+    }
+
+    /// Mutably look up artifacts registered for EXACTLY `address`.
+    ///
+    /// Unlike [`Self::get`] this does not fall back to the default, because
+    /// its callers edit one address's artifacts in place — the on-chain
+    /// route rewrites `source_paths` after materialising the recovered
+    /// sources into the trace directory — and editing the default's
+    /// artifacts under another address's name would corrupt both.
+    pub fn get_mut(&mut self, address: &Address) -> Option<&mut ContractArtifacts> {
+        self.contracts.get_mut(address)
     }
 
     /// Look up artifacts for a DELEGATECALL.

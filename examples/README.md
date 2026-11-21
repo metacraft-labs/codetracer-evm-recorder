@@ -95,7 +95,7 @@ In the GUI you should see:
   the first statement of `run()`.
 - **Variables panel** — initially empty inside `run()`. As you step, `x`,
   then `y`, then `z` appear with their literal values.
-- **Step Over (F10)** — *here is the key bit:* even though `x`, `y`, and
+- **Step Over (F10)** — _here is the key bit:_ even though `x`, `y`, and
   `z` are declared on the same source line, the recorder emits a
   separate step event for each statement. Pressing `F10` advances one
   statement at a time, with the cursor visibly hopping across the

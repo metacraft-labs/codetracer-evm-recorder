@@ -13,15 +13,15 @@ name: publish-chocolatey
 
 on:
   push:
-    tags: ['v*']
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       version:
-        description: 'Recorder semver that was released to GitHub'
+        description: "Recorder semver that was released to GitHub"
         required: true
-        default: '0.1.0'
+        default: "0.1.0"
       dry_run:
-        description: 'Build the .nupkg but skip the push'
+        description: "Build the .nupkg but skip the push"
         required: false
         type: boolean
         default: false

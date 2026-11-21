@@ -25,7 +25,7 @@ concurrency:
 
 jobs:
   ci:
-    uses: metacraft-labs/devops-modules/.github/workflows/reusable-recorder-ci.yml@dev
+    uses: ./.github/workflows/ci-native-declared-checkout.yml
     with:
       prepare-recipe: prepare-ci
     secrets: inherit
