@@ -126,7 +126,8 @@ async fn trace_onchain_writes_a_container_the_nim_reader_opens() {
     }
 
     use alloy::node_bindings::Anvil;
-    let anvil = Anvil::new().spawn();
+    let anvil =
+        codetracer_evm_recorder::anvil_node::spawn(Anvil::new()).expect("anvil should start");
     let rpc_url = anvil.endpoint();
 
     let signer: PrivateKeySigner = anvil.keys()[0].clone().into();
@@ -301,7 +302,8 @@ async fn the_preceding_transactions_in_the_block_are_replayed() {
     }
 
     use alloy::node_bindings::Anvil;
-    let anvil = Anvil::new().spawn();
+    let anvil =
+        codetracer_evm_recorder::anvil_node::spawn(Anvil::new()).expect("anvil should start");
     let rpc_url = anvil.endpoint();
 
     let signer: PrivateKeySigner = anvil.keys()[0].clone().into();
@@ -443,7 +445,8 @@ async fn without_the_disassembly_fallback_the_container_records_no_opcodes() {
     }
 
     use alloy::node_bindings::Anvil;
-    let anvil = Anvil::new().spawn();
+    let anvil =
+        codetracer_evm_recorder::anvil_node::spawn(Anvil::new()).expect("anvil should start");
     let rpc_url = anvil.endpoint();
 
     let signer: PrivateKeySigner = anvil.keys()[0].clone().into();

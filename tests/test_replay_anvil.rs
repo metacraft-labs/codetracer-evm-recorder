@@ -97,7 +97,8 @@ async fn test_replay_anvil() {
     // ------------------------------------------------------------------ //
     use alloy::node_bindings::Anvil;
 
-    let anvil = Anvil::new().spawn();
+    let anvil =
+        codetracer_evm_recorder::anvil_node::spawn(Anvil::new()).expect("anvil should start");
     let rpc_url = anvil.endpoint();
 
     // Set up wallet with first anvil account

@@ -110,9 +110,9 @@ package codetracer_evm_recorder:
     # zstd.h + libzstd for the sibling ct-print edge
     # (``build_writer_artifacts.buildCtPrint`` compiles and links against
     # them; ``zstd`` is the CLI only). The constructor cannot provision a
-    # tool from inside ``build:`` and refuses a recipe that omits it.
-    when not defined(windows):
-      "zstd-dev"
+    # tool from inside ``build:`` and refuses a recipe that omits it. On
+    # Windows it is the MinGW libzstd the GCC-built ct-print links.
+    "zstd-dev"
 
     # pkg-config + OpenSSL — openssl-sys consults pkg-config to find
     # OpenSSL on Linux/macOS. The Windows build uses the rustls-tls
@@ -131,7 +131,11 @@ package codetracer_evm_recorder:
     "git"
     when defined(windows):
       # The owning ctPrint producer uses GCC independently of Cargo MSVC.
-      "gcc"
+      # A range, so that path mode refuses an old gcc found first on PATH
+      # (a Windows runner lists Free Pascal's gcc 2.95 ahead of a usable one,
+      # which fails every C compile with "<header>: Invalid argument") and
+      # falls through to the declared archive (WinLibs).
+      "gcc >=12"
 
     # Language-specific compiler / runtime tools. ``solc`` compiles the
     # Solidity test fixtures the integration tests record against;
@@ -139,6 +143,30 @@ package codetracer_evm_recorder:
     # node the integration tests drive against.
     "solc"
     "foundry"
+
+    # The trace-format siblings, consumed as SOURCE: the cargo edges below
+    # read `../codetracer-trace-format` (`traceRoot`) and the Nim FFI under
+    # `../codetracer-trace-format-nim` (`nimRoot`). `uses:` is the one place
+    # a dependency is declared, so these two lines are what make
+    # `repro lock refresh` pin them in repro.lock, and CI clones every
+    # sibling from that lock: .github/sibling-repos names both, and
+    # tools/prepare-ci-trace-nim-peer.py reads the trace-format-nim entry.
+    "codetracer-trace-format >=0"
+    "codetracer-trace-format-nim >=0"
+
+    # Not here: `codetracer` and `codetracer-vscode-extension`, the siblings
+    # the wdio-integration job (.github/workflows/cross-repo-tests.yml)
+    # clones to run the VS Code extension's Solidity tests against this
+    # recorder. No edge of this recipe reads them. A `uses:` entry would pin
+    # them in repro.lock, but it also compiles each one's recipe into this
+    # one's: every `repro exec` and typed CI leg then needs codetracer's
+    # catalog packages, and on a CI runner that builds reprobuild in its
+    # workspace the provider compile exceeded the Nim VM's loop budget
+    # inside codetracer's recipe (CI run 44698767694). The job pins both by
+    # commit in its `siblings:` input instead (reprobuild-pm issue
+    # 2026-11-20-pinning-a-ci-cloned-sibling-through-uses-folds-its-recipe-
+    # into-the-consumers-compile.md asks for a lock-pinned declaration that
+    # is not folded in).
     # `choco pack` / `choco push` in .github/workflows/publish-chocolatey.yml.
     # Windows-guarded because Chocolatey is a Windows package manager with no
     # POSIX build, so an unguarded entry would fail to resolve on Linux/macOS.

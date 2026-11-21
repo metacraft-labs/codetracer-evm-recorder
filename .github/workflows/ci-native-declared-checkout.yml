@@ -78,7 +78,7 @@ jobs:
           owner: metacraft-labs
 
       - name: Setup declared Nix before shell activation
-        uses: metacraft-labs/metacraft-github-actions/setup-nix@3fcbb26dd920adf6ccc64a87c6d24797ab0b5d94
+        uses: metacraft-labs/metacraft-github-actions/setup-nix@c5ca015a90187db28decba4ae656fe23b64e7fa6
         with:
           substituters: ${{ vars.SUBSTITUTERS }}
           trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
@@ -106,25 +106,33 @@ jobs:
           printf '%s\n' "$git_root/bin" >> "$GITHUB_PATH"
 
       - name: Setup dev env
-        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@142b12da267e48d7322960aa77ec33d7761f9082
+        # setup-dev-env 5b9aecc: the source-built Reprobuild's RunQuota, io-mon
+        # and hook-library siblings default to the revisions that
+        # repro-build-pin's flake.lock records (reprobuild-provision f283d45),
+        # not to their `dev` tips: b9cf09b07 locks RunQuota 98ea3e58, whose
+        # runquota_client/pressure_text and runquota_core/cpu_profile
+        # `runquota@dev` lacks. It keeps c5ca015a's repro-version support,
+        # credential broker and single credential header.
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@5b9aeccf2027f74034229566ee51a59f1287e756
         env:
           EVM_CI_GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
         with:
           env-flavor: ${{ inputs.env-flavor }}
           sibling-strategy: repro-lock
-          # The Reprobuild engine is the fleet pin: the `reprobuild` input of
-          # nixos-modules' (metacraft-labs/devops-modules) flake.lock, built from source on every leg so CI runs
-          # the engine the fleet runs. The companion pins are that revision's
-          # own flake.lock entries. These literals follow nixos-modules and are
-          # replaced when the pin moves into infra.
+          # reprobuild v0.2.26 (b9cf09b07), the revision the owning flake.nix
+          # selects. Every leg here is Unix and builds that commit from source;
+          # repro-version names the same release for the record.
           repro-from-source: "true"
-          repro-build-pin: "84b459adda91535f0b89424dfc95aa34bfa67a32"
-          repro-runquota-pin: "f9e1a4d3f3ba7840aefe56883127653af9c5a608"
-          repro-io-mon-pin: "35829647d603b481276d2632b39ec2a9ce3625b2"
-          repro-stackable-hooks-pin: "c1d55ce33fb2a29e4cf8d8bdbe1713f355370d0a"
+          repro-version: v0.2.26
+          repro-build-pin: "b9cf09b07e2c780f314c4244e4c8df7988fc2e78"
           consumer-directory: ${{ env.EVM_CI_NAMESPACE }}/codetracer-evm-recorder
           workspace-directory: ${{ env.EVM_CI_NAMESPACE }}
           gh-token: ${{ steps.app-token.outputs.token }}
+          # Keeps the Nix GitHub credential valid past the token's one-hour
+          # lifetime: a job-scoped broker re-mints it while setup and the
+          # build run (setup-dev-env app-id / app-private-key).
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          app-private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
           substituters: ${{ vars.SUBSTITUTERS }}
           trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
           attic-token: ${{ secrets.ATTIC_TOKEN }}

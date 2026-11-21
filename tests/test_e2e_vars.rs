@@ -105,6 +105,8 @@ fn selector(sig: &str) -> [u8; 4] {
 /// Helper: deploy contract and call function, returning struct logs.
 ///
 /// Handles the full cycle: spawn anvil, deploy, send tx, fetch trace.
+/// Each test owns its own Anvil (stopped when the helper is dropped), started
+/// through `anvil_node::spawn`.
 struct TraceHelper {
     _anvil: alloy::node_bindings::AnvilInstance,
     rpc_url: String,
@@ -114,9 +116,10 @@ struct TraceHelper {
 
 impl TraceHelper {
     async fn new() -> Self {
-        let anvil = alloy::node_bindings::Anvil::new()
-            .arg("--steps-tracing")
-            .spawn();
+        let anvil = codetracer_evm_recorder::anvil_node::spawn(
+            alloy::node_bindings::Anvil::new().arg("--steps-tracing"),
+        )
+        .expect("anvil should start");
         let rpc_url = anvil.endpoint();
         let provider = ProviderBuilder::new().connect_http(rpc_url.parse().unwrap());
         let accounts = provider.get_accounts().await.unwrap();

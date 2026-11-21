@@ -3,6 +3,19 @@
 Each case owns a temporary primary/linked worktree populated with the actual
 owning declaration bytes. It never changes the production checkout or a user
 hook. Native installer/template/default-hook controls remain separate tests.
+
+The workspace cases start from the ten managed bodies a previously selected
+package actually wrote, kept byte for byte under
+tests/fixtures/legacy-managed-hooks-<revision>/: reprobuild 76659f,
+reprobuild v0.2.20 (a650b20), v0.2.23 (9dbf4e7) and v0.2.24 (7c670d2). They
+are captured output, not a mock: none of these packages is part of the
+declared shell, and each fixture must hash to its role's entry in that
+revision's set in the installer's LEGACY_MANAGED_BODY_SETS before it is used,
+so a drifted fixture fails the test instead of being admitted. The v0.2.20,
+v0.2.23 and v0.2.24 fixtures are the factory bodies (refusal-record
+directory `''`); the workspace cases bake into them the value the real
+current engine wrote for the same checkout, as an ensure run of that release
+there would have.
 """
 from __future__ import annotations
 import importlib.util
@@ -12,10 +25,23 @@ import stat
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+LEGACY_FIXTURES = {
+    "76659f5730ecf698b1963c656494d2cb66eb256d": ROOT / "tests/fixtures/legacy-managed-hooks-76659f",
+    "a650b2034947eba87c809b1a7c9169f489aebd24": ROOT / "tests/fixtures/legacy-managed-hooks-a650b20",
+    "9dbf4e710d7cc0b9a79a4bcd54c931afb6849dd0": ROOT / "tests/fixtures/legacy-managed-hooks-9dbf4e7",
+    "7c670d248b936188f8aad689f32bb7e64522c5ac": ROOT / "tests/fixtures/legacy-managed-hooks-7c670d2",
+}
+# Releases whose bodies carry the machine-local refusal-record line.
+V0220 = "a650b2034947eba87c809b1a7c9169f489aebd24"
+V0223 = "9dbf4e710d7cc0b9a79a4bcd54c931afb6849dd0"
+V0224 = "7c670d248b936188f8aad689f32bb7e64522c5ac"
+# The installer imports its sibling helpers the way a script run finds them.
+sys.path.insert(0, str(ROOT / "tools"))
 SPEC = importlib.util.spec_from_file_location("owned_hook_installer", ROOT / "tools/install-canonical-hooks.py")
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError("missing actual owning installer module")
@@ -283,6 +309,187 @@ class CommonHooksOwnership(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "ambiguous inherited"):
                 INSTALLER.native_install_environment(env, self.git, self.primary, self.primary / ".git/hooks")
             self.assertEqual(self.inventory(), original)
+
+    # --- Reprobuild v0.2.20/v0.2.23/v0.2.24/v0.2.26 successors: legacy sets
+    # --- and the one machine-local managed line. ---
+
+    def make_workspace_checkout(self) -> None:
+        # A real workspace checkout: the parent directory holds a workspace
+        # .repro/ and the repository commits its own repro.lock, so
+        # `repro hooks ensure` bakes a non-empty refusal-record directory.
+        (self.base / ".repro").mkdir()
+        shutil.copyfile(ROOT / "repro.lock", self.primary / "repro.lock")
+        self.command("add", "--", "repro.lock")
+        self.command("commit", "-q", "-m", "Commit the workspace lock")
+
+    def install_legacy_bodies(self, revision: str, value: bytes | None = None) -> None:
+        """Write one revision's captured legacy bodies, optionally baking `value`
+        into the refusal-record assignment of each body that carries one."""
+        hooks = self.primary / ".git/hooks"
+        fixtures = LEGACY_FIXTURES[revision]
+        expected = INSTALLER.LEGACY_MANAGED_BODY_SETS[revision]
+        names = sorted(p.name for p in fixtures.iterdir())
+        self.assertEqual(names, sorted(expected))
+        # A release may leave some roles byte-identical: v0.2.24 -> v0.2.26
+        # changed only the five `.repro-managed` bodies, not the dispatchers.
+        # Such a role is simply current. The set as a whole must still differ
+        # from the current one, or a migration from it would prove nothing.
+        self.assertTrue(
+            any(expected[name] != INSTALLER.KNOWN_MANAGED_BODIES.get(name) for name in names),
+            f"legacy {revision[:7]} bodies all equal the current ones")
+        for name in names:
+            body = (fixtures / name).read_bytes()
+            self.assertEqual(
+                hashlib.sha256(body).hexdigest(), expected[name],
+                f"legacy fixture is not the qualified {revision[:7]} body: {name}")
+            if value is not None and INSTALLER.split_refusal_record_dir(body)[1] is not None:
+                body = INSTALLER.render_refusal_record_dir(body, value)
+            (hooks / name).write_bytes(body)
+            (hooks / name).chmod(0o755)
+
+    def test_legacy_sets_are_explicit_and_distinct(self) -> None:
+        self.assertEqual(set(INSTALLER.LEGACY_MANAGED_BODY_SETS), set(LEGACY_FIXTURES))
+        for revision, bodies in INSTALLER.LEGACY_MANAGED_BODY_SETS.items():
+            with self.subTest(revision=revision):
+                self.assertEqual(set(bodies), set(INSTALLER.KNOWN_MANAGED_BODIES))
+                for name, digest in bodies.items():
+                    self.assertIn(digest, INSTALLER.LEGACY_MANAGED_BODIES[name])
+                    self.assertTrue(INSTALLER.qualified_managed_prior(name, digest))
+        self.assertFalse(INSTALLER.qualified_managed_prior("pre-push.repro-managed", "0" * 64))
+
+    def run_installer(self, bootstrap: bool) -> subprocess.CompletedProcess:
+        repro = os.environ.get("REPROBUILD_REPRO") or shutil.which("repro")
+        if not repro:
+            self.fail("missing declared matching engine")
+        env = os.environ.copy()
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        return subprocess.run(
+            [os.sys.executable, str(self.primary / "tools/install-canonical-hooks.py"), "--repro", repro]
+            + (["--bootstrap-managed"] if bootstrap else []),
+            cwd=self.primary, env=env, capture_output=True, text=True,
+        )
+
+    def migrate(self) -> dict[str, bytes]:
+        for bootstrap in (True, False):
+            result = self.run_installer(bootstrap)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return self.current_values()
+
+    def migrated_workspace_values(self) -> dict[str, bytes]:
+        self.make_workspace_checkout()
+        self.install_legacy_bodies("76659f5730ecf698b1963c656494d2cb66eb256d")
+        return self.migrate()
+
+    def current_values(self) -> dict[str, bytes]:
+        hooks = self.primary / ".git/hooks"
+        values = {}
+        for name, digest in INSTALLER.KNOWN_MANAGED_BODIES.items():
+            target = hooks / name
+            self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o755)
+            canonical, value = INSTALLER.split_refusal_record_dir(target.read_bytes())
+            self.assertEqual(hashlib.sha256(canonical).hexdigest(), digest, name)
+            if value is not None:
+                values[name] = value
+        return values
+
+    def test_workspace_checkout_migrates_legacy_bodies_to_current(self) -> None:
+        values = self.migrated_workspace_values()
+        self.assertEqual(len(values), 5, values)
+        self.assertEqual(len(set(values.values())), 1, values)
+        value = next(iter(values.values()))
+        self.assertNotEqual(value, b"''", "workspace checkout did not exercise a baked refusal-record directory")
+        INSTALLER.validate_refusal_record_dir(value, self.primary.resolve())
+        record = Path(os.fsdecode(INSTALLER.unquote_shell_posix_word(value)))
+        self.assertIn(record.parents[4], {self.primary.resolve(), *self.primary.resolve().parents})
+
+    def assert_release_bodies_migrate(self, revision: str) -> None:
+        # The real current engine writes this checkout's refusal-record value
+        # first; the release's bodies then carry that same value, exactly as
+        # that release's ensure in this workspace checkout would have left them.
+        value = next(iter(self.migrated_workspace_values().values()))
+        self.assertNotEqual(value, b"''")
+        self.install_legacy_bodies(revision, value)
+        hooks = self.primary / ".git/hooks"
+        for name, digest in INSTALLER.LEGACY_MANAGED_BODY_SETS[revision].items():
+            canonical, carried = INSTALLER.split_refusal_record_dir((hooks / name).read_bytes())
+            self.assertEqual(hashlib.sha256(canonical).hexdigest(), digest, name)
+            self.assertIn(carried, (None, value), name)
+        values = self.migrate()
+        self.assertEqual(len(values), 5, values)
+        self.assertEqual(set(values.values()), {value})
+
+    def assert_release_body_with_foreign_value_refuses(self, revision: str) -> None:
+        self.make_workspace_checkout()
+        outside = INSTALLER.quote_shell_posix(
+            b"/nonexistent-elsewhere/.repro/build/reports/managed-hook-refusals/" + b"0" * 64)
+        self.install_legacy_bodies(revision, outside)
+        self.assert_installer_refuses("outside the checkout and its ancestors", bootstrap=True)
+
+    def test_workspace_checkout_migrates_v0220_bodies_to_current(self) -> None:
+        self.assert_release_bodies_migrate(V0220)
+
+    def test_v0220_body_with_foreign_value_refuses(self) -> None:
+        self.assert_release_body_with_foreign_value_refuses(V0220)
+
+    def test_workspace_checkout_migrates_v0223_bodies_to_current(self) -> None:
+        self.assert_release_bodies_migrate(V0223)
+
+    def test_v0223_body_with_foreign_value_refuses(self) -> None:
+        self.assert_release_body_with_foreign_value_refuses(V0223)
+
+    def test_workspace_checkout_migrates_v0224_bodies_to_current(self) -> None:
+        self.assert_release_bodies_migrate(V0224)
+
+    def test_v0224_body_with_foreign_value_refuses(self) -> None:
+        self.assert_release_body_with_foreign_value_refuses(V0224)
+
+    def rewrite_refusal_value(self, name: str, value: bytes) -> None:
+        target = self.primary / ".git/hooks" / name
+        canonical, _ = INSTALLER.split_refusal_record_dir(target.read_bytes())
+        target.write_bytes(INSTALLER.render_refusal_record_dir(canonical, value))
+
+    def test_workspace_refusal_dir_faults_refuse_by_name(self) -> None:
+        values = self.migrated_workspace_values()
+        hooks = self.primary / ".git/hooks"
+        originals = {name: (hooks / name).read_bytes() for name in INSTALLER.KNOWN_MANAGED_BODIES}
+        outside = INSTALLER.quote_shell_posix(
+            b"/nonexistent-elsewhere/.repro/build/reports/managed-hook-refusals/" + b"0" * 64)
+        faults = {
+            "outside the checkout and its ancestors": lambda: [self.rewrite_refusal_value(n, outside) for n in values],
+            "carry different refusal-record directories": lambda: self.rewrite_refusal_value("post-merge.repro-managed", b"''"),
+            "unknown or modified managed hook template": lambda: (hooks / "pre-push.repro-managed").write_bytes(
+                originals["pre-push.repro-managed"].replace(b"set +x\n", b"set -x\n", 1)),
+        }
+        for expected, inject in faults.items():
+            with self.subTest(fault=expected):
+                inject()
+                try:
+                    self.assert_installer_refuses(expected, bootstrap=True)
+                finally:
+                    for name, body in originals.items():
+                        (hooks / name).write_bytes(body)
+                        (hooks / name).chmod(0o755)
+
+    def test_refusal_dir_admits_only_canonical_values_beneath_the_checkout(self) -> None:
+        key = b"a" * 64
+        root = self.primary.resolve()
+        tail = b"/.repro/build/reports/managed-hook-refusals/" + key
+        for workspace in (root, root.parent):
+            INSTALLER.validate_refusal_record_dir(INSTALLER.quote_shell_posix(os.fsencode(workspace) + tail), root)
+        INSTALLER.validate_refusal_record_dir(b"''", root)
+        refused = {
+            "outside the checkout and its ancestors": INSTALLER.quote_shell_posix(os.fsencode(root / "nested") + tail),
+            "not canonical shell quoting": b"'" + os.fsencode(root) + tail + b"'",
+            "not 64 lowercase hex": INSTALLER.quote_shell_posix(os.fsencode(root) + tail[:-1] + b"A"),
+            "not beneath .repro/build/reports/managed-hook-refusals": INSTALLER.quote_shell_posix(os.fsencode(root) + b"/.repro/other/" + key),
+            "normalized absolute path": INSTALLER.quote_shell_posix(os.fsencode(root) + b"/../x" + tail),
+        }
+        for expected, value in refused.items():
+            with self.subTest(expected=expected):
+                with self.assertRaisesRegex(RuntimeError, expected):
+                    INSTALLER.validate_refusal_record_dir(value, root)
+        with self.assertRaisesRegex(RuntimeError, "more than once"):
+            INSTALLER.split_refusal_record_dir(b"REPRO_REFUSAL_RECORD_DIR=''\nREPRO_REFUSAL_RECORD_DIR=''\n")
 
 if __name__ == "__main__":
     unittest.main()

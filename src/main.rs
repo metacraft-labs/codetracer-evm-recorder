@@ -899,9 +899,9 @@ async fn record(args: RecordArgs) -> Result<()> {
     // `--steps-tracing` is required for debug_traceTransaction to return
     // non-empty structLogs in Foundry/Anvil >= 1.5.0.
     // -----------------------------------------------------------------------
-    let anvil = alloy::node_bindings::Anvil::new()
-        .arg("--steps-tracing")
-        .spawn();
+    let anvil = codetracer_evm_recorder::anvil_node::spawn(
+        alloy::node_bindings::Anvil::new().arg("--steps-tracing"),
+    )?;
     let rpc_url = anvil.endpoint();
 
     let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
@@ -1153,9 +1153,9 @@ async fn record_yul(args: RecordArgs, source_path: &Path, out_dir: &Path) -> Res
     // -----------------------------------------------------------------------
     // 2. Spin up a local Anvil node
     // -----------------------------------------------------------------------
-    let anvil = alloy::node_bindings::Anvil::new()
-        .arg("--steps-tracing")
-        .spawn();
+    let anvil = codetracer_evm_recorder::anvil_node::spawn(
+        alloy::node_bindings::Anvil::new().arg("--steps-tracing"),
+    )?;
     let rpc_url = anvil.endpoint();
 
     let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);

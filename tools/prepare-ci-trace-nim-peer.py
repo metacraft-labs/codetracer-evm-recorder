@@ -17,7 +17,17 @@ peers = [d for d in lock["lock"]["deps"] if d["name"] == "codetracer-trace-forma
 assert len(peers) == 1, "Missing unique locked decoder peer"
 peer = peers[0]
 assert peer["url"] == "https://github.com/metacraft-labs/codetracer-trace-format-nim"
-assert peer["path"] == "../codetracer-trace-format-nim"
+# A v2 record names its checkout `path`; a v3 record carries none, because
+# reprobuild derives a locked dependency's location from its name (reprobuild
+# a4cd655ed, "keep committed dependency records path-free"). The peer is
+# created at `destination` below either way, so a v2 path must name it and a
+# v3 record must not claim any path.
+schema = lock.get("schema")
+if schema == "reprobuild.solved-graph-lock.v2":
+    assert peer.get("path") == "../codetracer-trace-format-nim", "Locked decoder peer path differs"
+else:
+    assert schema == "reprobuild.solved-graph-lock.v3", f"Unsupported lock schema {schema!r}"
+    assert "path" not in peer, "A v3 lock record carries no path"
 revision = peer["revision"]
 assert len(revision) == 40 and all(c in "0123456789abcdef" for c in revision)
 destination = consumer.parent / "codetracer-trace-format-nim"

@@ -49,3 +49,37 @@ tempfile = "3"
 # the recorder land in the .ct container correctly (CTFS audit, see
 # AUDIT-CTFS-2026-05.md).
 codetracer_trace_reader = { path = "../codetracer-trace-format/codetracer_trace_reader" }
+
+# Optimise the secp256k1 and Keccak crates in debug builds.
+#
+# Starting an Anvil node (`src/anvil_node.rs`) runs alloy's
+# `Anvil::try_spawn`, which derives a signer and address from each of
+# Anvil's ten printed private keys once per banner line it reads after
+# them: about 350 secp256k1 scalar multiplications and Keccak hashes per
+# start. At opt-level 0 that took 0.4 to 0.7 s of CPU in the test binaries
+# and in the debug recorder, several times Anvil's own startup, and it
+# counts against alloy's 10 s startup timeout. The Windows CI guest runs
+# these tests about ten times slower, four at a time, which puts this work
+# alone near 5 s per start; one start there exceeded the timeout.
+# Optimised, a start costs 0.1 to 0.2 s here, close to Anvil's own time.
+# Release builds are unaffected.
+[profile.dev.package.k256]
+opt-level = 3
+
+[profile.dev.package.ecdsa]
+opt-level = 3
+
+[profile.dev.package.elliptic-curve]
+opt-level = 3
+
+[profile.dev.package.primeorder]
+opt-level = 3
+
+[profile.dev.package.crypto-bigint]
+opt-level = 3
+
+[profile.dev.package.sha3]
+opt-level = 3
+
+[profile.dev.package.keccak-asm]
+opt-level = 3

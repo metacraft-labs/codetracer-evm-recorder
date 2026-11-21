@@ -41,8 +41,18 @@ def read(*args):
     return subprocess.check_output([str(git), "--git-dir=" + str(sdk / ".git"), "--work-tree=" + str(sdk), *args], cwd=sdk, env=env)
 lock = tomllib.loads((root / "repro.lock").read_text())
 selected = [d for d in lock["lock"]["deps"] if d["name"] == "codetracer-trace-format-nim"]
-if len(selected) != 1 or selected[0]["path"] != "../codetracer-trace-format-nim":
+# A v2 record names its checkout `path`. A v3 record carries none: reprobuild
+# derives a locked dependency's location from its name (reprobuild a4cd655ed,
+# "keep committed dependency records path-free"). Either way this script reads
+# the sibling at `sdk`, so a v2 path must name it and a v3 record must not
+# claim any path.
+if len(selected) != 1:
     raise RuntimeError("owning lock has no unique declared Nim sibling")
+if lock.get("schema") == "reprobuild.solved-graph-lock.v2":
+    if selected[0].get("path") != "../codetracer-trace-format-nim":
+        raise RuntimeError("owning lock has no unique declared Nim sibling")
+elif lock.get("schema") != "reprobuild.solved-graph-lock.v3" or "path" in selected[0]:
+    raise RuntimeError("owning lock schema or Nim sibling record is not supported")
 revision = selected[0]["revision"]
 if re.fullmatch("[0-9a-f]{40}", revision) is None or selected[0]["integrity"] != "git-sha1:" + revision:
     raise RuntimeError("declared Nim revision/integrity authority is invalid")

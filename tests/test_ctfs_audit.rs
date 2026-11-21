@@ -97,9 +97,10 @@ async fn record_flow_test() -> tempfile::TempDir {
     let source_contents = std::fs::read_to_string(&source_path).unwrap();
 
     // ---- spawn anvil + deploy + call ------------------------------------
-    let anvil = alloy::node_bindings::Anvil::new()
-        .arg("--steps-tracing")
-        .spawn();
+    let anvil = codetracer_evm_recorder::anvil_node::spawn(
+        alloy::node_bindings::Anvil::new().arg("--steps-tracing"),
+    )
+    .expect("anvil should start");
     let rpc_url = anvil.endpoint();
     let provider = ProviderBuilder::new().connect_http(rpc_url.parse().unwrap());
     let from = provider.get_accounts().await.unwrap()[0];

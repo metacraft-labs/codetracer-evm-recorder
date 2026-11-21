@@ -8,6 +8,9 @@
 #     codetracer-evm-recorder/                      <-- this repo (checked out)
 #     codetracer/                    <-- cloned (for ct binary)
 #     codetracer-vscode-extension/   <-- cloned (test harness + fixtures)
+#     codetracer-trace-format/       <-- cloned (Cargo path dependency)
+#     codetracer-trace-format-nim/   <-- cloned (Nim FFI, recipe import)
+#     reprobuild-packages/           <-- cloned (package catalog, see below)
 
 name: Cross-Repo Integration Tests
 
@@ -76,7 +79,7 @@ jobs:
           path: evm-ci-bootstrap
 
       - name: Setup declared Nix before shell activation
-        uses: metacraft-labs/metacraft-github-actions/setup-nix@3fcbb26dd920adf6ccc64a87c6d24797ab0b5d94
+        uses: metacraft-labs/metacraft-github-actions/setup-nix@c5ca015a90187db28decba4ae656fe23b64e7fa6
         with:
           substituters: ${{ vars.SUBSTITUTERS }}
           trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
@@ -96,23 +99,36 @@ jobs:
 
       - name: Setup dev env
         # Installs nix and clones the cross-repo siblings adjacent to this
-        # checkout at workspace-lock-pinned revisions. workflow_dispatch /
-        # repository_dispatch ref inputs override the locked revision for
-        # codetracer + the extension (empty => lock).
-        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@142b12da267e48d7322960aa77ec33d7761f9082
+        # checkout. The trace-format pair comes at the revisions this
+        # commit's repro.lock pins. codetracer and the extension are pinned
+        # by commit here, because no edge of this recipe uses them, and a
+        # `uses:` entry, the only way into the lock, would compile their
+        # recipes into this one (repro.nim, beside the trace-format
+        # entries). Move these two pins by hand, to commits published on
+        # their repositories; workflow_dispatch / repository_dispatch ref
+        # inputs override them.
+        # setup-dev-env 5b9aecc, the revision ci-reprobuild.yml and
+        # ci-native-declared-checkout.yml pin, so one action revision serves
+        # every workflow of this repository.
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@5b9aeccf2027f74034229566ee51a59f1287e756
         with:
           env-flavor: nix
           consumer-directory: ${{ env.EVM_CI_NAMESPACE }}/codetracer-evm-recorder
           workspace-directory: ${{ env.EVM_CI_NAMESPACE }}
           gh-token: ${{ steps.app-token.outputs.token }}
+          # Keeps the Nix GitHub credential valid past the token's one-hour
+          # lifetime: a job-scoped broker re-mints it while setup and the
+          # build run (setup-dev-env app-id / app-private-key).
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          app-private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
           substituters: ${{ vars.SUBSTITUTERS }}
           trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
           attic-token: ${{ secrets.ATTIC_TOKEN }}
           attic-cache: ${{ vars.ATTIC_CACHE }}
           attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
           siblings: |
-            codetracer=${{ github.event.inputs.codetracer_ref || github.event.client_payload.codetracer_ref }}
-            codetracer-vscode-extension=${{ github.event.inputs.vscode_extension_ref || github.event.client_payload.vscode_extension_ref }}
+            codetracer=${{ github.event.inputs.codetracer_ref || github.event.client_payload.codetracer_ref || '2fdff9ce086a08ee07a4e86809bf68be2ed483fb' }}
+            codetracer-vscode-extension=${{ github.event.inputs.vscode_extension_ref || github.event.client_payload.vscode_extension_ref || 'bbc66cb8ed48ef0cadbaf3ecc74a43082fb5c204' }}
             codetracer-trace-format
             codetracer-trace-format-nim
 
