@@ -112,9 +112,9 @@ jobs:
         # setup-dev-env 5b9aecc: the source-built Reprobuild's RunQuota, io-mon
         # and hook-library siblings default to the revisions that
         # repro-build-pin's flake.lock records (reprobuild-provision f283d45),
-        # not to their `dev` tips: b9cf09b07 locks RunQuota 98ea3e58, whose
-        # runquota_client/pressure_text and runquota_core/cpu_profile
-        # `runquota@dev` lacks. It keeps c5ca015a's repro-version support,
+        # not to their `dev` tips: 2e0c670b3a (v0.2.35) locks RunQuota
+        # 6ff97313, which is on `runquota@agents` and not on `runquota@dev`
+        # (checked 2026-11-24). It keeps c5ca015a's repro-version support,
         # credential broker and single credential header.
         uses: metacraft-labs/metacraft-github-actions/setup-dev-env@5b9aeccf2027f74034229566ee51a59f1287e756
         env:
@@ -124,17 +124,17 @@ jobs:
           sibling-strategy: ${{ matrix.os != 'windows' && 'repro-lock' || 'auto' }}
           consumer-directory: ${{ matrix.os != 'windows' && format('{0}/codetracer-evm-recorder', env.EVM_CI_NAMESPACE) || '.' }}
           workspace-directory: ${{ matrix.os != 'windows' && env.EVM_CI_NAMESPACE || '.' }}
-          # reprobuild v0.2.26 (b9cf09b07) on every leg, the same revision the
+          # reprobuild v0.2.35 (2e0c670b3a) on every leg, the same revision the
           # owning flake.nix selects for the dev shell and hook factory. Unix
           # legs build that commit from source and the step below asserts it;
-          # Windows x64 installs the v0.2.26 release archive, and Windows arm64
+          # Windows x64 installs the v0.2.35 release archive, and Windows arm64
           # runs that x86_64 archive under emulation. It keeps the v0.2.23 fix
           # for the PATH-provisioned gcc probe that failed on Windows with
           # "Invalid argument", and reads the committed repro.lock schema
           # (reprobuild.solved-graph-lock.v3).
           repro-from-source: ${{ matrix.os != 'windows' && 'true' || 'false' }}
-          repro-version: v0.2.26
-          repro-build-pin: "b9cf09b07e2c780f314c4244e4c8df7988fc2e78"
+          repro-version: v0.2.35
+          repro-build-pin: "2e0c670b3a9f35e24d33a6235cc98de6d76ec3dd"
           gh-token: ${{ steps.ci_token.outputs.token }}
           # Keeps the Nix GitHub credential valid past the token's one-hour
           # lifetime: a job-scoped broker re-mints it while setup and the
@@ -153,7 +153,7 @@ jobs:
         run: |
           set -euo pipefail
           source_root="${GITHUB_WORKSPACE}/${EVM_CI_NAMESPACE}/.reprobuild-src"
-          test "$(git -C "$source_root" rev-parse HEAD)" = b9cf09b07e2c780f314c4244e4c8df7988fc2e78
+          test "$(git -C "$source_root" rev-parse HEAD)" = 2e0c670b3a9f35e24d33a6235cc98de6d76ec3dd
           test -z "$(git -C "$source_root" status --porcelain)"
           test "$(command -v repro)" = "${source_root}/build/bin/repro"
           test "${REPROBUILD_NIX_DAEMON_BIN}" = "${source_root}/build/bin/reprobuild-nix-daemon"

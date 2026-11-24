@@ -103,7 +103,7 @@ def validate_prior_owned_body(body: bytes, mode: int, prek: str) -> None:
     if body not in (native_generated_body(prek), canonical_body(prek)):
         raise RuntimeError("unknown or modified owning local hook body")
 
-KNOWN_MANAGED_BODIES = {'post-checkout': '0d586bca6904da189e3996ed9734d4f655d11304db4ea0a6b8118a9c66e2593c', 'post-checkout.repro-managed': 'a56ae4e3e58ac63e962ae6bcc9a00af3c694a411d239c8b2786c6ce8a86e8765', 'post-commit': 'bc88bf2b421b6552301ee78a5c2c620af38776ee401dd013e5d1c2ace0bde162', 'post-commit.repro-managed': 'b6dc876638267688972e1872035b42598c3492a06c4f4cf1ce7e9f09e4aa6781', 'post-merge': '02d91bab7b1ae8ceca00d6984a4ee31cf1d847ec56a7d8d88105c699a6a5723e', 'post-merge.repro-managed': '21e25e15b428c09aeb4373f1cfc9e4dcd7762436a7931ad4eb4f825c480bbeb0', 'pre-commit': 'fd71fedc2b33330d694357fad604cac2d226ce70ae3aadab9b16fd326ad25649', 'pre-commit.repro-managed': '1ab131c498ebb1181224718848d8c03c2f4a01bff7e23b6e025e45fb668fa509', 'pre-push': '199cd0913d54ad5a8da147cddda26e03d424b4381d651a6714875bd8e9d6b47f', 'pre-push.repro-managed': '7ac9f0df05b3b8525127b6277beac3f76832df96d6272a3ab319dc3f763a2226'}
+KNOWN_MANAGED_BODIES = {'post-checkout': '227260fa10a5b20aadd68b2584749d6181785894e35d6809e92fb50a46216228', 'post-checkout.repro-managed': 'f81062dacba0d472ffbf6948089852ee27dd714428d708f8e65bcda7e8776dbb', 'post-commit': '32b5fdc0850a08149017f134c2bd0983a92de489c174912a1bc6ee0da7ce7c52', 'post-commit.repro-managed': 'af2f3a553a1372e427ba6af677628c32fbbd99ec6978f4017efefe4546a14222', 'post-merge': 'e892b6e9ee2832f1565633f9445dd93145c8d76f756c6d07741e76e51002aeec', 'post-merge.repro-managed': '7bf8e5250237de1063f9a74211f379ba5407b3b0883cda822925be0e0493c628', 'pre-commit': '279a9e0a8d118708493194cd90eaff07290a0dc713a1b87ae053ea5467753efc', 'pre-commit.repro-managed': '2f4dfb59a8e03e2bac0959951e166570f0c1ec01ebdbbf45bf65466612cfe026', 'pre-push': '689af6e522fc1e3ba3a03e4b26d2db4476f304c3b58f9078fc506d2cc62cbc7f', 'pre-push.repro-managed': '1f70c6f0ed460ec4b80cacaf194290141f63f9489d28ece491335623db170283'}
 
 
 # Previously qualified Linux-author bodies remain explicit legacy preimages, so
@@ -128,11 +128,18 @@ KNOWN_MANAGED_BODIES = {'post-checkout': '0d586bca6904da189e3996ed9734d4f655d113
 #   reprobuild.managed-hook.v1.pre-commit.752826091a840f01), measured
 #   2026-11-17 by running that package through SelectedFactory, before the
 #   selected package moved to v0.2.26.
+# - b9cf09b07e2c780f314c4244e4c8df7988fc2e78, release v0.2.26, measured
+#   2026-11-24 by running that package's `repro hooks ensure --vcs` in a
+#   fresh repository, as SelectedFactory does, before the selected package
+#   moved to v0.2.35. From v0.2.35 on, a plain ensure refuses these bodies
+#   (refused-foreign-contract), so the installer re-anchors them: see
+#   superseded_managed_roles.
 LEGACY_MANAGED_BODY_SETS = MappingProxyType({
     '76659f5730ecf698b1963c656494d2cb66eb256d': MappingProxyType({'post-checkout': '559e7ef6b042c686c97eaa0e39fb388224376d8b3c7f8d2b8014f2b72db5592c', 'post-checkout.repro-managed': '9f2984dd9a84a7c0e8fe35e27e85b3d1119439d30941641d2c52e0180fa9a67d', 'post-commit': 'd32025c9c8d3d940f0b8a4628365abd9a6f473c6285074ae75095a9d70e2d98b', 'post-commit.repro-managed': '7547f2c80dc2ede98ed08c6458995aca9ae36ada500f09af034b9fc0cda9224b', 'post-merge': 'bfbe09e064471797f5927251a76c81a4d647edc876bdc6186118b5f810ec13fd', 'post-merge.repro-managed': 'd5ef6453ef70840bbb0d2c333ccc429447d7a089701623c6db8c41e7da08f65e', 'pre-commit': '06cfcb59c42b99e9432c469f6bce7dc4fa5b0fa7c6f4f4e0548a1161233cf576', 'pre-commit.repro-managed': '598ed91d257d1d236de042e708bd239837e069b2ee6fd583cf6b2d121f294507', 'pre-push': 'f5084841c5edfe6bfdaba3ad55c142b87e4e93b725754de0af553b57709e5c29', 'pre-push.repro-managed': '642c37aca860a03ee6e7c2d0f941bf6fbdd1202c9f356c4fe68bf3ad3bfe6da6'}),
     'a650b2034947eba87c809b1a7c9169f489aebd24': MappingProxyType({'post-checkout': '559e7ef6b042c686c97eaa0e39fb388224376d8b3c7f8d2b8014f2b72db5592c', 'post-checkout.repro-managed': 'ce6e4c183d402be1bd172c9c2855c3a817f1d390f4eea9ee5cf889ad258d2ad5', 'post-commit': 'd32025c9c8d3d940f0b8a4628365abd9a6f473c6285074ae75095a9d70e2d98b', 'post-commit.repro-managed': '2099a6223344a521d4372a7f67e9418f0a91d0d3f1cd189661f73e24c4704a89', 'post-merge': 'bfbe09e064471797f5927251a76c81a4d647edc876bdc6186118b5f810ec13fd', 'post-merge.repro-managed': '95bfb444c1504e76e5ab88cfd3003463373ef554d0682a5d6f29210290f87113', 'pre-commit': '183bb091beac3d855ba679e6432341a9eacdbe4e0c7c06e9a2b605da5e86f3b1', 'pre-commit.repro-managed': '72506ba8e629bc254e05ed4cf1b30c9ec49b6647b6ecba8a693c61ab1a5e8dc4', 'pre-push': 'f5084841c5edfe6bfdaba3ad55c142b87e4e93b725754de0af553b57709e5c29', 'pre-push.repro-managed': 'ac3c25c9cf84e52c3abc157c5ec0f72bbd38116682c5f3f80fa9b0ad88926d26'}),
     '9dbf4e710d7cc0b9a79a4bcd54c931afb6849dd0': MappingProxyType({'post-checkout': 'eb0e31f2cc352a4124f1d05bf7967bc2efa5864735200790de42a1530d5abee3', 'post-checkout.repro-managed': '5b7377795c638c8d64969dbb5506e0036acd948e376c4e93e4e622ec88acb52f', 'post-commit': '3ed1d3fb7ef995712b59b6ec27d9570a89cdb8948a3645bc996b41f2fa8184f3', 'post-commit.repro-managed': 'c59baec2dd12c3f8852ed2564b919bf1eab03199250ef86ed9e6a8655f20ec2b', 'post-merge': '9e6811d36766c781d21a83d1decc7e847e44d5ca78e7cda86a3768a5e6108c38', 'post-merge.repro-managed': 'c97b026fdd61dcb31dfc8d5de139120e4daa6502c8b7909581db3f09f1a2a4cf', 'pre-commit': 'b5701da3f4fa84c627af6871f7c9d8cfbc27111f6200780a563b8d9da0daa5a2', 'pre-commit.repro-managed': '00251d3475c18ef4e01400e0f528608acd3075af277102b6334c6cfed9129b7d', 'pre-push': '12118a64bade0979ea838dd95d9e44110851fd99cc6b84cf3bf4a15e6759c96b', 'pre-push.repro-managed': '8acf3546870c24c49179733dadbd68b8213b42ddd7fc0d4a12645a7d419b3040'}),
     '7c670d248b936188f8aad689f32bb7e64522c5ac': MappingProxyType({'post-checkout': '0d586bca6904da189e3996ed9734d4f655d11304db4ea0a6b8118a9c66e2593c', 'post-checkout.repro-managed': 'bfb3d8e53921c764568b897b21e8d5767563e88095a4f695267675d97708fde9', 'post-commit': 'bc88bf2b421b6552301ee78a5c2c620af38776ee401dd013e5d1c2ace0bde162', 'post-commit.repro-managed': '950ca0cfdd7fc07c4874021bde0e7fd447fa9f5c40ce247d64dd2d1d45fbf1bb', 'post-merge': '02d91bab7b1ae8ceca00d6984a4ee31cf1d847ec56a7d8d88105c699a6a5723e', 'post-merge.repro-managed': '91c53c834c1c23a937127fe01c430de65378b6d2698f057eb13f5de697b63b43', 'pre-commit': 'fd71fedc2b33330d694357fad604cac2d226ce70ae3aadab9b16fd326ad25649', 'pre-commit.repro-managed': '94205bba2276e6519efeeb43ab98d6cca3d17a553acc84597eb4de0b40f723ad', 'pre-push': '199cd0913d54ad5a8da147cddda26e03d424b4381d651a6714875bd8e9d6b47f', 'pre-push.repro-managed': '6ada5591ca7aaf28d56013a17e1e2069135b0bb92383ed1177475bc732eeabee'}),
+    'b9cf09b07e2c780f314c4244e4c8df7988fc2e78': MappingProxyType({'post-checkout': '0d586bca6904da189e3996ed9734d4f655d11304db4ea0a6b8118a9c66e2593c', 'post-checkout.repro-managed': 'a56ae4e3e58ac63e962ae6bcc9a00af3c694a411d239c8b2786c6ce8a86e8765', 'post-commit': 'bc88bf2b421b6552301ee78a5c2c620af38776ee401dd013e5d1c2ace0bde162', 'post-commit.repro-managed': 'b6dc876638267688972e1872035b42598c3492a06c4f4cf1ce7e9f09e4aa6781', 'post-merge': '02d91bab7b1ae8ceca00d6984a4ee31cf1d847ec56a7d8d88105c699a6a5723e', 'post-merge.repro-managed': '21e25e15b428c09aeb4373f1cfc9e4dcd7762436a7931ad4eb4f825c480bbeb0', 'pre-commit': 'fd71fedc2b33330d694357fad604cac2d226ce70ae3aadab9b16fd326ad25649', 'pre-commit.repro-managed': '1ab131c498ebb1181224718848d8c03c2f4a01bff7e23b6e025e45fb668fa509', 'pre-push': '199cd0913d54ad5a8da147cddda26e03d424b4381d651a6714875bd8e9d6b47f', 'pre-push.repro-managed': '7ac9f0df05b3b8525127b6277beac3f76832df96d6272a3ab319dc3f763a2226'}),
 })
 # Role name -> every admitted legacy digest for that role.
 LEGACY_MANAGED_BODIES = MappingProxyType({
@@ -470,10 +477,60 @@ def rendered_factory_bodies(hooks: Path, root: Path, factory) -> dict[str, bytes
             for name, body in factory.bodies.items()}
 
 
-def guarded_ensure(repro, root, env, factory) -> dict[str, bytes]:
+def superseded_managed_roles(hooks: Path, prek: str) -> list[str]:
+    """The managed roles whose installed body an older selected package wrote.
+
+    Call only after every installed managed body has been admitted (current or
+    legacy). A role is superseded when its body, with the refusal-record value
+    normalized, is not the current factory body but equals that role's entry
+    in one of LEGACY_MANAGED_BODY_SETS. Those sets are keyed by the reprobuild
+    revisions this repository selected before the current one, so such a body
+    is known to come from an OLDER build, never merely a different one.
+
+    Since reprobuild 4c49e746a6 a plain `repro hooks ensure --vcs` leaves a
+    body whose contract token it does not generate untouched and exits
+    non-zero (`refused-foreign-contract`); `--re-anchor` is the explicit
+    override (reprobuild-pm spec/CLI/hooks.md, "Re-anchoring is explicit").
+    The refusal exists because an unattended ensure cannot tell an older
+    writer from a newer one. This installer can, for exactly these bodies, so
+    it re-anchors them deliberately and only them: an unknown body is refused
+    before this point, and a checkout whose bodies are all current never
+    passes `--re-anchor`.
+
+    A dispatcher slot that holds this repository's native or canonical Prek
+    script (the installation path writes one there before its ensure) carries
+    no contract token and is reclaimed by a plain ensure, so it is skipped."""
+    superseded = []
+    for name, current in KNOWN_MANAGED_BODIES.items():
+        path = hooks / name
+        if path.is_symlink() or not path.is_file():
+            continue
+        body = path.read_bytes()
+        if name in ("pre-commit", "pre-push") and body in (
+                native_generated_body(prek, name), canonical_body(prek, name)):
+            continue
+        canonical, _ = split_refusal_record_dir(body)
+        digest = hashlib.sha256(canonical).hexdigest()
+        if digest == current:
+            continue
+        if digest not in LEGACY_MANAGED_BODIES.get(name, frozenset()):
+            raise RuntimeError(f"unknown or modified managed hook template: {name}")
+        superseded.append(name)
+    return sorted(superseded)
+
+
+def ensure_argv(repro: Path, superseded: list[str]) -> list[str]:
+    """`repro hooks ensure` for this checkout, re-anchoring only superseded bodies."""
+    return [str(repro), "hooks", "ensure", "--vcs", *(["--re-anchor"] if superseded else []), "."]
+
+
+def guarded_ensure(repro, root, env, factory, prek) -> dict[str, bytes]:
     BOUNDARY.guard()
     expected = BOUNDARY.bodies(BOUNDARY.entries)
-    subprocess.run([str(repro), "hooks", "ensure", "--vcs", "."], cwd=root, env=env, check=True)
+    superseded = superseded_managed_roles(BOUNDARY.hooks, prek)
+    if superseded:
+        print("Re-anchoring managed hooks an older selected Repro wrote: " + ", ".join(superseded))
+    subprocess.run(ensure_argv(repro, superseded), cwd=root, env=env, check=True)
     rendered = rendered_factory_bodies(BOUNDARY.hooks, root, factory)
     expected.update({name: (body, 0o755) for name, body in rendered.items()})
     BOUNDARY.accept(expected, set(rendered))
@@ -611,7 +668,7 @@ def install_main() -> None:
     if args.bootstrap_managed:
         # Separate caller bootstrap: every ownership check above completed before
         # matching ensure creates any hook. Preserve existing pre-push entries.
-        rendered = guarded_ensure(repro, root, env, factory)
+        rendered = guarded_ensure(repro, root, env, factory, prek)
         current_pre_push = pre_push_inventory(hooks, prek, factory, root)
         expected_names = {"pre-push", "pre-push.repro-managed"} | (set(original_pre_push) & {"pre-push.sample", "pre-push.repro-local"})
         if set(current_pre_push) != expected_names:
@@ -686,7 +743,7 @@ def install_main() -> None:
                 raise RuntimeError("preserved local hook changed during installation")
             atomic_write(generated, body, 0o755)
             atomic_write(local, body, 0o755)
-        rendered = guarded_ensure(repro, root, env, factory)
+        rendered = guarded_ensure(repro, root, env, factory, prek)
         expected_push = dict(original_pre_push)
         expected_push["pre-push.repro-local"] = (canonical_push, 0o755)
         if pre_push_inventory(hooks, prek, factory, root) != expected_push:

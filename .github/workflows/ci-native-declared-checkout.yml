@@ -109,9 +109,9 @@ jobs:
         # setup-dev-env 5b9aecc: the source-built Reprobuild's RunQuota, io-mon
         # and hook-library siblings default to the revisions that
         # repro-build-pin's flake.lock records (reprobuild-provision f283d45),
-        # not to their `dev` tips: b9cf09b07 locks RunQuota 98ea3e58, whose
-        # runquota_client/pressure_text and runquota_core/cpu_profile
-        # `runquota@dev` lacks. It keeps c5ca015a's repro-version support,
+        # not to their `dev` tips: 2e0c670b3a (v0.2.35) locks RunQuota
+        # 6ff97313, which is on `runquota@agents` and not on `runquota@dev`
+        # (checked 2026-11-24). It keeps c5ca015a's repro-version support,
         # credential broker and single credential header.
         uses: metacraft-labs/metacraft-github-actions/setup-dev-env@5b9aeccf2027f74034229566ee51a59f1287e756
         env:
@@ -119,12 +119,12 @@ jobs:
         with:
           env-flavor: ${{ inputs.env-flavor }}
           sibling-strategy: repro-lock
-          # reprobuild v0.2.26 (b9cf09b07), the revision the owning flake.nix
+          # reprobuild v0.2.35 (2e0c670b3a), the revision the owning flake.nix
           # selects. Every leg here is Unix and builds that commit from source;
           # repro-version names the same release for the record.
           repro-from-source: "true"
-          repro-version: v0.2.26
-          repro-build-pin: "b9cf09b07e2c780f314c4244e4c8df7988fc2e78"
+          repro-version: v0.2.35
+          repro-build-pin: "2e0c670b3a9f35e24d33a6235cc98de6d76ec3dd"
           consumer-directory: ${{ env.EVM_CI_NAMESPACE }}/codetracer-evm-recorder
           workspace-directory: ${{ env.EVM_CI_NAMESPACE }}
           gh-token: ${{ steps.app-token.outputs.token }}

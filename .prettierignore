@@ -1,9 +1,10 @@
 # Unedited `nix derivation show` captures; the test reads them as Nix printed them.
 tests/fixtures/nix-derivation-show/
 # Genuine managed hook bodies captured from the reprobuild 76659f, v0.2.20
-# (a650b20), v0.2.23 (9dbf4e7) and v0.2.24 (7c670d2) packages; the ownership
-# test pins each one to its legacy hash, byte for byte.
+# (a650b20), v0.2.23 (9dbf4e7), v0.2.24 (7c670d2) and v0.2.26 (b9cf09b)
+# packages; the ownership test pins each one to its legacy hash, byte for byte.
 tests/fixtures/legacy-managed-hooks-76659f/
 tests/fixtures/legacy-managed-hooks-a650b20/
 tests/fixtures/legacy-managed-hooks-9dbf4e7/
 tests/fixtures/legacy-managed-hooks-7c670d2/
+tests/fixtures/legacy-managed-hooks-b9cf09b/
