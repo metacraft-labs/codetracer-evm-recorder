@@ -147,6 +147,7 @@ pub async fn replay_transaction_detailed(
     // the blob base fee is priced with a per-fork update fraction, and
     // `BlobExcessGasAndPrice::new` computes that price eagerly.
     let spec = spec_for_block(chain_id, block_number, &*block.header);
+    let blob_fraction = blob_base_fee_update_fraction_at(chain_id, block.header.timestamp(), spec);
 
     // Build block environment from the target block header.
     let block_env = BlockEnv {
@@ -158,10 +159,7 @@ pub async fn replay_transaction_detailed(
         gas_limit: block.header.gas_limit(),
         prevrandao: block.header.mix_hash(),
         blob_excess_gas_and_price: block.header.excess_blob_gas().map(|ebg| {
-            revm::context_interface::block::BlobExcessGasAndPrice::new(
-                ebg,
-                blob_base_fee_update_fraction(spec),
-            )
+            revm::context_interface::block::BlobExcessGasAndPrice::new(ebg, blob_fraction)
         }),
     };
 
@@ -321,6 +319,7 @@ where
     }
     let parent_block_id: alloy::rpc::types::BlockId = (block_number - 1).into();
     let spec = spec_for_block(chain_id, block_number, &*block.header);
+    let blob_fraction = blob_base_fee_update_fraction_at(chain_id, block.header.timestamp(), spec);
     let block_env = BlockEnv {
         number: U256::from(block_number),
         beneficiary: block.header.beneficiary(),
@@ -330,10 +329,7 @@ where
         gas_limit: block.header.gas_limit(),
         prevrandao: block.header.mix_hash(),
         blob_excess_gas_and_price: block.header.excess_blob_gas().map(|ebg| {
-            revm::context_interface::block::BlobExcessGasAndPrice::new(
-                ebg,
-                blob_base_fee_update_fraction(spec),
-            )
+            revm::context_interface::block::BlobExcessGasAndPrice::new(ebg, blob_fraction)
         }),
     };
     let block_timestamp = block.header.timestamp();
@@ -555,8 +551,20 @@ where
 /// (chain 1) this reads the activation heights. A zero difficulty marks the Merge on any
 /// chain, which the header rule also missed (it said LONDON for Paris blocks). Other
 /// chains keep the header rule and its stated pre-London limitation.
+///
+/// After Prague the header stops naming the fork again: Osaka (Fusaka's execution
+/// layer) added no header member, so the header rule calls an Osaka block PRAGUE and
+/// replays it without CLZ (EIP-7939), the per-transaction gas cap (EIP-7825) or the
+/// MODEXP repricing (EIP-7883). For the chains in [`time_forks`] the block's timestamp
+/// decides.
 fn spec_for_block<H: BlockHeader>(chain_id: u64, number: u64, header: &H) -> SpecId {
     let by_header = spec_from_block_header(header);
+    if by_header >= SpecId::PRAGUE {
+        if time_forks(chain_id).is_some_and(|forks| header.timestamp() >= forks.osaka) {
+            return SpecId::OSAKA;
+        }
+        return by_header;
+    }
     if by_header >= SpecId::SHANGHAI {
         return by_header;
     }
@@ -623,6 +631,64 @@ fn blob_base_fee_update_fraction(spec: SpecId) -> u64 {
         revm::primitives::eip4844::BLOB_BASE_FEE_UPDATE_FRACTION_PRAGUE
     } else {
         revm::primitives::eip4844::BLOB_BASE_FEE_UPDATE_FRACTION_CANCUN
+    }
+}
+
+/// The blob-base-fee update fraction of EIP-7892's first blob-parameter-only fork
+/// (target 10, max 15 blobs).
+const BLOB_BASE_FEE_UPDATE_FRACTION_BPO1: u64 = 8_346_193;
+/// ... and of the second (target 14, max 21 blobs).
+const BLOB_BASE_FEE_UPDATE_FRACTION_BPO2: u64 = 11_684_671;
+
+/// The activation timestamps of the forks after Prague, which no header member marks.
+struct TimeForks {
+    osaka: u64,
+    bpo1: u64,
+    bpo2: u64,
+}
+
+/// The post-Prague schedule of the chains whose schedule is known here (the values of
+/// go-ethereum's `params/config.go`), each checked against the chain itself on
+/// 2026-11-25: the blob price a receipt reports singles out one update fraction, and the
+/// first block at or after each timestamp already carries the new one.
+///
+/// | chain   | Osaka (block)            | BPO1 (block)             | BPO2 (block)             |
+/// |---------|--------------------------|--------------------------|--------------------------|
+/// | mainnet | 1764798551 (23,935,694)  | 1765290071 (23,975,778)  | 1767747671 (24,179,383)  |
+/// | Sepolia | 1760427360 (9,408,577)   | 1761017184 (9,456,501)   | 1761607008 (9,504,747)   |
+///
+/// Another chain keeps the header rule, which prices its blobs with Prague's fraction
+/// whatever its date.
+fn time_forks(chain_id: u64) -> Option<TimeForks> {
+    match chain_id {
+        1 => Some(TimeForks {
+            osaka: 1_764_798_551,
+            bpo1: 1_765_290_071,
+            bpo2: 1_767_747_671,
+        }),
+        11_155_111 => Some(TimeForks {
+            osaka: 1_760_427_360,
+            bpo1: 1_761_017_184,
+            bpo2: 1_761_607_008,
+        }),
+        _ => None,
+    }
+}
+
+/// The update fraction in force for a block of `chain_id` at `timestamp`.
+///
+/// The blob-parameter-only forks change the fraction and nothing else, so revm has no
+/// `SpecId` for them and [`blob_base_fee_update_fraction`] cannot see them. Pricing a
+/// post-BPO2 block with Prague's fraction is the live defect this closes: Sepolia block
+/// 11,200,000 carries an excess blob gas of 209,900,794, which prices at 63,323,965 wei
+/// with BPO2's fraction (the receipts' `blobGasPrice`) and at 1,598,304,156,768,142,484
+/// with Prague's. revm then refused the block's first blob transaction as
+/// `BlobGasPriceGreaterThanMax` and replayed nothing after it.
+fn blob_base_fee_update_fraction_at(chain_id: u64, timestamp: u64, spec: SpecId) -> u64 {
+    match time_forks(chain_id) {
+        Some(forks) if timestamp >= forks.bpo2 => BLOB_BASE_FEE_UPDATE_FRACTION_BPO2,
+        Some(forks) if timestamp >= forks.bpo1 => BLOB_BASE_FEE_UPDATE_FRACTION_BPO1,
+        _ => blob_base_fee_update_fraction(spec),
     }
 }
 
@@ -707,5 +773,77 @@ mod tests {
             priced.blob_gasprice > 0,
             "a non-zero excess blob gas must price above the 1 wei minimum"
         );
+    }
+
+    fn header_at(timestamp: u64) -> alloy::consensus::Header {
+        alloy::consensus::Header {
+            timestamp,
+            base_fee_per_gas: Some(10),
+            withdrawals_root: Some(Default::default()),
+            excess_blob_gas: Some(0),
+            requests_hash: Some(Default::default()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn osaka_comes_from_the_timestamp_on_the_chains_whose_schedule_is_known() {
+        // Sepolia: one second either side of Osaka.
+        assert_eq!(
+            spec_for_block(11_155_111, 9_408_576, &header_at(1_760_427_359)),
+            SpecId::PRAGUE
+        );
+        assert_eq!(
+            spec_for_block(11_155_111, 9_408_577, &header_at(1_760_427_360)),
+            SpecId::OSAKA
+        );
+        // Mainnet.
+        assert_eq!(
+            spec_for_block(1, 23_935_693, &header_at(1_764_798_550)),
+            SpecId::PRAGUE
+        );
+        assert_eq!(
+            spec_for_block(1, 23_935_694, &header_at(1_764_798_551)),
+            SpecId::OSAKA
+        );
+        // CONTROL: a chain with no known schedule keeps the header's PRAGUE.
+        assert_eq!(
+            spec_for_block(10, 1, &header_at(1_800_000_000)),
+            SpecId::PRAGUE
+        );
+    }
+
+    #[test]
+    fn the_blob_parameter_only_forks_change_the_fraction_at_their_timestamps() {
+        let at = |chain, ts| blob_base_fee_update_fraction_at(chain, ts, SpecId::OSAKA);
+        assert_eq!(at(1, 1_765_290_070), BLOB_BASE_FEE_UPDATE_FRACTION_PRAGUE);
+        assert_eq!(at(1, 1_765_290_071), BLOB_BASE_FEE_UPDATE_FRACTION_BPO1);
+        assert_eq!(at(1, 1_767_747_671), BLOB_BASE_FEE_UPDATE_FRACTION_BPO2);
+        assert_eq!(
+            at(11_155_111, 1_761_017_183),
+            BLOB_BASE_FEE_UPDATE_FRACTION_PRAGUE
+        );
+        assert_eq!(
+            at(11_155_111, 1_761_017_184),
+            BLOB_BASE_FEE_UPDATE_FRACTION_BPO1
+        );
+        assert_eq!(
+            at(11_155_111, 1_761_607_008),
+            BLOB_BASE_FEE_UPDATE_FRACTION_BPO2
+        );
+        // CONTROL: an unknown chain falls back to the fork's own fraction.
+        assert_eq!(at(10, 1_800_000_000), BLOB_BASE_FEE_UPDATE_FRACTION_PRAGUE);
+    }
+
+    /// Regression, with the chain's own numbers: Sepolia block 11,200,000 (timestamp
+    /// 1,783,151,484, excess blob gas 209,900,794) prices at the 63,323,965 wei its
+    /// receipts report. Prague's fraction gave 1,598,304,156,768,142,484.
+    #[test]
+    fn sepolia_block_11_200_000_prices_its_blobs_as_the_chain_did() {
+        let fraction = blob_base_fee_update_fraction_at(11_155_111, 1_783_151_484, SpecId::OSAKA);
+        let priced = BlobExcessGasAndPrice::new(209_900_794, fraction);
+        assert_eq!(priced.blob_gasprice, 63_323_965);
+        let wrong = BlobExcessGasAndPrice::new(209_900_794, BLOB_BASE_FEE_UPDATE_FRACTION_PRAGUE);
+        assert_eq!(wrong.blob_gasprice, 1_598_304_156_768_142_484);
     }
 }

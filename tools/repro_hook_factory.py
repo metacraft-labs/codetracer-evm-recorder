@@ -17,9 +17,9 @@ import sys
 import tempfile
 import time
 
-PIN = 'b9cf09b07e2c780f314c4244e4c8df7988fc2e78'
-LOCKED_SOURCE = {'type': 'github', 'owner': 'metacraft-labs', 'repo': 'reprobuild', 'rev': PIN, 'narHash': 'sha256-m6yAZ05Pgbc3VXgQA9DRLpGP2dBO8l2/QB2wG8ua2qs=', 'lastModified': 1794837906}
-SOURCE_SHA = '8de8c1f4e85827da83f26127e089266b9169d456203c09939df99508a97e492e'
+PIN = '2e0c670b3a9f35e24d33a6235cc98de6d76ec3dd'
+LOCKED_SOURCE = {'type': 'github', 'owner': 'metacraft-labs', 'repo': 'reprobuild', 'rev': PIN, 'narHash': 'sha256-W1tsGhJc4yukbgou50dFgYq4AqpvN7fCqMGTy+Hwg3w=', 'lastModified': 1795413424}
+SOURCE_SHA = '4c77e5f509c534214f9682159c6c997699c74ee7a0222c1841a649fe22015fdc'
 HOOKS = ('pre-commit', 'pre-push', 'post-commit', 'post-checkout', 'post-merge')
 
 

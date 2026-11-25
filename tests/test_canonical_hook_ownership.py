@@ -7,20 +7,30 @@ hook. Native installer/template/default-hook controls remain separate tests.
 The workspace cases start from the ten managed bodies a previously selected
 package actually wrote, kept byte for byte under
 tests/fixtures/legacy-managed-hooks-<revision>/: reprobuild 76659f,
-reprobuild v0.2.20 (a650b20), v0.2.23 (9dbf4e7) and v0.2.24 (7c670d2). They
-are captured output, not a mock: none of these packages is part of the
-declared shell, and each fixture must hash to its role's entry in that
-revision's set in the installer's LEGACY_MANAGED_BODY_SETS before it is used,
-so a drifted fixture fails the test instead of being admitted. The v0.2.20,
-v0.2.23 and v0.2.24 fixtures are the factory bodies (refusal-record
+reprobuild v0.2.20 (a650b20), v0.2.23 (9dbf4e7), v0.2.24 (7c670d2) and
+v0.2.26 (b9cf09b). They are captured output, not a mock: none of these
+packages is part of the declared shell, and each fixture must hash to its
+role's entry in that revision's set in the installer's
+LEGACY_MANAGED_BODY_SETS before it is used, so a drifted fixture fails the
+test instead of being admitted. The v0.2.20,
+v0.2.23, v0.2.24 and v0.2.26 fixtures are the factory bodies (refusal-record
 directory `''`); the workspace cases bake into them the value the real
 current engine wrote for the same checkout, as an ensure run of that release
 there would have.
+
+The selected package carries reprobuild 4c49e746a6, so a plain
+`repro hooks ensure --vcs` refuses every one of those older bodies
+(`refused-foreign-contract`). The migration cases therefore prove that the
+installer re-anchors deliberately, and only bodies of a known older set:
+`test_plain_ensure_refuses_legacy_bodies` holds the refusal itself, against
+the real engine, so the migrations cannot pass by the engine having stopped
+refusing.
 """
 from __future__ import annotations
 import importlib.util
 import hashlib
 import os
+import re
 import stat
 from pathlib import Path
 import shutil
@@ -35,11 +45,13 @@ LEGACY_FIXTURES = {
     "a650b2034947eba87c809b1a7c9169f489aebd24": ROOT / "tests/fixtures/legacy-managed-hooks-a650b20",
     "9dbf4e710d7cc0b9a79a4bcd54c931afb6849dd0": ROOT / "tests/fixtures/legacy-managed-hooks-9dbf4e7",
     "7c670d248b936188f8aad689f32bb7e64522c5ac": ROOT / "tests/fixtures/legacy-managed-hooks-7c670d2",
+    "b9cf09b07e2c780f314c4244e4c8df7988fc2e78": ROOT / "tests/fixtures/legacy-managed-hooks-b9cf09b",
 }
 # Releases whose bodies carry the machine-local refusal-record line.
 V0220 = "a650b2034947eba87c809b1a7c9169f489aebd24"
 V0223 = "9dbf4e710d7cc0b9a79a4bcd54c931afb6849dd0"
 V0224 = "7c670d248b936188f8aad689f32bb7e64522c5ac"
+V0226 = "b9cf09b07e2c780f314c4244e4c8df7988fc2e78"
 # The installer imports its sibling helpers the way a script run finds them.
 sys.path.insert(0, str(ROOT / "tools"))
 SPEC = importlib.util.spec_from_file_location("owned_hook_installer", ROOT / "tools/install-canonical-hooks.py")
@@ -310,7 +322,7 @@ class CommonHooksOwnership(unittest.TestCase):
                 INSTALLER.native_install_environment(env, self.git, self.primary, self.primary / ".git/hooks")
             self.assertEqual(self.inventory(), original)
 
-    # --- Reprobuild v0.2.20/v0.2.23/v0.2.24/v0.2.26 successors: legacy sets
+    # --- Reprobuild v0.2.20/v0.2.23/v0.2.24/v0.2.26/v0.2.35 successors: legacy sets
     # --- and the one machine-local managed line. ---
 
     def make_workspace_checkout(self) -> None:
@@ -442,6 +454,80 @@ class CommonHooksOwnership(unittest.TestCase):
 
     def test_v0224_body_with_foreign_value_refuses(self) -> None:
         self.assert_release_body_with_foreign_value_refuses(V0224)
+
+    def test_workspace_checkout_migrates_v0226_bodies_to_current(self) -> None:
+        self.assert_release_bodies_migrate(V0226)
+
+    def test_v0226_body_with_foreign_value_refuses(self) -> None:
+        self.assert_release_body_with_foreign_value_refuses(V0226)
+
+    # --- Re-anchoring (reprobuild 4c49e746a6, `refused-foreign-contract`). ---
+
+    def test_plain_ensure_refuses_legacy_bodies(self) -> None:
+        # The condition every migration case depends on: the selected engine's
+        # plain ensure leaves an older build's bodies untouched and fails. If
+        # this stops holding, the re-anchor below is no longer what migrates.
+        repro = os.environ.get("REPROBUILD_REPRO") or shutil.which("repro")
+        if not repro:
+            self.fail("missing declared matching engine")
+        self.install_legacy_bodies(V0226)
+        before = self.inventory()
+        result = subprocess.run([repro, "hooks", "ensure", "--vcs", "."], cwd=self.primary,
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("refused-foreign-contract", result.stdout + result.stderr)
+        self.assertEqual(self.inventory(), before)
+
+    def test_reanchor_is_chosen_only_for_known_older_bodies(self) -> None:
+        hooks = self.primary / ".git/hooks"
+        prek = INSTALLER.selected_tool("prek")
+        self.assertEqual(INSTALLER.superseded_managed_roles(hooks, prek), [])
+        self.assertNotIn("--re-anchor", INSTALLER.ensure_argv(Path("repro"), []))
+        for revision in LEGACY_FIXTURES:
+            with self.subTest(revision=revision[:7]):
+                self.install_legacy_bodies(revision)
+                legacy = INSTALLER.LEGACY_MANAGED_BODY_SETS[revision]
+                expected = sorted(
+                    name for name, digest in legacy.items()
+                    if digest != INSTALLER.KNOWN_MANAGED_BODIES[name])
+                superseded = INSTALLER.superseded_managed_roles(hooks, prek)
+                self.assertEqual(superseded, expected)
+                self.assertIn("--re-anchor", INSTALLER.ensure_argv(Path("repro"), superseded))
+        # The repository's own Prek scripts in a dispatcher slot carry no
+        # contract and are never a reason to re-anchor.
+        for name in INSTALLER.KNOWN_MANAGED_BODIES:
+            (hooks / name).unlink()
+        for hook_type in ("pre-commit", "pre-push"):
+            (hooks / hook_type).write_bytes(INSTALLER.canonical_body(prek, hook_type))
+        self.assertEqual(INSTALLER.superseded_managed_roles(hooks, prek), [])
+        # A body of no known set is refused, never re-anchored.
+        target = hooks / "post-merge.repro-managed"
+        target.write_bytes((LEGACY_FIXTURES[V0226] / "post-merge.repro-managed").read_bytes() + b"# foreign\n")
+        with self.assertRaisesRegex(RuntimeError, "unknown or modified managed hook template"):
+            INSTALLER.superseded_managed_roles(hooks, prek)
+
+    def test_bootstrap_reports_reanchoring_older_bodies_and_not_current_ones(self) -> None:
+        self.install_legacy_bodies(V0226)
+        result = self.run_installer(True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Re-anchoring managed hooks an older selected Repro wrote:", result.stdout)
+        self.current_values()
+        again = self.run_installer(True)
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertNotIn("Re-anchoring", again.stdout)
+        self.current_values()
+
+    def test_foreign_contract_body_of_no_known_set_is_refused_not_reanchored(self) -> None:
+        # A managed body with a valid shape but a contract token no selected
+        # package produced (a different, possibly newer build) is refused by
+        # the installer before any write, exactly as before re-anchoring.
+        self.install_legacy_bodies(V0226)
+        target = self.primary / ".git/hooks/pre-push.repro-managed"
+        body = target.read_bytes()
+        foreign = re.sub(rb"(reprobuild\.managed-hook\.v1\.[a-z-]+\.)[0-9a-f]{16}", rb"\g<1>0123456789abcdef", body)
+        self.assertNotEqual(foreign, body)
+        target.write_bytes(foreign)
+        self.assert_installer_refuses("unknown or modified", bootstrap=True)
 
     def rewrite_refusal_value(self, name: str, value: bytes) -> None:
         target = self.primary / ".git/hooks" / name
