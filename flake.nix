@@ -4,7 +4,12 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
-    reprobuild.url = "github:metacraft-labs/reprobuild/2e0c670b3a9f35e24d33a6235cc98de6d76ec3dd";
+    # The organisation's tool pins. The dev shell, the hook factory and CI
+    # run the Reprobuild that pins/reprobuild.json names; this lock records
+    # which revision of the pins, so `nix flake update metacraft-github-actions`
+    # is what moves it (tools/repro_hook_factory.py must then have a reviewed
+    # entry for the new revision).
+    metacraft-github-actions.url = "github:metacraft-labs/metacraft-github-actions/dev";
   };
 
   outputs =
@@ -12,8 +17,12 @@
       self,
       nixpkgs,
       flake-utils,
-      reprobuild,
+      metacraft-github-actions,
     }:
+    let
+      # The pin's flakeRef carries its rev and narHash, so it is locked.
+      reprobuild = builtins.getFlake metacraft-github-actions.pins.reprobuild.flakeRef;
+    in
     flake-utils.lib.eachDefaultSystem (
       system:
       let

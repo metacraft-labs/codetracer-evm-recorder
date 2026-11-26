@@ -91,10 +91,10 @@ jobs:
         # entries). Move these two pins by hand, to commits published on
         # their repositories; workflow_dispatch / repository_dispatch ref
         # inputs override them.
-        # setup-dev-env 5b9aecc, the revision ci-reprobuild.yml and
-        # ci-native-declared-checkout.yml pin, so one action revision serves
-        # every workflow of this repository.
-        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@5b9aeccf2027f74034229566ee51a59f1287e756
+        # setup-dev-env@dev, as ci-reprobuild.yml and
+        # ci-native-declared-checkout.yml take it, so one action revision
+        # serves every workflow of this repository.
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
         with:
           env-flavor: nix
           consumer-directory: ${{ env.EVM_CI_NAMESPACE }}/codetracer-evm-recorder

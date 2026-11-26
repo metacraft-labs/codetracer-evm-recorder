@@ -16,10 +16,27 @@ import errno
 import sys
 import tempfile
 import time
+from types import MappingProxyType
 
-PIN = '2e0c670b3a9f35e24d33a6235cc98de6d76ec3dd'
-LOCKED_SOURCE = {'type': 'github', 'owner': 'metacraft-labs', 'repo': 'reprobuild', 'rev': PIN, 'narHash': 'sha256-W1tsGhJc4yukbgou50dFgYq4AqpvN7fCqMGTy+Hwg3w=', 'lastModified': 1795413424}
-SOURCE_SHA = '4c77e5f509c534214f9682159c6c997699c74ee7a0222c1841a649fe22015fdc'
+# The selected Reprobuild is the organisation's pin: pins/reprobuild.json in the
+# metacraft-github-actions revision this repository's flake.lock records (the
+# flake reaches the package through it, with builtins.getFlake). The factory
+# admits only a pinned revision reviewed here: the NAR hash of its complete
+# source and the sha256 of its hook-factory module. A pin with no entry is
+# refused, so moving the lock to a new pin needs a new reviewed entry, and the
+# managed bodies of install-canonical-hooks.py measured from that package.
+#
+# - 37a109c4e1cf650e6eb79b11d9fadf6e49e64614, v0.2.36: narHash from the pin and
+#   `nix flake prefetch`; the module digest from `git show
+#   <rev>:libs/repro_cli_support/src/repro_cli_support.nim | sha256sum`,
+#   2026-11-26.
+PINS_INPUT = 'metacraft-github-actions'
+REVIEWED = MappingProxyType({
+    '37a109c4e1cf650e6eb79b11d9fadf6e49e64614': MappingProxyType({
+        'narHash': 'sha256-yX3J1U8U9zeexAQUSUhl/Dn3kFlMZAXyFZPsnVKXztg=',
+        'source_sha': 'f2eff59eb4474a600f72a8658e99fe03e7584a88ce5d35918eabe933822fd058',
+    }),
+})
 HOOKS = ('pre-commit', 'pre-push', 'post-commit', 'post-checkout', 'post-merge')
 
 
@@ -215,6 +232,31 @@ def selected_derivation_body(decoded, drv):
     return body
 
 
+def selected_pin(owner: Path, nix: Path, env: dict[str, str]) -> dict:
+    """The reviewed Reprobuild pin the owning flake.lock selects."""
+    lock = json.loads((owner / 'flake.lock').read_text())
+    node = lock['nodes']['root']['inputs'].get(PINS_INPUT)
+    if not isinstance(node, str):
+        raise RuntimeError('owning lock does not select the tool pins input')
+    locked = lock['nodes'][node]['locked']
+    if (locked.get('type'), locked.get('owner'), locked.get('repo')) != ('github', 'metacraft-labs', 'metacraft-github-actions') \
+            or not re.fullmatch(r'[0-9a-f]{40}', str(locked.get('rev'))) or not str(locked.get('narHash', '')).startswith('sha256-'):
+        raise RuntimeError('owning lock does not select an immutable tool pins revision')
+    attrs = ' '.join(f'{key} = {json.dumps(locked[key])};' for key in ('type', 'owner', 'repo', 'rev', 'narHash'))
+    tree = Path(terminal([str(nix), 'eval', '--raw', '--expr', '(builtins.fetchTree { ' + attrs + ' }).outPath'], owner, env))
+    if tree.parent != Path('/nix/store'):
+        raise RuntimeError('tool pins revision is outside immutable store authority')
+    pin = json.loads((tree / 'pins/reprobuild.json').read_text())
+    if (pin.get('schema'), pin.get('tool'), pin.get('owner'), pin.get('repo')) != (1, 'reprobuild', 'metacraft-labs', 'reprobuild'):
+        raise RuntimeError('tool pins revision has no Reprobuild pin of the known schema')
+    reviewed = REVIEWED.get(pin.get('rev'))
+    if reviewed is None:
+        raise RuntimeError('the pinned Reprobuild revision ' + str(pin.get('rev')) + ' has no reviewed hook-factory entry')
+    if pin.get('narHash') != reviewed['narHash']:
+        raise RuntimeError('the pinned Reprobuild source differs from the reviewed one')
+    return {'rev': pin['rev'], 'narHash': reviewed['narHash'], 'source_sha': reviewed['source_sha']}
+
+
 class SelectedFactory:
     def __init__(self, repro: Path, git: Path, owner: Path):
         self.owner = owner
@@ -225,15 +267,12 @@ class SelectedFactory:
             raise RuntimeError('declared factory package/source/derivation must be immutable Nix store roles')
         if repro.absolute() != package / 'bin/repro':
             raise RuntimeError('selected executable differs from the declared complete package')
-        lock = json.loads((owner / 'flake.lock').read_text())
-        node = lock['nodes']['root']['inputs']['reprobuild']
-        if not isinstance(node, str) or lock['nodes'][node]['locked'] != LOCKED_SOURCE:
-            raise RuntimeError('owning lock does not select the reviewed exact Repro source')
-        module = source / 'libs/repro_cli_support/src/repro_cli_support.nim'
-        if hashlib.sha256(module.read_bytes()).hexdigest() != SOURCE_SHA:
-            raise RuntimeError('declared actual factory source bytes differ')
         nix = Path(shutil.which('nix') or '')
         nix_store = Path(shutil.which('nix-store') or '')
+        self.pin = selected_pin(owner, nix, self.env)
+        module = source / 'libs/repro_cli_support/src/repro_cli_support.nim'
+        if hashlib.sha256(module.read_bytes()).hexdigest() != self.pin['source_sha']:
+            raise RuntimeError('declared actual factory source bytes differ')
         self.principals = {str(p): principal(p) for p in (repro, git, nix, nix_store, module)}
         if sys.platform == 'darwin':
             self.os_observer = Path('/bin/ps')
@@ -252,7 +291,7 @@ class SelectedFactory:
             self.principals[str(p)] = principal(p)
         # The runtime controller additionally binds ELF/Mach-O loader/dependency
         # closure before qualification; wrapper resolution alone is insufficient.
-        if terminal([str(nix), 'hash', 'path', '--sri', str(source)], owner, self.env) != LOCKED_SOURCE['narHash']:
+        if terminal([str(nix), 'hash', 'path', '--sri', str(source)], owner, self.env) != self.pin['narHash']:
             raise RuntimeError('complete selected source NAR differs from the reviewed immutable input')
         # Query the actual selected output's supported metadata instead of
         # injecting .drvPath string context into the consuming dev shell.
@@ -266,8 +305,9 @@ class SelectedFactory:
                                 for p in (owner / 'flake.nix', owner / 'flake.lock', Path(__file__))}
             principal_bindings = dict(self.principals)
             expression = ('let f = builtins.getFlake ' + json.dumps(str(owner)) + '; '
-                            'p = f.inputs.reprobuild.packages.${builtins.currentSystem}.default; '
-                            'in { drv = p.drvPath; out = p.outPath; source = toString f.inputs.reprobuild; }')
+                            'r = builtins.getFlake f.inputs.' + PINS_INPUT + '.pins.reprobuild.flakeRef; '
+                            'p = r.packages.${builtins.currentSystem}.default; '
+                            'in { drv = p.drvPath; out = p.outPath; source = toString r; }')
             evaluated = json.loads(terminal([str(nix), 'eval', '--impure', '--json', '--expr', expression], owner, self.env))
             if set(evaluated) != {'drv', 'out', 'source'} or evaluated['out'] != str(package):
                 raise RuntimeError('declared constructor does not select the exact actual output')
@@ -277,7 +317,7 @@ class SelectedFactory:
             if valid_deriver_path and restored_drv != drv:
                 raise RuntimeError('declared constructor differs from retained output deriver metadata')
             evaluated_source = Path(evaluated['source'])
-            if not str(evaluated_source).startswith('/nix/store/') or terminal([str(nix), 'hash', 'path', '--sri', str(evaluated_source)], owner, self.env) != LOCKED_SOURCE['narHash']:
+            if not str(evaluated_source).startswith('/nix/store/') or terminal([str(nix), 'hash', 'path', '--sri', str(evaluated_source)], owner, self.env) != self.pin['narHash']:
                 raise RuntimeError('declared constructor input differs from the exact locked source')
             if owner_bindings != {str(p): hashlib.sha256(p.read_bytes()).hexdigest()
                                     for p in (owner / 'flake.nix', owner / 'flake.lock', Path(__file__))} or any(principal(Path(p)) != value for p, value in principal_bindings.items()):
@@ -297,11 +337,11 @@ class SelectedFactory:
             raise RuntimeError('constructor source is outside immutable store authority')
         # Nix copies the input path under a new store name; full NAR identity,
         # not lexical path equality, binds every byte, mode and link target.
-        if terminal([str(nix), 'hash', 'path', '--sri', str(constructed_source)], owner, self.env) != LOCKED_SOURCE['narHash']:
+        if terminal([str(nix), 'hash', 'path', '--sri', str(constructed_source)], owner, self.env) != self.pin['narHash']:
             raise RuntimeError('complete constructor source differs from locked input')
         constructed_module = constructed_source / 'libs/repro_cli_support/src/repro_cli_support.nim'
         self.principals[str(constructed_module)] = principal(constructed_module)
-        if self.principals[str(constructed_module)]['sha256'] != SOURCE_SHA:
+        if self.principals[str(constructed_module)]['sha256'] != self.pin['source_sha']:
             raise RuntimeError('actual constructor factory module differs')
         output = body['outputs']['out']['path']
         # This selected Nix schema reports a store basename; accept precisely

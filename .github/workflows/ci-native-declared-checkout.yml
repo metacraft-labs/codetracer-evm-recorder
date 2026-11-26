@@ -106,25 +106,16 @@ jobs:
           printf '%s\n' "$git_root/bin" >> "$GITHUB_PATH"
 
       - name: Setup dev env
-        # setup-dev-env 5b9aecc: the source-built Reprobuild's RunQuota, io-mon
-        # and hook-library siblings default to the revisions that
-        # repro-build-pin's flake.lock records (reprobuild-provision f283d45),
-        # not to their `dev` tips: 2e0c670b3a (v0.2.35) locks RunQuota
-        # 6ff97313, which is on `runquota@agents` and not on `runquota@dev`
-        # (checked 2026-11-24). It keeps c5ca015a's repro-version support,
-        # credential broker and single credential header.
-        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@5b9aeccf2027f74034229566ee51a59f1287e756
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
         env:
           EVM_CI_GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
         with:
           env-flavor: ${{ inputs.env-flavor }}
           sibling-strategy: repro-lock
-          # reprobuild v0.2.35 (2e0c670b3a), the revision the owning flake.nix
-          # selects. Every leg here is Unix and builds that commit from source;
-          # repro-version names the same release for the record.
-          repro-from-source: "true"
-          repro-version: v0.2.35
-          repro-build-pin: "2e0c670b3a9f35e24d33a6235cc98de6d76ec3dd"
+          # The Reprobuild engine is the fleet pin, the action's default:
+          # `pins/reprobuild.json` in metacraft-labs/metacraft-github-actions,
+          # the pin the owning flake.nix also selects (through its
+          # metacraft-github-actions input), with the siblings it locks.
           consumer-directory: ${{ env.EVM_CI_NAMESPACE }}/codetracer-evm-recorder
           workspace-directory: ${{ env.EVM_CI_NAMESPACE }}
           gh-token: ${{ steps.app-token.outputs.token }}

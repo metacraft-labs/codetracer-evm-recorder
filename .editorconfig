@@ -36,5 +36,5 @@ indent_size = unset
 indent_size = unset
 
 # Byte-exact captured hook bodies; the ownership test pins them to their legacy hashes.
-[{tests/fixtures/legacy-managed-hooks-a650b20/pre-commit,tests/fixtures/legacy-managed-hooks-9dbf4e7/pre-commit,tests/fixtures/legacy-managed-hooks-7c670d2/pre-commit,tests/fixtures/legacy-managed-hooks-b9cf09b/pre-commit}]
+[{tests/fixtures/legacy-managed-hooks-a650b20/pre-commit,tests/fixtures/legacy-managed-hooks-9dbf4e7/pre-commit,tests/fixtures/legacy-managed-hooks-7c670d2/pre-commit,tests/fixtures/legacy-managed-hooks-b9cf09b/pre-commit,tests/fixtures/legacy-managed-hooks-2e0c670/pre-commit}]
 indent_size = unset

@@ -109,14 +109,8 @@ jobs:
           printf '%s\n' "$git_root/bin" >> "$GITHUB_PATH"
 
       - name: Setup dev env (reprobuild flavor)
-        # setup-dev-env 5b9aecc: the source-built Reprobuild's RunQuota, io-mon
-        # and hook-library siblings default to the revisions that
-        # repro-build-pin's flake.lock records (reprobuild-provision f283d45),
-        # not to their `dev` tips: 2e0c670b3a (v0.2.35) locks RunQuota
-        # 6ff97313, which is on `runquota@agents` and not on `runquota@dev`
-        # (checked 2026-11-24). It keeps c5ca015a's repro-version support,
-        # credential broker and single credential header.
-        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@5b9aeccf2027f74034229566ee51a59f1287e756
+        id: dev-env
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
         env:
           EVM_CI_GITHUB_TOKEN: ${{ matrix.os != 'windows' && steps.ci_token.outputs.token || '' }}
         with:
@@ -124,17 +118,11 @@ jobs:
           sibling-strategy: ${{ matrix.os != 'windows' && 'repro-lock' || 'auto' }}
           consumer-directory: ${{ matrix.os != 'windows' && format('{0}/codetracer-evm-recorder', env.EVM_CI_NAMESPACE) || '.' }}
           workspace-directory: ${{ matrix.os != 'windows' && env.EVM_CI_NAMESPACE || '.' }}
-          # reprobuild v0.2.35 (2e0c670b3a) on every leg, the same revision the
-          # owning flake.nix selects for the dev shell and hook factory. Unix
-          # legs build that commit from source and the step below asserts it;
-          # Windows x64 installs the v0.2.35 release archive, and Windows arm64
-          # runs that x86_64 archive under emulation. It keeps the v0.2.23 fix
-          # for the PATH-provisioned gcc probe that failed on Windows with
-          # "Invalid argument", and reads the committed repro.lock schema
-          # (reprobuild.solved-graph-lock.v3).
-          repro-from-source: ${{ matrix.os != 'windows' && 'true' || 'false' }}
-          repro-version: v0.2.35
-          repro-build-pin: "2e0c670b3a9f35e24d33a6235cc98de6d76ec3dd"
+          # The Reprobuild engine is the fleet pin, the action's default:
+          # `pins/reprobuild.json` in metacraft-labs/metacraft-github-actions,
+          # the pin the owning flake.nix also selects for the dev shell and
+          # hook factory (through its metacraft-github-actions input), built
+          # against the siblings it locks. The step below asserts it.
           gh-token: ${{ steps.ci_token.outputs.token }}
           # Keeps the Nix GitHub credential valid past the token's one-hour
           # lifetime: a job-scoped broker re-mints it while setup and the
@@ -147,16 +135,29 @@ jobs:
           attic-cache: ${{ vars.ATTIC_CACHE }}
           attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
 
-      - name: Assert newly built source and helper identity
+      - name: Assert the pinned engine and helper identity
+        # setup-dev-env reports the engine it installed. It is the pin, not an
+        # override, and a source build (macOS; Linux when the binary cache
+        # misses) is a clean checkout of that commit. A Linux cache hit
+        # installs the pinned commit's Nix package, which has no checkout.
         if: matrix.os != 'windows'
         shell: bash
+        env:
+          REPRO_COMMIT: ${{ steps.dev-env.outputs.repro-commit }}
+          REPRO_ORIGIN: ${{ steps.dev-env.outputs.repro-origin }}
+          REPRO_INSTALL_SOURCE: ${{ steps.dev-env.outputs.repro-install-source }}
         run: |
           set -euo pipefail
-          source_root="${GITHUB_WORKSPACE}/${EVM_CI_NAMESPACE}/.reprobuild-src"
-          test "$(git -C "$source_root" rev-parse HEAD)" = 2e0c670b3a9f35e24d33a6235cc98de6d76ec3dd
-          test -z "$(git -C "$source_root" status --porcelain)"
-          test "$(command -v repro)" = "${source_root}/build/bin/repro"
-          test "${REPROBUILD_NIX_DAEMON_BIN}" = "${source_root}/build/bin/reprobuild-nix-daemon"
+          echo "repro ${REPRO_COMMIT} (origin ${REPRO_ORIGIN}, ${REPRO_INSTALL_SOURCE})"
+          [[ "${REPRO_COMMIT}" =~ ^[0-9a-f]{40}$ ]]
+          test "${REPRO_ORIGIN}" = pin
+          if [ "${REPRO_INSTALL_SOURCE}" = source ]; then
+            source_root="${GITHUB_WORKSPACE}/${EVM_CI_NAMESPACE}/.reprobuild-src"
+            test "$(git -C "$source_root" rev-parse HEAD)" = "${REPRO_COMMIT}"
+            test -z "$(git -C "$source_root" status --porcelain)"
+            test "$(command -v repro)" = "${source_root}/build/bin/repro"
+            test "${REPROBUILD_NIX_DAEMON_BIN}" = "${source_root}/build/bin/reprobuild-nix-daemon"
+          fi
           test -x "${REPROBUILD_NIX_DAEMON_BIN}"
           "${REPROBUILD_NIX_DAEMON_BIN}" --help
           repro --version
