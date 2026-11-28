@@ -200,6 +200,35 @@ class CommonHooksOwnership(unittest.TestCase):
                 self.assertEqual(sample.read_bytes(), original)
                 self.assertEqual(stat.S_IMODE(sample.stat().st_mode), original_mode)
 
+    def test_samples_another_git_build_wrote_bootstrap(self) -> None:
+        # A CI runner's Git writes its own SHELL_PATH and PERL_PATH into the
+        # samples of a clone it makes; the shell's Git then finds samples it
+        # did not write itself. Rewrite this checkout's samples the way such
+        # a build writes them (/bin/sh-style interpreter, /usr/bin/perl): the
+        # bootstrap still runs and leaves every sample byte for byte.
+        hooks = self.primary / ".git/hooks"
+        samples = sorted(hooks.glob("*.sample"))
+        self.assertTrue(samples, "git init wrote no samples")
+        for sample in samples:
+            first, newline, rest = sample.read_bytes().partition(b"\n")
+            interpreter = b"#!/usr/bin/perl" if first.endswith(b"/perl") else b"#!/run/current-system/sw/bin/sh"
+            rest = re.sub(rb"[^\s'\"]*/perl(?=\s)", b"/usr/bin/perl", rest)
+            sample.write_bytes(interpreter + newline + rest)
+            sample.chmod(0o755)
+        written = {sample.name: sample.read_bytes() for sample in samples}
+        repro = os.environ.get("REPROBUILD_REPRO") or shutil.which("repro")
+        if not repro:
+            self.fail("missing declared matching engine")
+        env = os.environ.copy()
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        result = subprocess.run(
+            [os.sys.executable, str(self.primary / "tools/install-canonical-hooks.py"),
+                "--bootstrap-managed", "--repro", repro], cwd=self.primary,
+            env=env, capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual({sample.name: sample.read_bytes() for sample in samples}, written)
+
     def test_unknown_managed_body_refuses_before_writes(self) -> None:
         hook = self.primary / ".git/hooks/pre-commit"
         hook.write_bytes(b"#!/usr/bin/env sh\n# reprobuild hook dispatcher protocol=2\n# deliberate modified fixture\n")

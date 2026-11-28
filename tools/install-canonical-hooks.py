@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import subprocess
@@ -288,6 +289,85 @@ KNOWN_GIT_PRE_PUSH_SAMPLE_BODIES = {
 
 KNOWN_GIT_SAMPLES = {'applypatch-msg.sample': ['37ca5da86ab699db4572609ab0fb2d2d072dd254f4d3b5d56c21193ba44eccce', 'eff2c3264abcf88b09cbcd9fdf9e3770c01d2c0932b698f3f2bd5fc50bb8812f'], 'commit-msg.sample': ['2c1bb732a515631875c2b4bb54311077e8028c4efca3ebe596133932fa520340', '3a75e6e4575b274a47d898b2e63de06fceecd125e510231eb1bd84110fd081b1'], 'fsmonitor-watchman.sample': ['3ee619bc7217025d5a9c92785c3e9fd313bedaeb981c4f79f1f1fb802b80fdbf', '6512786c6b67dc73acfb070cc7597c2d09940afaaddcc2ea45b7d39e6f510ab7'], 'post-update.sample': ['f02167601f61d3a7f2725e94c790cf0f56c729bd63d96e0cbbcadca05a33502b', 'f8192e86efc5a8130e7f5cbdd9122872a29880da5cfff51378478080622da332'], 'pre-applypatch.sample': ['cd92ca930f95859f23a676b64bd8e0159519efba814b40f8be01bb523b858494', 'dab0584577cc1f1425637051b252911787dda69ebe77bb5baa09cf5c6eefa5eb'], 'pre-commit.sample': ['338daa45efd853599a97e0c84d0feb5863797ccb8b85572e92d10d8461269ab6', '8648b08f9877b0099aec8d90b92df1b9a292c067744a8964ceb747668e9fbc90'], 'pre-merge-commit.sample': ['474c16b6e8b61c7f590fdb67374b8ceb37b58025897b7e9469a6420f183715d1', '52ce5ef56a85753cb2891c2f1274cd14a287e8ba6e47f1cd4f0e67991238e662'], 'pre-push.sample': ['212424610fb7562dfc6274e127946f529de19bf0c73744860be2c55247925668', 'f35ff977f07f76b61e0ebc047bf500793d22d95fbcf86c6ab95561b6ba339bc8'], 'pre-rebase.sample': ['285f0a7d7d24b6afab04d3bed7513d109604bb4702c995ea23e9018f5c9c5bcf', '48aa7f470363e8ac81bc7707f7b935044f17e37c430a64008ef9ca6760035eb3'], 'pre-receive.sample': ['1289c1d78d0ad7630cf7ea9f19e8e9f991a8d1565116beaf38e169ae946c099f', 'a6a6547077617556bd6a5729575ec0f003c80cac264439968c459c74d00b0020'], 'prepare-commit-msg.sample': ['1704a1edd6fae6c84dda7bbe1b5b1d0f61a860439d7b58e2659f61b7ba6f3418', '880a38d177f8143b5c062ca476ef34f4967c58121251e4648a3e9ec9629f6803'], 'push-to-checkout.sample': ['0ac671c7451352f26be3caabab354fad20bdcc2d2bf7edf026fd0655176a8728', '87760462f0a17b21b294e5a8a34e8d64699af0bd41c91940e2fa6b5251757348'], 'sendemail-validate.sample': ['3e63147e70eee60bb9cf57adafb5ba219cc9e6609ee334d294729658e9b14822', 'a6b824290d15ffe0dbdb4cc856d86ac541ae300cb86b7b183df6a6ca2d35065c'], 'update.sample': ['8b72d6efcbeb4cf670120f40a940ef06b716e8befe4801ede61042bb18738156', 'd8e942bf3c04c29bf6b5ec3f72cc7ea640dcf600e0e8bed97cb71be5500c43e3']}
 
+# A sample's bytes depend on the Git BUILD that wrote it, not only on its
+# release: Git's Makefile writes the build's SHELL_PATH into the interpreter
+# line and its PERL_PATH where the template says @PERL_PATH@. So a clone made
+# by a runner's Git (another Nix store path, or /bin/sh and /usr/bin/perl)
+# carries samples that match none of the exact digests above, although nobody
+# modified them, and they refused the dev shell on the CI runners (codetracer
+# run 45822112077: "modified pre-push hook body or mode: pre-push.sample").
+# A sample is therefore also genuine when, with those two substitutions undone,
+# it is a template of a Git release: the digests below are of the upstream
+# templates/hooks/<name> of v2.48.0 to v2.56.1, normalised the same way. Any
+# other change to a sample's text still refuses.
+_PERL_PATH = re.compile(rb"[^\s'\"]*/perl(?=\s)")
+
+
+def normalized_sample_digest(body: bytes) -> str:
+    """The digest of a sample with the build's interpreter and perl undone."""
+    first, newline, rest = body.partition(b"\n")
+    if first.startswith(b"#!"):
+        first = b"#!"
+    rest = _PERL_PATH.sub(b"@PERL_PATH@", rest)
+    return hashlib.sha256(first + newline + rest).hexdigest()
+
+
+GIT_SAMPLE_TEMPLATE_DIGESTS = {
+    'applypatch-msg.sample': frozenset({
+        'd0803308443f297908dd6c80bd516d5523e76a81ee21d9fc93b56c5e1bb478c9',
+    }),
+    'commit-msg.sample': frozenset({
+        'cdef5b3d7adba05de97120a2c10a92eecd121fa4706e9818ee93ab8f89cf559b',
+        'ec8dc0cc7cf33888eb171796281cfccfd5edff57cf735245cf3480f723e48fde',
+    }),
+    'fsmonitor-watchman.sample': frozenset({
+        '0855f9391e463e073b42a58ca101bda847201ea4d4c1910b2b033b344c2fc51f',
+        '0fd93cbbf79bc785f4164685e8c305258ce0b4455180bbd2841b9e04a4a036f9',
+    }),
+    'post-update.sample': frozenset({
+        '31478be220efe000db57de15480c3a249cfdfbbfb53fea30af50639e448b8e94',
+    }),
+    'pre-applypatch.sample': frozenset({
+        'aee50b33463a7d9572ffce630ca60fb7c9337c461802afe72d6a5efaefc7bafb',
+    }),
+    'pre-commit.sample': frozenset({
+        'be104aca74e52d4989833cff7a11a4d1e19b4ca982462a0e9202af42204b5936',
+    }),
+    'pre-merge-commit.sample': frozenset({
+        'be68f457a8e877541227dd6caa48bd694971ef1c41beecf385790a21a8f4d83d',
+    }),
+    'pre-push.sample': frozenset({
+        '01a9f0a564b3815dc1b0460408457fd565d20b3082a346a728f9fad4b71e6e28',
+    }),
+    'pre-rebase.sample': frozenset({
+        '90e828974599563d1cdca9335c3bd3295d10dea814a1968367dbc3d31eca5309',
+    }),
+    'pre-receive.sample': frozenset({
+        '46d6ef589df32f73f25493177472ac1ec743aa55c50ae4955fdbefc0b21073a4',
+    }),
+    'prepare-commit-msg.sample': frozenset({
+        '784dc61cc33464db6b54290a4de710bd4bea15d47454c5743c67ef582d2221bf',
+    }),
+    'push-to-checkout.sample': frozenset({
+        '2ac5a8af259bb3e8d3594fce206fa4244d752d8228109d76d8c843d8c5550d47',
+    }),
+    'sendemail-validate.sample': frozenset({
+        'e06b500ca4b4fba4af22e8550307905ddd319d5bbe5199f1c38050555c20d77e',
+    }),
+    'update.sample': frozenset({
+        'b31202d9ebca1e943392b9563446f50b08deeaa22b4390753a2fba0198537f02',
+    }),
+}
+
+
+def genuine_git_sample(name: str, body: bytes, exact: "set[str] | list[str] | frozenset[str]") -> bool:
+    """Whether `body` is Git's own `name`: one of the exact digests, or a Git
+    release's template as some Git build wrote it."""
+    if hashlib.sha256(body).hexdigest() in exact:
+        return True
+    return normalized_sample_digest(body) in GIT_SAMPLE_TEMPLATE_DIGESTS.get(name, frozenset())
+
+
 def complete_hook_inventory(hooks: Path, prek: str, factory: SelectedFactory | None = None,
                             root: Path | None = None) -> dict[str, tuple[bytes, int]]:
     if factory is not None:
@@ -311,7 +391,7 @@ def complete_hook_inventory(hooks: Path, prek: str, factory: SelectedFactory | N
         if path.name == "pre-commit":
             allowed = allowed or body in (native_generated_body(prek), canonical_body(prek))
         if path.name in KNOWN_GIT_SAMPLES:
-            allowed = digest in KNOWN_GIT_SAMPLES[path.name] or (
+            allowed = genuine_git_sample(path.name, body, KNOWN_GIT_SAMPLES[path.name]) or (
                 factory is not None and factory.samples.get(path.name) == (body, mode)
             )
         if path.name in ("pre-commit.repro-local", "pre-push.repro-local"):
@@ -353,7 +433,7 @@ def pre_push_inventory(
         mode = stat.S_IMODE(metadata.st_mode)
         digest = hashlib.sha256(body).hexdigest()
         if sample:
-            qualified_body = digest in KNOWN_GIT_PRE_PUSH_SAMPLE_BODIES or (
+            qualified_body = genuine_git_sample(path.name, body, KNOWN_GIT_PRE_PUSH_SAMPLE_BODIES) or (
                 factory is not None and factory.samples.get(path.name) == (body, mode))
         elif path.name == "pre-push.repro-local":
             qualified_body = False
